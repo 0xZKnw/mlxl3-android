@@ -71,12 +71,18 @@ class StudioScreenTest {
             ViewCompat.getRootWindowInsets(compose.activity.window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true
         }
         compose.onNodeWithContentDescription("Message LFM3").performTextInput("Première ligne\nDeuxième ligne\nTroisième ligne")
+        // IME/window updates continue outside Compose; measure after they settle.
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(300, 5_000)
         compose.waitForIdle()
         val view = compose.activity.window.decorView
         val keyboardHeight = requireNotNull(ViewCompat.getRootWindowInsets(view)).getInsets(WindowInsetsCompat.Type.ime()).bottom
         assertTrue("A real software keyboard must be visible", keyboardHeight > 0)
         val composer = compose.onNodeWithTag("composer").fetchSemanticsNode().boundsInWindow
-        assertTrue("Composer overlaps the keyboard: $composer", composer.bottom <= view.height - keyboardHeight + 2f)
+        val keyboardTop = view.height - keyboardHeight
+        val gap = keyboardTop - composer.bottom
+        assertTrue("Composer must sit just above the keyboard: gap=$gap, composer=$composer, window=${view.height}, ime=$keyboardHeight",
+            gap >= -2f && gap <= 12f * view.resources.displayMetrics.density)
+        compose.onAllNodesWithText("MLXL3").onFirst().assertIsDisplayed()
         assertTrue("The input and send control must remain fully visible", composer.height > 80f)
         compose.onNodeWithContentDescription("Envoyer").assertIsDisplayed().assertIsEnabled()
         screenshot("keyboard.png")

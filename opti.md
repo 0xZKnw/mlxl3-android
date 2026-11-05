@@ -71,3 +71,21 @@
 - État : code local validé dans ces domaines, publication groupée autorisée
   et CIexacte à inspecter ; pas de release ni gain de vitesse revendiqué.
   S24/poids1.7B/pariténumériquecomplète/mémoire/thermique restent non vérifiés.
+
+#### Publication7af1cf7 et résultatGitHub
+
+- Source7af1cf7c61a9c9780f289d95cef217bd27834756 poussée conformément à la
+  demande ; run https://github.com/0xZKnw/mlxl3-android/actions/runs/42122762917
+  **4jobs réussis** : APK,Vulkan,UI,Kani. Les essaisANDROID-NUM-03 et
+  ANDROID-CI-02 sont **validés et intégrés** dans ces domaines ; aucune attente
+  shader ni divergenceMesa. JobAPK5min29 ; caches/réseaudifférents, pas de gain
+  reproductible revendiqué. Log `build/ci-7af-complete.log`.
+- APKCI téléchargé : checksum748f7681faa4789faefd82994566b0f679b62e02b859bb8ed0b586e8ee5c610f
+  conforme au manifeste ; apksigner et zipalign16K réussis. Source et APK
+  expérimentaux publics, aucune release/appS24installée.
+- CaptureIMEGitHub320x640 : composer visible mais trop haut ; assertioninitiale
+  seulement anti-chevauchement insuffisante. Test renforcé sur proximité<=12dp
+  et headervisible, attentebornée d’événementsIME. Suite5tests locale320x640
+  réussie ; pas de modification du design approuvé. Premier ajoutducontrôle
+  header a sélectionné2labelsMLXL3, assertioncorrigée vers le premierheader
+  (`build/ui-small-regression.log`, `ui-small-final.log`, `ui-small-suite.log`).

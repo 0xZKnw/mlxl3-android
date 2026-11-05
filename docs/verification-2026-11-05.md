@@ -64,3 +64,23 @@ concurrency, memory usage, or complete-model generation.
 Physical S24/Xclipse behavior, full 1.7B numeric state/logit parity, real process
 memory, throughput and thermal behavior remain unverified. No speed campaign,
 phone installation or release was performed. See s24-validation.md.
+
+## GitHub qualification
+
+[Run 42122762917](https://github.com/0xZKnw/mlxl3-android/actions/runs/42122762917)
+for source `7af1cf7c61a9c9780f289d95cef217bd27834756`: **all four jobs pass**
+(APK, Vulkan, UI, Kani). APK job duration 5m29s; cache/network conditions differ
+from earlier runs, so this is not a reproducible speed comparison. Vulkan
+executes all four explicitly selected GPU tests; the UI runs five tests.
+
+Downloaded CI APK SHA-256:
+`748f7681faa4789faefd82994566b0f679b62e02b859bb8ed0b586e8ee5c610f`.
+Checksum agrees with the artifact manifest; signature and 16KiB zip alignment
+verify locally. Artifact `MLXL3-Android-7af1cf7c61a9c9780f289d95cef217bd27834756`
+expires after 14 days.
+
+The GitHub 320x640 IME screenshot showed the composer higher than expected,
+although the overlap-only assertion passed. The regression check now also
+requires a gap no greater than 12dp and a visible header, and waits for platform
+IME events to settle before measuring. The strengthened five-test suite passes
+locally at 320x640 / mdpi. This qualification changes tests, not the approved UI.
