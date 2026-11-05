@@ -147,3 +147,48 @@
 - Consultation du chat « Consulter l’issue75 » : profilageAR39Desktop/M5 en
   préparation. Aucun benchmarkAndroid ni modèleGPUsupplémentaire lancé.
   Vérifications lourdes suivantes déportées enCI pour laisser le Mac libre.
+
+### ANDROID-PERF-2026-11-06-05 — table de codebooks EXL3 — préenregistré
+
+- Demande : prefill et decode « ultra lents » sur S24. Aucun débit/timing
+  téléphone fourni. HistoriqueAndroid relu : pas de campagneperf précédente,
+  seulement testscomposants ; poidsGPU déjà résidents, head ignoré pendant les
+  tokensintermédiaires du prefill. Ne pas prétendre corriger ces coûts déjà évités.
+- Hypothèse : recalculer FP16/codebook pour chaque poids consomme des opérations
+  répétées ; tableimmuable de3*65536float32 (786432octets, pas de poidsdense)
+  calculée unefois au chargement, shaderlit la même valeur. Aucun changement
+  format, ordreFMA/réduction, synchronisation, tokenizer, attention ou caches.
+- Baseline moteur3358834/7af1cf7, shaderprocedural expliciteRTE conservé comme
+  oracle de tests ; hashsha256qmv=a3fae6f6c7023ebc51f4500fd9cc2ed1044b6fd96375d3c890ba9585e0f3f732,
+  hashsha256codebook=7a18468ca457e73fca85d5b0395e0c4f97033c78eb8a0e0faf87acdeeadb29d2.
+- Protocole AVANT prototype : vérifier196608sorties lookup/procédural/codecCPU
+  bit-à-bit,24QMV contreoracleCPU et pipelineprocedural, fixtures nonnulles
+  LFM3/reinit/annulation/budgets. Kaniindex table complet(u16state,u32codebook),
+  fmt/Clippy/testCPU/SPIR-V/buildARM64. Aucune preuveGPU complète revendiquée.
+- Mesure conditionnelle APRÈS correction seulement : microbenchmarkCI Mesa,
+  formes2048x2048,2048x6144,2048x7680 et7680x2048,4bit,troiscodebooks,
+  buffersidentiques/nonvides, warmup2 et7paires alternées procédural/lookup,
+  commandes terminées par fence, tempshôte ms/matvec, médianes par variante,
+  égalitébit-à-bit préalable et aprèssérie. Pas de compilation pendantmesure,
+  unGPU/un modèlefixture à la fois. Source/outils/device/conditions/empreintes
+  et résultatsbruts conservés. Échec ou divergence interdit gain/validation.
+- Aucun benchmarklocal/MoltenVK/S24 pendant le profilageAR39Desktop de l’autre
+  chat ; CIlogicielle ne démontre aucun gain physiqueAndroid. Décisionintégration
+  conditionnée à correction et absence de régressionlogicielle ; gainS24 reste
+  nonmesuré. Mémoiretable allouée annoncée séparément du picprocessus.
+
+#### Révision candidats du 6 novembre — vérificationsCI à lancer
+
+- UIed5152b/run42126372473 : nouveauchamp+libérationfocus seul **échoue**
+  encore au second cycleIME, gap190px (`build/ci-ed5-ui.log`), effet retiré.
+  Essai suivant : champstateful et ajustementfenêtre ADJUST_NOTHING Android11+,
+  ADJUST_RESIZE conservé Android9/10 ; configuration partagée production/tests
+  pour éviter qu’un testvalide une fenêtre différente. Les essais précédents
+  du mode seul sur ancienchamp n’étaient pas suffisants ; combinaison nonencore
+  validée. Assertiondiagnostique conserve modefenêtre et tolérance12dp inchangée.
+- PERF05 : table786432octets et shaderlookup intégrés **prototype local**,
+  oracleprocedural antérieur conservé sousmacrotest et inclus seulement dans
+  les binairesdetest. HarnaisKaniindex + testCPUtable + GPU196608valeurs et
+  benchmarkalterné12cas prêts. Aucun code moteur compilé ni benchmark local
+  lancé ; fmt/actionlint/diffcheck légers réussis. CIcorrectness AVANT mesure,
+  rapportmicro séparé. Pas de déclaration de gain S24 à ce stade.

@@ -4,10 +4,7 @@ import android.content.ContentValues
 import android.graphics.Bitmap
 import android.os.Build
 import android.provider.MediaStore
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
-import androidx.activity.SystemBarStyle
-import androidx.activity.enableEdgeToEdge
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -25,13 +22,8 @@ class StudioScreenTest {
     private val answer = "Oui. LFM3 tourne directement sur ton téléphone, avec le moteur EXL3 de MLXL3."
     private val conversation get() = listOf(ChatMessage("user", "Salut, tu fonctionnes en local ?"), ChatMessage("assistant", answer))
 
-    @Suppress("DEPRECATION") // Match the production resize mode, including Android 9/10.
     @Before fun prepareWindow() {
-        compose.activityRule.scenario.onActivity {
-            it.enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-                navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
-            it.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        }
+        compose.activityRule.scenario.onActivity { it.configureStudioWindow() }
         InstrumentationRegistry.getInstrumentation().uiAutomation
             .executeShellCommand("settings put secure show_ime_with_hard_keyboard 1").close()
     }
@@ -96,7 +88,7 @@ class StudioScreenTest {
         val composer = compose.onNodeWithTag("composer").fetchSemanticsNode().boundsInWindow
         val keyboardTop = view.height - keyboardHeight
         val gap = keyboardTop - composer.bottom
-        assertTrue("Composer must sit just above the keyboard: gap=$gap, composer=$composer, window=${view.height}, ime=$keyboardHeight",
+        assertTrue("Composer must sit just above the keyboard: gap=$gap, composer=$composer, window=${view.height}, ime=$keyboardHeight, mode=${compose.activity.window.attributes.softInputMode}",
             gap >= -2f && gap <= 12f * view.resources.displayMetrics.density)
         compose.onAllNodesWithText("MLXL3").onFirst().assertIsDisplayed()
         assertTrue("The input and send control must remain fully visible", composer.height > 80f)

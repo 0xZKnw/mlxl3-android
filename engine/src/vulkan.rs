@@ -1,4 +1,5 @@
 //! Synchronous batch-one compute; no subgroup-size or FP16 extension requirement.
+use crate::codec::{self, Codebook};
 use anyhow::{Context, Result, bail, ensure};
 use ash::{Entry, vk};
 use std::{
@@ -8,6 +9,27 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+
+const CODEBOOK_BYTES: usize = 3 * 65536 * 4;
+
+fn codebook_offset(codebook: u32, state: u16) -> Option<usize> {
+    if codebook >= 3 {
+        return None;
+    }
+    Some((codebook as usize * 65536 + usize::from(state)) * 4)
+}
+
+fn codebook_table() -> Vec<u8> {
+    let mut table = vec![0; CODEBOOK_BYTES];
+    for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
+        for state in 0..=u16::MAX {
+            let offset = codebook_offset(cb as u32, state).expect("valid codebook");
+            table[offset..offset + 4]
+                .copy_from_slice(&codec::decode_codeword(state, cb).to_f32().to_le_bytes());
+        }
+    }
+    table
+}
 
 struct Instance {
     _entry: Entry,
@@ -111,6 +133,7 @@ pub struct Gpu {
     dense: vk::Pipeline,
     input: Option<Buffer>,
     output: Option<Buffer>,
+    codebooks: Option<Buffer>,
     pub name: String,
     pub max_range: usize,
     max_groups: u32,
@@ -200,6 +223,7 @@ impl Gpu {
             dense: vk::Pipeline::null(),
             input: None,
             output: None,
+            codebooks: None,
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
                 .to_string_lossy()
                 .into_owned(),
@@ -222,7 +246,7 @@ impl Gpu {
                     .command_buffer_count(1),
             )?[0];
             gpu.fence = d.create_fence(&vk::FenceCreateInfo::default(), None)?;
-            let bindings: Vec<_> = (0..3)
+            let bindings: Vec<_> = (0..4)
                 .map(|i| {
                     vk::DescriptorSetLayoutBinding::default()
                         .binding(i)
@@ -237,7 +261,7 @@ impl Gpu {
             )?;
             let sizes = [vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 3,
+                descriptor_count: 4,
             }];
             gpu.descriptor_pool = d.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -265,6 +289,7 @@ impl Gpu {
         gpu.dense = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense.spv")))?;
         gpu.input = Some(gpu.buffer(&vec![0; 32768 * 4])?);
         gpu.output = Some(gpu.buffer(&vec![0; 32768 * 4])?);
+        gpu.codebooks = Some(gpu.buffer(&codebook_table())?);
         Ok(gpu)
     }
 
@@ -450,6 +475,10 @@ impl Gpu {
         );
         let input = self.input.as_ref().context("GPU input unavailable")?;
         let output = self.output.as_ref().context("GPU output unavailable")?;
+        let codebooks = self
+            .codebooks
+            .as_ref()
+            .context("GPU codebooks unavailable")?;
         let bytes = |values: &[f32]| unsafe {
             std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
         };
@@ -466,6 +495,9 @@ impl Gpu {
                 [vk::DescriptorBufferInfo::default()
                     .buffer(output.raw)
                     .range(output.size as u64)],
+                [vk::DescriptorBufferInfo::default()
+                    .buffer(codebooks.raw)
+                    .range(codebooks.size as u64)],
             ];
             let writes: Vec<_> = infos
                 .iter()
@@ -551,7 +583,21 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{self, Codebook};
+
+    #[test]
+    fn codebook_table_has_all_finite_values_and_checked_offsets() {
+        let table = codebook_table();
+        assert_eq!(table.len(), CODEBOOK_BYTES);
+        assert!(
+            table
+                .chunks_exact(4)
+                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite())
+        );
+        assert_eq!(codebook_offset(0, 0), Some(0));
+        assert_eq!(codebook_offset(2, u16::MAX), Some(CODEBOOK_BYTES - 4));
+        assert_eq!(codebook_offset(3, 0), None);
+        assert_eq!(codebook_offset(u32::MAX, u16::MAX), None);
+    }
 
     #[test]
     #[ignore = "requires Vulkan; exhaustive EXL3 procedural codebook parity"]
@@ -559,6 +605,12 @@ mod tests {
         let mut gpu = Gpu::new().unwrap();
         let pipeline = gpu
             .pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/codebook.spv")))
+            .unwrap();
+        let reference = gpu
+            .pipeline(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/codebook_reference.spv"
+            )))
             .unwrap();
         let dummy = gpu.buffer(&[0; 4]).unwrap();
         for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
@@ -572,10 +624,25 @@ mod tests {
                         32768,
                     )
                     .unwrap();
+                let procedural = gpu
+                    .compute(
+                        reference,
+                        &dummy,
+                        &[0.],
+                        [offset, 32768, 0, cb as u32],
+                        32768,
+                    )
+                    .unwrap();
                 assert_eq!(values.len(), 32768);
+                assert_eq!(procedural.len(), values.len());
                 for (i, actual) in values.iter().enumerate() {
                     let state = (offset as usize + i) as u16;
                     let expected = codec::decode_codeword(state, cb).to_f32();
+                    assert_eq!(
+                        actual.to_bits(),
+                        procedural[i].to_bits(),
+                        "GPU procedural/lookup {cb:?} state={state}"
+                    );
                     assert_eq!(
                         actual.to_bits(),
                         expected.to_bits(),
@@ -584,6 +651,117 @@ mod tests {
                 }
             }
         }
-        unsafe { gpu.device.raw.destroy_pipeline(pipeline, None) };
+        unsafe {
+            gpu.device.raw.destroy_pipeline(pipeline, None);
+            gpu.device.raw.destroy_pipeline(reference, None);
+        };
+    }
+
+    #[test]
+    #[ignore = "explicit projection microbenchmark; not a phone performance claim"]
+    fn benchmark_codebook_lookup_against_procedural() {
+        use std::time::Instant;
+        let mut gpu = Gpu::new().unwrap();
+        let reference = gpu
+            .pipeline(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/qmv_reference.spv"
+            )))
+            .unwrap();
+        for (rows, cols) in [
+            (2048usize, 2048usize),
+            (2048, 6144),
+            (2048, 7680),
+            (7680, 2048),
+        ] {
+            let packed: Vec<u8> = (0..rows * cols / 8)
+                .flat_map(|i| {
+                    (i as u32)
+                        .wrapping_mul(0x9e3779b9)
+                        .wrapping_add(177)
+                        .to_le_bytes()
+                })
+                .collect();
+            let buffer = gpu.buffer(&packed).unwrap();
+            let x: Vec<_> = (0..rows)
+                .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+                .collect();
+            for cb in 0..3 {
+                let params = [rows as u32, cols as u32, 4, cb];
+                let expected = gpu.compute(reference, &buffer, &x, params, cols).unwrap();
+                assert_eq!(expected.len(), cols);
+                assert!(expected.iter().any(|v| v.abs() > 0.01));
+                let check = |values: &[f32]| {
+                    assert_eq!(values.len(), cols);
+                    for (i, (actual, expected)) in values.iter().zip(&expected).enumerate() {
+                        assert!(actual.is_finite());
+                        assert_eq!(
+                            actual.to_bits(),
+                            expected.to_bits(),
+                            "rows={rows} cols={cols} cb={cb} output={i}"
+                        );
+                    }
+                };
+                // Correctness precedes timing; both paths use the same packed resident buffer.
+                check(&gpu.multiply(&buffer, &x, cols, 4, cb).unwrap());
+                for _ in 0..2 {
+                    check(&gpu.compute(reference, &buffer, &x, params, cols).unwrap());
+                    check(&gpu.multiply(&buffer, &x, cols, 4, cb).unwrap());
+                }
+                let mut times = [vec![], vec![]];
+                for pair in 0..7 {
+                    for lookup in if pair % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        let start = Instant::now();
+                        let values = if lookup {
+                            gpu.multiply(&buffer, &x, cols, 4, cb).unwrap()
+                        } else {
+                            gpu.compute(reference, &buffer, &x, params, cols).unwrap()
+                        };
+                        let elapsed = start.elapsed().as_secs_f64() * 1000.;
+                        assert!(elapsed.is_finite() && elapsed > 0.);
+                        check(&values);
+                        times[usize::from(lookup)].push(elapsed);
+                    }
+                }
+                assert!(times.iter().all(|t| t.len() == 7));
+                eprintln!(
+                    "LOOKUP_BENCH {}",
+                    serde_json::json!({
+                        "status":"validated_microbenchmark", "device":gpu.name,
+                        "rows":rows, "cols":cols, "bits":4, "codebook":cb,
+                        "warmups":2, "pairs":7, "parity":"bit_exact",
+                        "procedural_ms":times[0], "lookup_ms":times[1],
+                        "limits":"software/device projection timing, not full-model or S24 throughput"
+                    })
+                );
+            }
+        }
+        unsafe { gpu.device.raw.destroy_pipeline(reference, None) };
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn codebook_offsets_are_aligned_bounded_and_reject_invalid_ids() {
+        let cb: u32 = kani::any();
+        let state: u16 = kani::any();
+        let offset = codebook_offset(cb, state);
+        assert_eq!(offset.is_some(), cb < 3);
+        if let Some(offset) = offset {
+            assert_eq!(offset % 4, 0);
+            assert!(offset + 4 <= CODEBOOK_BYTES);
+            assert_eq!(offset / 4 / 65536, cb as usize);
+            assert_eq!(offset / 4 % 65536, usize::from(state));
+        }
+        kani::cover!(cb == 2 && state == u16::MAX);
+        kani::cover!(cb == 0 && state == 0);
+        kani::cover!(cb == u32::MAX && offset.is_none());
     }
 }

@@ -1,6 +1,8 @@
 package tech.mlxl3.android
 
 import android.os.Bundle
+import android.os.Build
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,7 +30,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -42,11 +43,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
+@Suppress("DEPRECATION") // Android 9/10 need adjustResize to dispatch IME insets.
+internal fun ComponentActivity.configureStudioWindow() {
+    enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+    // Compose fits IME insets; avoid a second platform-level adjustment on Android 11+.
+    window.setSoftInputMode(if (Build.VERSION.SDK_INT >= 30)
+        WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+        configureStudioWindow()
         setContent {
             val model: StudioViewModel = viewModel()
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -76,10 +85,6 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
         var menu by remember { mutableStateOf(false) }
         val list = rememberLazyListState()
         val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
-        val focus = LocalFocusManager.current
-        LaunchedEffect(imeBottom) {
-            if (imeBottom == 0) focus.clearFocus()
-        }
         LaunchedEffect(messages.size, messages.lastOrNull()?.text, imeBottom) {
             if (messages.isNotEmpty()) list.scrollToItem(messages.lastIndex)
         }

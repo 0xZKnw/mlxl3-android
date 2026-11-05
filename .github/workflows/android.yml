@@ -102,6 +102,16 @@ jobs:
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
 
+      - name: Compare lookup and procedural projections after parity
+        run: cargo test --manifest-path engine/Cargo.toml --locked --lib benchmark_codebook_lookup -- --ignored --test-threads=1 --nocapture > projection-benchmark.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: projection-benchmark
+          path: projection-benchmark.log
+          if-no-files-found: warn
+          retention-days: 14
+
   ui:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
