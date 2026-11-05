@@ -1,16 +1,16 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "tech.mlxl3.android"
-    compileSdk = 35
+    compileSdk = 37
+    buildToolsVersion = "36.0.0"
     defaultConfig {
         applicationId = "tech.mlxl3.android"
         minSdk = 28
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
         // The x86 emulator exercises Compose only; the shipping engine remains ARM64.
@@ -22,16 +22,17 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     packaging { jniLibs { useLegacyPackaging = false } }
     lint {
         abortOnError = true
         warningsAsErrors = true
         // Versions are pinned for reproducible builds; this first target is Android ARM64.
-        disable += setOf("GradleDependency", "ChromeOsAbiSupport")
+        disable += setOf("GradleDependency", "AndroidGradlePluginVersion", "ChromeOsAbiSupport")
     }
     testOptions { unitTests.isReturnDefaultValues = true }
 }
+
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.04.01")

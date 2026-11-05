@@ -11,7 +11,7 @@ is required. Support on a device is established by testing, not its GPU name.
 
 ## Status
 
-Initial implementation, under verification. Full-checkpoint numeric parity,
+Initial experimental implementation, with local component checks passing. Full-checkpoint numeric parity,
 memory usage, speed and thermal behavior on the S24 have **not been validated**.
 This is not a performance release. The APK contains no model weights and
 requests no Internet permission.
@@ -38,11 +38,11 @@ or model downloader.
    [LFM3-1.7B-EXL3](https://huggingface.co/0xzknw/LFM3-1.7B-EXL3).
    It must contain `config.json`, `tokenizer.json` and every `.safetensors` shard.
    The 8bpw variant is also supported by the format; it requires more memory.
-3. In the app, choose **Import LFM3 EXL3**, then that variant folder. The app
+3. In the app, choose **Importer mon modèle**, then that variant folder. The app
    copies its model files to private storage and loads them. Keep sufficient
    free storage for this second copy. Model files must remain immutable while
    loaded; replace them through the importer.
-4. Send a short prompt. **Stop** requests cancellation between layers and
+4. Send a short prompt. **Arrêter la génération** requests cancellation between layers and
    bounded GPU dispatches. Keep the app in the foreground during inference.
 
 The debug APK is signed with a CI test key, not a production release key.
@@ -51,8 +51,9 @@ previous debug build before installing another, deleting its private model copy.
 
 ## Build locally
 
-Use JDK 17, Gradle wrapper 8.11.1, Android SDK 35/build tools 35.0.0,
-NDK 27.2.12479018, Rust 1.98.1 and `glslc` (shaderc).
+Use JDK 17, Gradle wrapper 9.3.1, Android SDK `platforms;android-37.0` /
+build tools 36.0.0, NDK 27.2.12479018 and Rust 1.98.1. The native build
+uses the NDK shader compiler by default; `GLSLC` can override it.
 
 ```sh
 rustup target add aarch64-linux-android
@@ -73,13 +74,19 @@ cargo fmt --manifest-path engine/Cargo.toml --check
 cargo clippy --manifest-path engine/Cargo.toml --locked --all-targets -- -D warnings
 cargo test --manifest-path engine/Cargo.toml --locked
 # Explicit device tests (Mesa lavapipe in CI):
+cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::codebooks -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --test vulkan -- --ignored --test-threads=1
+cargo test --manifest-path engine/Cargo.toml --test flow -- --ignored --test-threads=1
 cargo kani --manifest-path engine/Cargo.toml --lib
+./gradlew :app:testDebugUnitTest :app:lintDebug :app:connectedDebugAndroidTest
 ```
 
-The Vulkan regression tests compare nonempty finite outputs with CPU
+The Vulkan tests check all 196,608 codebook values bit-for-bit and compare
+nonempty finite projection outputs with CPU
 reconstruction, for all 1–8-bit EXL3 layouts and all three codebooks. These
-tests do not prove complete-model equivalence. Kani properties and limits,
+tests do not prove complete-model equivalence. Five emulator UI tests cover
+contrast, import, sending, cancellation and the composer above the real keyboard.
+See [the local verification record](docs/verification-2026-11-05.md). Kani properties and limits,
 failures and actual verification results are recorded in [opti.md](opti.md).
 See [the S24 validation protocol](docs/s24-validation.md) before reporting results.
 

@@ -2,6 +2,7 @@ package tech.mlxl3.android
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -13,7 +14,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,9 +25,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -31,7 +43,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         setContent {
             val model: StudioViewModel = viewModel()
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -45,11 +58,10 @@ class MainActivity : ComponentActivity() {
 }
 
 private val Canvas = Color(0xFF121212)
-private val Sidebar = Color(0xFF0C0C0C)
-private val Composer = Color(0xFF1B1B1B)
-private val Ink = Color(0xFFE8E8E8)
-private val Quiet = Color(0xFF949494)
-private val Edge = Color(0xFF2C2C2C)
+private val Panel = Color(0xFF1C1C1E)
+private val Ink = Color(0xFFF0F0EF)
+private val Quiet = Color(0xFF969698)
+private val Edge = Color(0xFF303032)
 
 @Composable
 fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, status: String,
@@ -57,87 +69,120 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  onLoad: () -> Unit, onNew: () -> Unit, onSend: (String) -> Unit,
                  onStop: () -> Unit, onDismissError: () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
-        surface = Composer, onSurface = Ink, onBackground = Ink, outline = Edge)) {
+        surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         var draft by rememberSaveable { mutableStateOf("") }
         var menu by remember { mutableStateOf(false) }
         val list = rememberLazyListState()
-        LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
+        val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+        LaunchedEffect(messages.size, messages.lastOrNull()?.text, imeBottom) {
             if (messages.isNotEmpty()) list.scrollToItem(messages.lastIndex)
         }
-        Column(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding().imePadding()) {
-            Row(Modifier.fillMaxWidth().background(Sidebar).padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(36.dp))
-                Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                    Text("MLXL3", fontSize = 18.sp, letterSpacing = 1.sp)
-                    Text("LFM3 1.7B", color = Quiet, fontSize = 12.sp)
-                }
-                Box {
-                    TextButton(onClick = { menu = true }, enabled = !busy) { Text("Model") }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("Import EXL3 folder") }, onClick = { menu = false; onImport() })
-                        if (savedModel) DropdownMenuItem(text = { Text("Load saved model") }, onClick = { menu = false; onLoad() })
-                        DropdownMenuItem(text = { Text("New chat") }, onClick = { menu = false; onNew() })
-                    }
-                }
-            }
-            HorizontalDivider(color = Edge)
-            if (messages.isEmpty()) {
-                Column(Modifier.weight(1f).fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center) {
-                    Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(88.dp))
-                    Spacer(Modifier.height(20.dp))
-                    Text("What’s on your mind?", fontSize = 25.sp)
-                    Spacer(Modifier.height(10.dp))
-                    Text(if (ready) "LFM3 runs entirely on your phone." else "Your model. On your phone.", color = Quiet, fontSize = 14.sp)
-                    if (!ready && !busy) {
-                        Spacer(Modifier.height(24.dp))
-                        OutlinedButton(onClick = if (savedModel) onLoad else onImport) {
-                            Text(if (savedModel) "Load LFM3" else "Import LFM3 EXL3")
+        Surface(modifier = Modifier.fillMaxSize(), color = Canvas, contentColor = Ink) {
+            Column(Modifier.fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                .imePadding()) {
+                Row(Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(34.dp))
+                    Text("MLXL3", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.4.sp, modifier = Modifier.weight(1f).padding(start = 10.dp))
+                    Box {
+                        OutlinedButton(onClick = { menu = true }, enabled = !busy,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Edge), shape = CircleShape) {
+                            Text("LFM3 1.7B", fontSize = 12.sp)
+                            Icon(painterResource(R.drawable.ic_chevron_down), null, Modifier.padding(start = 6.dp).size(14.dp), tint = Quiet)
                         }
-                        Text("Choose the 4bpw or 8bpw variant folder", color = Quiet, fontSize = 12.sp,
-                            modifier = Modifier.padding(top = 8.dp))
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Importer un dossier EXL3") }, onClick = { menu = false; onImport() })
+                            if (savedModel) DropdownMenuItem(text = { Text("Charger le modèle enregistré") }, onClick = { menu = false; onLoad() })
+                        }
+                    }
+                    IconButton(onClick = onNew, enabled = !busy, modifier = Modifier.padding(start = 4.dp)) {
+                        Icon(painterResource(R.drawable.ic_new_chat), "Nouvelle conversation", Modifier.size(21.dp))
                     }
                 }
-            } else {
-                LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                    items(messages) { message ->
-                        Column(Modifier.fillMaxWidth(), horizontalAlignment = if (message.role == "user") Alignment.End else Alignment.Start) {
-                            if (message.role == "assistant") Text("MLXL3", color = Quiet, fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
-                            SelectionContainer {
-                                Text(message.text.ifEmpty { "…" }, fontSize = 16.sp, lineHeight = 25.sp,
-                                    modifier = if (message.role == "user") Modifier.background(Composer, RoundedCornerShape(18.dp)).padding(14.dp) else Modifier)
+                HorizontalDivider(color = Color(0xFF232325))
+                if (messages.isEmpty()) {
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 28.dp), contentAlignment = Alignment.Center) {
+                        val compact = maxHeight < 280.dp
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            if (!compact) {
+                                Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(72.dp))
+                                Spacer(Modifier.height(28.dp))
+                            }
+                            Text(if (ready) "Qu’avez-vous en tête ?" else "Votre IA,\nsur votre téléphone.",
+                                fontSize = if (compact) 22.sp else 28.sp, lineHeight = 35.sp,
+                                fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+                            Text(if (ready) "Une conversation, entièrement en local." else "LFM3 1.7B · EXL3 · 100 % local",
+                                color = Quiet, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 12.dp))
+                            if (!ready && !busy) {
+                                Spacer(Modifier.height(28.dp))
+                                Button(onClick = if (savedModel) onLoad else onImport,
+                                    shape = RoundedCornerShape(14.dp), contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp)) {
+                                    Text(if (savedModel) "Charger LFM3" else "Importer mon modèle", fontWeight = FontWeight.Medium)
+                                }
+                                Text("Dossier EXL3 4bpw ou 8bpw", color = Quiet, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(28.dp)) {
+                        items(messages) { message ->
+                            Column(Modifier.fillMaxWidth(), horizontalAlignment = if (message.role == "user") Alignment.End else Alignment.Start) {
+                                if (message.role == "assistant") Row(Modifier.padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(20.dp))
+                                    Text("MLXL3", color = Quiet, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 8.dp))
+                                }
+                                SelectionContainer {
+                                    Text(message.text.ifEmpty { "…" }, color = Ink, fontSize = 16.sp, lineHeight = 25.sp,
+                                        modifier = if (message.role == "user") Modifier.widthIn(max = 340.dp)
+                                            .background(Panel, RoundedCornerShape(22.dp, 22.dp, 6.dp, 22.dp)).padding(horizontal = 16.dp, vertical = 12.dp)
+                                        else Modifier.fillMaxWidth())
+                                }
                             }
                         }
                     }
                 }
-            }
-            if (error != null) {
-                Surface(color = Color(0xFF332222), shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(horizontal = 16.dp)) {
-                    Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(error, fontSize = 13.sp, modifier = Modifier.weight(1f).padding(vertical = 10.dp))
-                        TextButton(onClick = onDismissError) { Text("Dismiss") }
+                if (error != null) {
+                    Surface(color = Color(0xFF302124), contentColor = Color(0xFFFFDAD9), shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Row(Modifier.padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(error, fontSize = 13.sp, modifier = Modifier.weight(1f).padding(vertical = 12.dp))
+                            TextButton(onClick = onDismissError) { Text("Fermer") }
+                        }
                     }
                 }
-            }
-            Column(Modifier.padding(12.dp).fillMaxWidth()
-                .border(1.dp, Edge, RoundedCornerShape(22.dp)).background(Composer, RoundedCornerShape(22.dp)).padding(8.dp)) {
-                TextField(value = draft, onValueChange = { draft = it }, enabled = !busy && ready,
-                    placeholder = { Text("Message LFM3…", color = Quiet) }, maxLines = 5,
-                    colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
-                        disabledContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent, disabledIndicatorColor = Color.Transparent),
-                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Message LFM3" })
-                Row(Modifier.fillMaxWidth().padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("LFM3 1.7B · EXL3", color = Quiet, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    if (busy) FilledTonalButton(onClick = onStop) { Text("Stop") }
-                    else Button(onClick = { onSend(draft); draft = "" }, enabled = ready && draft.isNotBlank()) { Text("Send") }
+                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Column(Modifier.fillMaxWidth().testTag("composer")
+                        .border(1.dp, Edge, RoundedCornerShape(24.dp)).background(Panel, RoundedCornerShape(24.dp))
+                        .padding(start = 18.dp, top = 16.dp, end = 10.dp, bottom = 8.dp)) {
+                        BasicTextField(value = draft, onValueChange = { draft = it }, enabled = !busy && ready,
+                            textStyle = TextStyle(color = Ink, fontSize = 16.sp, lineHeight = 24.sp), cursorBrush = SolidColor(Ink),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences), maxLines = 5,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 136.dp)
+                                .semantics { contentDescription = "Message LFM3" },
+                            decorationBox = { inner -> Box { if (draft.isEmpty()) Text("Écrivez à LFM3…", color = Quiet, fontSize = 16.sp); inner() } })
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(5.dp).background(if (ready) Color(0xFF99B7A5) else Quiet, CircleShape))
+                            Text(if (busy) status else if (ready) "LFM3 1.7B · Local" else "Modèle non chargé",
+                                color = Quiet, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+                            val canSend = ready && draft.isNotBlank()
+                            FilledIconButton(onClick = { if (busy) onStop() else { onSend(draft); draft = "" } },
+                                enabled = busy || canSend,
+                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Canvas,
+                                    disabledContainerColor = Color(0xFF303033), disabledContentColor = Color(0xFF727275)),
+                                modifier = Modifier.size(48.dp)) {
+                                Icon(painterResource(if (busy) R.drawable.ic_stop else R.drawable.ic_arrow_up),
+                                    if (busy) "Arrêter la génération" else "Envoyer", Modifier.size(21.dp))
+                            }
+                        }
+                    }
+                    if (!ready && busy) Text(status, color = Quiet, fontSize = 11.sp,
+                        modifier = Modifier.padding(start = 8.dp, top = 8.dp))
                 }
-            }
-            Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 12.dp)) {
-                Text(status, color = Quiet, fontSize = 11.sp)
-                if (device.isNotEmpty()) Text(device, color = Quiet, fontSize = 10.sp)
             }
         }
     }

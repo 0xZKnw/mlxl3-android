@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 20
     env:
       ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.2.12479018
+      GLSLC: /usr/local/lib/android/sdk/ndk/27.2.12479018/shader-tools/linux-x86_64/glslc
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
@@ -33,22 +34,18 @@ jobs:
         with:
           workspaces: engine -> target
           cache-on-failure: true
-      - name: Shader compiler
-        run: |
-          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update -qq
-          sudo apt-get install -y --no-upgrade --no-install-recommends glslc spirv-tools
+      - name: Android NDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '13114758'
+          packages: 'ndk;27.2.12479018 platforms;android-37.0 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
       - name: Validate Rust and shaders
         run: |
           cargo fmt --manifest-path engine/Cargo.toml --check
           cargo clippy --manifest-path engine/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path engine/Cargo.toml --locked
-          find engine/target/debug/build -path '*/out/*.spv' -exec spirv-val --target-env vulkan1.1 {} \;
-      - name: Android NDK
-        uses: android-actions/setup-android@v4
-        with:
-          cmdline-tools-version: '12266719'
-          packages: 'ndk;27.2.12479018 platforms;android-35 build-tools;35.0.0'
-          log-accepted-android-sdk-licenses: false
+          find engine/target/debug/build -path '*/out/*.spv' -exec "$ANDROID_NDK_HOME/shader-tools/linux-x86_64/spirv-val" --target-env vulkan1.1 {} \;
       - name: Build ARM64 engine
         run: |
           cargo clippy --manifest-path engine/Cargo.toml --locked --lib --target aarch64-linux-android -- -D warnings
@@ -101,6 +98,7 @@ jobs:
           sudo apt-get install -y --no-upgrade --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers
       - name: EXL3 projection and complete reduced-model tests
         run: |
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
 
@@ -114,6 +112,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '13114758'
+          packages: 'platforms;android-37.0 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules

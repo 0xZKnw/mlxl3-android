@@ -413,14 +413,43 @@ impl Gpu {
             weights.size == (expected + 3) & !3,
             "Weight buffer does not match projection shape"
         );
-        let input = self.input.as_ref().context("GPU input unavailable")?;
-        let output = self.output.as_ref().context("GPU output unavailable")?;
         let params = [
             x.len() as u32,
             outputs as u32,
             if bits == 0 { codebook } else { bits },
             codebook,
         ];
+        self.compute(
+            if bits == 0 { self.dense } else { self.qmv },
+            weights,
+            x,
+            params,
+            outputs,
+        )
+    }
+
+    fn compute(
+        &mut self,
+        pipeline: vk::Pipeline,
+        weights: &Buffer,
+        x: &[f32],
+        params: [u32; 4],
+        outputs: usize,
+    ) -> Result<Vec<f32>> {
+        ensure!(
+            !self.device.abandoned.load(Ordering::Relaxed),
+            "GPU timed out; restart the app"
+        );
+        ensure!(
+            !x.is_empty()
+                && x.len() <= 32768
+                && outputs > 0
+                && outputs <= 32768
+                && outputs <= self.max_groups as usize,
+            "Invalid compute buffer dimensions"
+        );
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let output = self.output.as_ref().context("GPU output unavailable")?;
         let bytes = |values: &[f32]| unsafe {
             std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
         };
@@ -457,11 +486,7 @@ impl Gpu {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            d.cmd_bind_pipeline(
-                self.command,
-                vk::PipelineBindPoint::COMPUTE,
-                if bits == 0 { self.dense } else { self.qmv },
-            );
+            d.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::COMPUTE, pipeline);
             d.cmd_bind_descriptor_sets(
                 self.command,
                 vk::PipelineBindPoint::COMPUTE,
@@ -520,5 +545,45 @@ impl Drop for Gpu {
             d.destroy_fence(self.fence, None);
             d.destroy_command_pool(self.pool, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{self, Codebook};
+
+    #[test]
+    #[ignore = "requires Vulkan; exhaustive EXL3 procedural codebook parity"]
+    fn codebooks_match_cpu_bit_exact_for_all_196608_values() {
+        let mut gpu = Gpu::new().unwrap();
+        let pipeline = gpu
+            .pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/codebook.spv")))
+            .unwrap();
+        let dummy = gpu.buffer(&[0; 4]).unwrap();
+        for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
+            for offset in [0, 32768] {
+                let values = gpu
+                    .compute(
+                        pipeline,
+                        &dummy,
+                        &[0.],
+                        [offset, 32768, 0, cb as u32],
+                        32768,
+                    )
+                    .unwrap();
+                assert_eq!(values.len(), 32768);
+                for (i, actual) in values.iter().enumerate() {
+                    let state = (offset as usize + i) as u16;
+                    let expected = codec::decode_codeword(state, cb).to_f32();
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "{cb:?} state={state}: {actual} != {expected}"
+                    );
+                }
+            }
+        }
+        unsafe { gpu.device.raw.destroy_pipeline(pipeline, None) };
     }
 }

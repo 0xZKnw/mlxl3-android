@@ -4,4 +4,70 @@
 - Historique : codec/checkpoint Rust, backend Metal direct et projections MLX relus ; aucune implémentation Android/Vulkan existante trouvée. Campagne QUANT-2026-11-05-LFM3-MODAL du checkout personnel consultée pour identifier config, format et exports, sans reprendre ses conclusions de qualité. Architecture officielle et convertisseur à confronter avant code.
 - Hypothèse/changement : moteur Rust autonome limité à LFM3, EXL3 décompressé par tuiles dans les shaders Vulkan ; pas de matrice dense globale. Commencer par kernels conservateurs sans largeur de sous-groupe imposée ; pas de mesure de vitesse ni gain annoncé. Première UI charge un dossier choisi par l'utilisateur, génère/annule et affiche les erreurs.
 - Protocole : vérifier format/codebooks, projections, opérations LFM3 et transitions/caches avec oracles indépendants, fixtures jetables et tests d'intégration ; compiler/valider SPIR-V, tenter Kani sur contrats de production, fmt/Clippy/tests/build du package Android, tests/lint/assemblage APK. CI PR/push main et branche Android avec versions figées, caches Rust/Gradle, ARM64 uniquement et sans téléchargement des poids. Inspecter le run GitHub exact si accès disponible. Validation S24 physique explicitement différée à l'utilisateur ; CPU/Vulkan logiciel ne prouvent pas Xclipse.
-- Sources/checkpoint, commandes, empreintes et résultats : à compléter dans `docs/android-lfm3.md` et preuves locales `build/android-lfm3/`. Statuts initiaux : code prototype en cours, qualité/performance non mesurées, APK non construit, aucune installation ni release.
+- Sources/checkpoint, commandes, empreintes et résultats : préparation initiale dans le worktree MLXL3 ; voir maintenant `docs/s24-validation.md` et les preuves locales `build/` du dépôt séparé. Statut initial conservé : prototype en cours, qualité/performance non mesurées, APK non construit, aucune installation ni release.
+
+#### Transfert et contrôles du 5 novembre — CI encore en cours
+
+- L'utilisateur a demandé un dépôt séparé puis confirmé sa visibilité publique : `https://github.com/0xZKnw/mlxl3-android`. Code transféré dans `/Users/justin/Documents/mlxl3-android`, sans modifier les sources du checkout personnel MLXL3. Codec réutilisé depuis MLXL3 `1ac910d0a40efcad049c6e5a8cf081d770723465`, artwork/palette Desktop depuis `6030540b5573185a4bf8b13207011872d94d0045`. Architecture officielle LiquidAI épinglée `0dc4268b561499c648c7ba7c9466bf3d8d01517a`, EXLlamaV3 1.6.6 `bd1f519172406a9560bd5c90e61000691bb69a07` consultés sans exécuter leur code distant.
+- Implémentation : projections EXL3 tuilées Vulkan, 1..8 bits et trois codebooks, aucun poids dense global reconstruit ; projections BF16/F16 non quantifiées du head/gates découpées selon la limite de buffer GPU. Convolutions7, attention GQA complète/glissante, RoPE partiel à fréquence dimension128, gates, sandwich RMSNorm, SwiGLU, tokenizer et génération greedy. Opérations légères/attention et caches CPU pour cette première version. Mémoire GPU logique plafonnée3Gio, fichiers4Gio, contexte2048 ; ce sont des limites de validation, **pas des pics processus mesurés**. Un seul modèle/une tâche. Aucune mesure de débit modèle ni promesse de vitesse.
+- Premiers échecs conservés : compilation Rust (ancien helper Metal du codec importé inutile, emprunt temporaire), compilation Android JNI (`TryLockError` non Send pour anyhow::Context), lint Rust (tailles des enums/chunks), lint Android (règles de backup, icône, versions volontairement figées et ABI mobile). Corrections ciblées ; codec portable repris à sa révision stable, erreurs JNI explicites, enums alloués et contrôles stricts rerun. Les versions figées et ChromeOS sont exclus des seules alertes de disponibilité/hors cible ; commit préférences synchrone sur worker conservé pour ne pas supprimer l'ancien modèle avant persistance. Qualificateur adaptatif `v26` conservé : sa variante non qualifiée est omise par AGP8.9.2, échecAAPT conservé dans `build/gradle-build-final.log`/`gradle-build-clean.log`.
+- CPU : `cargo test --manifest-path engine/Cargo.toml --locked` : **12 réussis**,3 tests GPU explicitement ignorés dans cette commande. Régressions format/codebooks/128-Hadamard contre matrice Sylvester indépendante, RoPEpartiel, convolutioncausale, attention/gates, vocabulaire, config réelle, corruption/shapes/NaN/offsets/Safetensors couverts. `cargo fmt --check`, Clippy strict host et Android ARM64, compilation release ARM64/NDK27.2.12479018 réussis. Rust1.98.1, glslc2026.4, SPIR-V validé pour Vulkan1.1. Logs `build/{cpu-tests-final2,clippy-final,android-clippy,native-build-final2}.log`.
+- GPU local : invocation explicite `VK_ICD_FILENAMES=<MoltenVK_icd.json> DYLD_LIBRARY_PATH=<vulkan-loader>:<homebrew>/lib cargo test --manifest-path engine/Cargo.toml --test vulkan -- --ignored --test-threads=1` : **2 réussis**,24 comparaisons EXL3 (K1..8 ×3codebooks),128 sorties par cellule, nonvides/finies ; oracle reconstructionCPU/f64, tolérance absolue1e-4+relative2e-5. Dense F16/BF16 et erreurs vérifiés. Matrices128×128 seulement, aucune inférence de grand modèle simultanée par cette campagne. `build/vulkan-tests.log`.
+- Intégration : fixture LFM3 réduite non nulle (hidden128,3couches conv/full/sliding, EXL3réel, vocab16), chargeur→Vulkan→états→logits→tokenizer→génération/reset/annulation/budget. Premier essai **échoué** : lignes de head sans token tokenizer pouvaient être sélectionnées et produire du texte vide (`build/flow-tests.log`). Correctif sélection dans les IDs réellement présents, test détectant l'ancien cas, essai suivant **réussi** (`build/flow-tests-fixed.log`). Ce modèle réduit ne valide pas les poids1.7B ni la parité de leurs logits/états.
+- Kani0.68.0/CBMC6.11.0 : harnais ciblé budgetcontext réussi puis **5harnais réussis** (bitrate, indices pack/unpack, permutation inverse256, budgetcontexteusize64). DomainesK1..8/logical<16K/bit<16/state<256, permutationunwind260 ; budget sans hypothèse restreignant les usize,2covers. Aucun stub. `build/kani-targeted.log`, `kani-suite.log`, puis `kani-final.log`. Tentative supplémentaire sur greedy4logitsf32/2IDs symboliques/unwind6 : **erreur interne du compilateur**, pas contre-exemple (`kani-vocabulary.log`). Une tentative équivalente avec contrôle d'exposantIEEE échoue aussi (`kani-vocabulary-retry.log`), changement retiré. Harnais conservé hors sélection par défaut, reproductible avec `RUSTFLAGS='--cfg kani_float_checks' cargo kani --manifest-path engine/Cargo.toml --lib --harness greedy_selection_stays_in_vocabulary` ; propriété **non vérifiée**. Kani ne prouve ni Vulkan/SPIR-V, JNI/Kotlin, concurrence, ni génération complète.
+- Android local : `./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest`, JDK17/Gradle8.11.1/AGP8.9.2/Kotlin2.1.20/SDK35 : compilation et lint réussis ; **3tests JVM** import/limites/annulation/fournisseur silencieux. APK signé debug vérifié par apksigner, aucune inclusion de poids. Un contrôle de correspondance binaire a détecté un APK local antérieur au dernier rebuild natif lors de compilations parallèles ; reconditionnement séquentiel et contrôle ELF/APK demandés avant livraison (`build/apk-final-sequential.log`). Aucune installation S24.
+- Publication source autorisée, premiers commits `ee8fa7f`/`25ff74d`/`859a6d8` puis `0ca45f21ec840132176de0c7442b14a35940cabb`. Première CI :5harnais Kani réussis, UI **échouée** car APK/tests limitésARM64 sur émulateurx86_64 ; correction `-PuiTest` pour la seule UI, moteur livréARM64. Téléchargement inutile de mise à jourMesa17,5Mo observé lent ; pipelineAPK séparé des qualificationsVulkan, paquets installés sans upgrade. Les anciens runs sont annulés ; run à inspecter `https://github.com/0xZKnw/mlxl3-android/actions/runs/42116269570`, statut **en attente/en cours**, pas déclaré vert. APKCI, testsémulateur/capture et qualificationMesa à compléter.
+- État : **code public expérimental**, correction composant locale validée dans les domaines ci-dessus ; S24/poids1.7B/logits/cache physique/mémoire réelle/thermique/vitesse **non vérifiés**. Aucune release, remplacement d'app ou benchmark de vitesse lancé. Aucun gain revendiqué.
+
+### ANDROID-CI-2026-11-05-02 — réutiliser les outils shaders du NDK — préenregistré
+
+- Hypothèse : le NDK27.2.12479018 déjà nécessaire contient `shader-tools/<host>/glslc` et `spirv-val` (présence vérifiée localement). Les réutiliser retire l'installationAPT du cheminAPK ; les lenteurs du miroirAzure observées dans les anciens runs ne justifient pas une dépendance système supplémentaire. Aucun changement de kernel ni d'architecture.
+- Baseline : source/CI `600fcbf` (ancienne révision80b6c78 pour les timestamps complets), téléchargementglslcAPT observé lent. Variante : SDK/NDK initialisés avant contrôles Rust, `GLSLC` explicite vers le NDK, validationSPIR-V par le NDK ; autres jobs inchangés. Préserver `GLSLC` utilisateur dans le script local.
+- Protocole prévu avant modification : comparer compilationSPIR-V et testsVulkan3cas/fixture avec ce compilateur, fmt/Clippy/buildARM64/APK ; inspecter ensuite le runGitHub exact et sa durée de jobAPK. Ne pas présenter différence de durée comme gain reproductible si caches/réseau diffèrent ; but fonctionnel : aucune installationAPT dans le jobAPK. Statut : **en cours**, aucune mesure de vitesse modèle.
+
+### ANDROID-NUM-2026-11-05-03 — arrondi FP16 portable — préenregistré
+
+- Échec réel CI600fcbf conservé : Mesa llvmpipeLLVM20.1.2, K1/codebookDefault/sortie1, -2.2867622 au lieu de -2.2864646911621094 (tolérance1e-4+relative2e-5), alors que MoltenVK passait. Log local `build/ci-600-vulkan.log`. Ne pas élargir la tolérance pour masquer cette divergence.
+- Hypothèse : `packHalf2x16` ne fournit pas une frontière d'arrondi suffisamment stable entre compilateurs/pilotes pour le contrat EXL3. Changement prévu : arrondi IEEE FP32→FP16 explicite par opérations entières ; partage du codebook entre projection réelle et shader de contrôle. Conserver opérations de réduction et tolérances.
+- Protocole fixé avant code : comparer bit-à-bit les65536états de chacun des3codebooks sur le GPU avec le codecRustréel (196608valeurs), puis les24QMV, dense et parcours LFM3 réduit. Compiler avec les outils NDK27.2 et valider SPIR-V ; vérifier localement avant un seul push regroupé, puis confronter à MesaCI. Si la cause est différente ou l'arrondi échoue, conserver le diagnostic et corriger avant publication du lot. Aucun benchmark de vitesse.
+
+#### Résultats locaux du lot approuvé — 5 novembre, avant publication
+
+- Historique CI600fcbf inspecté : Kani et UI réussis, Vulkan échoué sur l’arrondi
+  précité, APK échoué sur OldTargetApi35. Logs `build/ci-600-{vulkan,apk}.log`.
+  Capture ancienne révélant texte noir sur fond noir conservée ; interface
+  remplacée et approuvée par l’utilisateur (« parfait la »).
+- ANDROID-NUM-2026-11-05-03 : **validé localement**, CI à confronter. Ancien
+  shader reproduit le même contre-exemple sur MesaLLVM21.1.4 macOS ; nouvel
+  arrondi passe196608valeurs bit-à-bit sur Mesa et MoltenVK1.4.2,24QMV avec
+  tolérance inchangée, dense et fixture complète réduite. Aucun modèle1.7B
+  chargé, aucune vitesse mesurée. Logs `build/lavapipe-{before-retry,after,
+  codebooks-retry}.log`, `build/codebook-rte.log`. Première invocation du
+  compilateur Rust avec bibliothèqueLLVMémulateur a crashé ; corrigée en
+  séparant compilation normale et exécution du seul binairetest avec ICDMesa.
+- ANDROID-CI-2026-11-05-02 : **validé localement**, intégré au lot ; aucune
+  installationAPT dans le jobAPK. CompilationNDK/SPIR-V/ARM64 et APK réussies.
+  BaselineAPTglslc du run80b6c78 :4min57 entre21:58:54 et22:03:51 ; durée
+  nouvelleCI non mesurée à ce stade, aucun gain reproductible revendiqué.
+- SDK migré37.0/buildtools36, AGP9.1.1/Gradle9.3.1/Kotlinintégré2.2.10,
+  JDK17. PackageSDKexact `platforms;android-37.0` ; tentativeandroid-37
+  inexistante échouée puis corrigée. Lintstrict conserve OldTargetApi actif.
+- UI : Surface/couleurs explicites, accueil/header/bulles/composer sobres,
+  IMEinsets et adjustResize. Régression contraste reproduite en restaurant
+  temporairement l’ancienne UI puis source approuvée restaurée.5testsUIréels
+  passent, dont saisie3lignes/claviervisible/bascomposer au-dessus du clavier.
+ 3testsJVM passent. Logs `build/ui-contrast-before.log`, `verified-app-final.log` ;
+  captures `build/ui-approved/`. Aucune installation téléphone.
+- Vérification finale :12testsCPUréussis,4testsGPUignorés par défaut puis
+  explicitement réussis comme indiqué ; fmt, Clippystrict host/ARM64, buildnatif,
+  SPIR-V, lint/assemblage/testsAndroid, actionlint/shellcheck réussis.5harnaisKani
+  réussis (422obligations,8covers,1assertioninterneformatinatteignable) ; tentative
+  greedyflottant resteICE/nonvérifiée. `build/{verified-cpu-tests,verified-clippy,
+  verified-android-clippy,verified-native,kani-verified-final}.log`.
+- APKlocal final34049240octets, SHA256
+  `4b36f17ca2fbbb471dd04ccd71e8a236dccf781ed36faf392acc926cadbb860a` ;
+  apksigner/zipalign16K et correspondancebinaire natif vérifiés. Résultats et
+  limites détaillés dans `docs/verification-2026-11-05.md`.
+- État : code local validé dans ces domaines, publication groupée autorisée
+  et CIexacte à inspecter ; pas de release ni gain de vitesse revendiqué.
+  S24/poids1.7B/pariténumériquecomplète/mémoire/thermique restent non vérifiés.

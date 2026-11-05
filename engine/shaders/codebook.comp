@@ -1,0 +1,10 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint offset; uint count; uint unused; uint codebook; } p;
+#include "exl3.glsl"
+void main() {
+    uint n = gl_WorkGroupID.x;
+    if (gl_LocalInvocationID.x == 0u && n < p.count) y[n] = codeword(p.offset + n, p.codebook);
+}

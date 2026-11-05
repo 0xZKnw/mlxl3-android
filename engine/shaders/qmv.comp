@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // EXL3 format: see engine/NOTICE. All arithmetic/loads use core 32-bit types.
 layout(local_size_x = 128) in;
 layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
@@ -6,21 +7,7 @@ layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
 layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
 layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint codebook; } p;
 shared float partial[128];
-
-float halfRound(float v) { return unpackHalf2x16(packHalf2x16(vec2(v, 0.0))).x; }
-float codeword(uint s) {
-    uint z;
-    if (p.codebook == 2u) {
-        z = s * 0x83dcd12du;
-        uint total = 0x6400u + (z & 255u) + ((z >> 8) & 255u)
-            + ((z >> 16) & 255u) + (z >> 24);
-        float h = unpackHalf2x16(total).x;
-        return halfRound(fma(h, unpackHalf2x16(0x1eeeu).x, unpackHalf2x16(0xc931u).x));
-    }
-    z = p.codebook == 0u ? s * 89226354u + 64248484u : s * 0xcbac1fedu;
-    vec2 pair = unpackHalf2x16(0x3b603b60u ^ (z & 0x8fff8fffu));
-    return halfRound(pair.x + pair.y);
-}
+#include "exl3.glsl"
 uint inversePermutation(uint row, uint col) {
     uint lane = (row % 8u) / 2u + (col % 8u) * 4u;
     uint item = (col / 8u) * 4u + (row / 8u) * 2u + (row % 2u);
@@ -41,7 +28,7 @@ void main() {
         uint a = packed[base + first % (8u * p.bits)];
         uint b = packed[base + last % (8u * p.bits)];
         uint s = shift == 0u ? b : (b >> shift) | (a << (32u - shift));
-        acc = fma(x[row], codeword(s & 65535u), acc);
+        acc = fma(x[row], codeword(s & 65535u, p.codebook), acc);
     }
     partial[tid] = acc;
     barrier();

@@ -8,6 +8,7 @@ case "$(uname -s)" in
   *) echo 'Build native code on Linux or macOS' >&2; exit 1 ;;
 esac
 toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$host_tag/bin"
+export GLSLC="${GLSLC:-$ANDROID_NDK_HOME/shader-tools/$host_tag/glslc}"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/aarch64-linux-android28-clang"
 export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
 export AR_aarch64_linux_android="$toolchain/llvm-ar"

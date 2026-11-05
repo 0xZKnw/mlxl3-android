@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <lint>
-    <!-- Keep the canonical adaptive-icon qualifier; AGP 8.9.2 drops its unqualified variant. -->
+    <!-- Keep the canonical adaptive-icon resource qualifier across SDK versions. -->
     <issue id="ObsoleteSdkInt">
         <ignore path="src/main/res/mipmap-anydpi-v26" />
     </issue>
