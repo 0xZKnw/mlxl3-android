@@ -40,7 +40,7 @@ jobs:
       - name: Shader compiler
         run: |
           sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update -qq
-          sudo apt-get install -y --no-install-recommends glslc spirv-tools
+          sudo apt-get install -y --no-upgrade --no-install-recommends glslc spirv-tools
       - name: Validate Rust and shaders
         run: |
           cargo fmt --manifest-path engine/Cargo.toml --check
@@ -79,7 +79,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends glslc
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-upgrade --no-install-recommends glslc
       - uses: model-checking/kani-github-action@v1
         with:
           kani-version: '0.68.0'
@@ -98,7 +98,7 @@ jobs:
       - name: Software Vulkan and shader compiler
         run: |
           sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update -qq
-          sudo apt-get install -y --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers
+          sudo apt-get install -y --no-upgrade --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers
       - name: EXL3 projection and complete reduced-model tests
         run: |
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
