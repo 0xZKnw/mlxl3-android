@@ -223,3 +223,27 @@
   Aucun ajustementpixel, mode standardadjustResize conservé. Testdiagnostique
   étendu au rectanglefocus ; CIUI sur320x640/mdpi ET1080x2400/dpi420 pour couvrir
   petit et grandécran. Vérifications lourdes toujours uniquementGitHub.
+
+#### Vérification639a0e8 — correctionlayout validée, ancragecurseur à finir
+
+- RejetsGitcommit_refs3fois et erreurGraphQL lors du refupdate, sans corruption
+  locale(fsckréussi). Créationtree/commitAPI : arbre68faf8d173be5a0110564f119ba4b4f9b9d26599
+  strictement égal au59e5fe9local ; updateRESTnonforcé vers639a0e8 réussi.
+  Anciencommitlocal59e5fe9 conservé dans la branchelocale.
+- Run42129073097 **5jobs réussis** : APK,Vulkan,6Kani,UI5casx2résolutions
+  (320x640/mdpi et1080x2400/dpi420). Testouverture/3lignes/fermeture/réouverture
+  passe sans changer tolérance12dp.13testsCPU et5GPUignorés par défaut dont
+ 4exécutés explicitement enCI ; benchmarkoptionnel déjà archivé, nonrépété.
+- APK639 téléchargé : sha2561be48c46bcf1aec11c126a537fe31556beacef98241151ae2a01b5d9eb2685fc,
+  conforme au manifeste, apksigner/zipalign16K réussis. Sourceprototype seulement,
+  main encore3358834. Pas de remplacement de l’appS24.
+- Inspectiondes2captures : zonebienau-dessus du clavier etheaderstable mais
+  popupcurseurmalancré près du header aprèsréouverture. **Limite détectée malgré
+  assertionspassées**, non déclaré correctifcomplet. Requête rectanglefocus
+  immédiate après layout pour éviter l’animationnativepan restante ; nouveau
+  contrôle du centre réel des popups dans lescreenrect du composer, à validerCI.
+- ContrôleKani désormais cibléindex puis suitecomplète dans le workflow.
+  Aucun programmeGPU/compilation/prover local lancé pendantprofilageDesktop.
+- Utilisateur précise quantificationS24 **4,49bpw exactement** ; ne pas assimiler
+  au benchmarksynthetique4bits. Tousbitratessont couvertsnumériquement mais
+  aucun débit ni paritécomplète de cecheckpoint physique n’est mesuré.

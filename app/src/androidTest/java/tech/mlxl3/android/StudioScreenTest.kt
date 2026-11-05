@@ -6,6 +6,9 @@ import android.os.Build
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.view.ViewCompat
@@ -83,6 +86,19 @@ class StudioScreenTest {
         }
         assertComposerAboveKeyboard()
         compose.onNodeWithContentDescription("Message LFM3").assertTextEquals("Première ligne\nDeuxième ligne\nTroisième ligne")
+        val composerNode = compose.onNodeWithTag("composer").fetchSemanticsNode()
+        val popupNodes = compose.onAllNodes(isPopup()).fetchSemanticsNodes()
+        assertTrue("The cursor handle must be visible after tapping the field", popupNodes.isNotEmpty())
+        compose.runOnIdle {
+            val coordinates = composerNode.layoutInfo.coordinates
+            val origin = coordinates.positionOnScreen()
+            val bounds = Rect(origin.x, origin.y, origin.x + coordinates.size.width, origin.y + coordinates.size.height)
+            popupNodes.forEach {
+                val popup = it.layoutInfo.coordinates
+                val center = popup.localToScreen(Offset(popup.size.width / 2f, popup.size.height / 2f))
+                assertTrue("Cursor popup is outside the composer: popup=$center composer=$bounds", bounds.contains(center))
+            }
+        }
         screenshot("keyboard.png")
     }
 

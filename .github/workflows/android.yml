@@ -81,7 +81,9 @@ jobs:
         with:
           kani-version: '0.68.0'
           command: cargo kani
-          args: --manifest-path engine/Cargo.toml --lib
+          args: --manifest-path engine/Cargo.toml --lib --harness codebook_offsets_are_aligned_bounded_and_reject_invalid_ids
+      - name: All CPU proof harnesses
+        run: cargo kani --manifest-path engine/Cargo.toml --lib
 
   vulkan:
     runs-on: ubuntu-24.04
