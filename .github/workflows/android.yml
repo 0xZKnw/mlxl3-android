@@ -37,17 +37,15 @@ jobs:
         with:
           workspaces: engine -> target
           cache-on-failure: true
-      - name: Shader compiler and software Vulkan
+      - name: Shader compiler
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends glslc spirv-tools libvulkan1 mesa-vulkan-drivers
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update -qq
+          sudo apt-get install -y --no-install-recommends glslc spirv-tools
       - name: Validate Rust and shaders
         run: |
           cargo fmt --manifest-path engine/Cargo.toml --check
           cargo clippy --manifest-path engine/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path engine/Cargo.toml --locked
-          cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
-          cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
           find engine/target/debug/build -path '*/out/*.spv' -exec spirv-val --target-env vulkan1.1 {} \;
       - name: Android NDK
         run: sdkmanager 'ndk;27.2.12479018' 'platforms;android-35' 'build-tools;35.0.0'
@@ -87,6 +85,24 @@ jobs:
           kani-version: '0.68.0'
           command: cargo kani
           args: --manifest-path engine/Cargo.toml --lib
+
+  vulkan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine -> target
+      - name: Software Vulkan and shader compiler
+        run: |
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update -qq
+          sudo apt-get install -y --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers
+      - name: EXL3 projection and complete reduced-model tests
+        run: |
+          cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
 
   ui:
     runs-on: ubuntu-24.04
