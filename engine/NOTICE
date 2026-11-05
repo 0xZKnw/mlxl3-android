@@ -1,0 +1,9 @@
+MLXL3 Android is part of MLXL3 (MIT). Its EXL3 codec is reused from
+MLXL3 native/src/codec.rs (1ac910d0a40efcad049c6e5a8cf081d770723465),
+now engine/src/codec.rs; see THIRD_PARTY_NOTICES.md for ExLlamaV3
+and EXL3 format attribution. The Vulkan shader re-expresses that codec.
+
+The LFM3 computation order follows LiquidAI/LFM3-1.7B, source revision
+0dc4268b561499c648c7ba7c9466bf3d8d01517a, modeling_lfm3.py (Apache-2.0,
+Copyright 2026 The HuggingFace Team) and ExLlamaV3 1.6.6 architecture/lfm3.py
+(MIT). LFM3 model weights retain their own license and are not bundled.

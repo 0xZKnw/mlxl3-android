@@ -1,0 +1,26 @@
+#version 450
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint dtype; uint unused; } p;
+shared float partial[128];
+void main() {
+    uint n = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    float acc = 0.0;
+    for (uint col = tid; col < p.rows; col += 128u) {
+        uint idx = n * p.rows + col;
+        uint word = packed[idx / 2u];
+        uint bits = (word >> ((idx % 2u) * 16u)) & 65535u;
+        float w = p.dtype == 0u ? unpackHalf2x16(bits).x : uintBitsToFloat(bits << 16u);
+        acc = fma(x[col], w, acc);
+    }
+    partial[tid] = acc;
+    barrier();
+    for (uint stride = 64u; stride > 0u; stride /= 2u) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) y[n] = partial[0];
+}
