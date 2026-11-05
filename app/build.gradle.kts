@@ -13,7 +13,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
-        ndk { abiFilters += "arm64-v8a" }
+        // The x86 emulator exercises Compose only; the shipping engine remains ARM64.
+        ndk { abiFilters += if (providers.gradleProperty("uiTest").isPresent) "x86_64" else "arm64-v8a" }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true }

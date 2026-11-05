@@ -182,6 +182,10 @@ impl Linear {
             "Invalid projection dimensions"
         );
         let trellis = format!("{name}.trellis");
+        ensure!(
+            w.has(&trellis) || name == "lm_head" || name.ends_with(".gate_proj"),
+            "Missing EXL3 projection: {name}"
+        );
         let storage = if w.has(&trellis) {
             let shape = w.shape(&trellis)?;
             ensure!(

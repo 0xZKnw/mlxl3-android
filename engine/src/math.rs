@@ -155,6 +155,25 @@ fn context_budget_never_wraps() {
     kani::cover!(prompt.checked_add(generation).is_none());
 }
 
+// Kani 0.68 currently ICEs on this floating-point path; keep the attempted harness reproducible.
+#[cfg(all(kani, kani_float_checks))]
+#[kani::proof]
+#[kani::unwind(6)]
+fn greedy_selection_stays_in_vocabulary() {
+    let logits: [f32; 4] = kani::any();
+    let ids: [u32; 2] = kani::any();
+    let result = greedy_in_vocabulary(&logits, &ids);
+    if let Ok(id) = result {
+        assert!(id == ids[0] || id == ids[1]);
+        assert!(id < 4);
+        assert!(ids[0] < 4 && ids[1] < 4);
+        assert!(logits[id as usize] >= logits[ids[0] as usize]);
+        assert!(logits[id as usize] >= logits[ids[1] as usize]);
+    }
+    kani::cover!(result.is_ok());
+    kani::cover!(result.is_err());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,6 +46,12 @@ pub struct Config {
     rope_parameters: BTreeMap<String, Rope>,
     pub eos_token_id: u32,
     pub bos_token_id: u32,
+    quantization_config: Quantization,
+}
+
+#[derive(Clone, Deserialize)]
+struct Quantization {
+    quant_method: String,
 }
 impl Config {
     pub fn read(path: &Path) -> Result<Self> {
@@ -63,6 +69,10 @@ impl Config {
         ensure!(
             self.model_type == "lfm3" && self.architectures == ["Lfm3ForCausalLM"],
             "Only LFM3 text checkpoints are supported"
+        );
+        ensure!(
+            self.quantization_config.quant_method == "exl3",
+            "An EXL3 checkpoint is required"
         );
         ensure!(
             (1..=24).contains(&self.num_hidden_layers)

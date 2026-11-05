@@ -108,4 +108,13 @@ jobs:
           api-level: 35
           arch: x86_64
           disable-animations: true
-          script: ./gradlew --no-daemon :app:connectedDebugAndroidTest
+          script: |
+            set -e
+            ./gradlew --no-daemon -PuiTest :app:connectedDebugAndroidTest
+            adb pull /sdcard/Android/data/tech.mlxl3.android/files/screenshots ui-screenshots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-ui-screenshots
+          path: ui-screenshots/
+          if-no-files-found: warn
