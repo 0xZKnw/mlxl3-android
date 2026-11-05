@@ -103,12 +103,22 @@ jobs:
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
 
       - name: Compare lookup and procedural projections after parity
-        run: cargo test --manifest-path engine/Cargo.toml --locked --lib benchmark_codebook_lookup -- --ignored --test-threads=1 --nocapture > projection-benchmark.log 2>&1
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          {
+            rustc -Vv
+            glslc --version
+            sha256sum engine/shaders/qmv.comp engine/shaders/exl3*.glsl
+            find engine/target/debug/build -path '*/out/qmv*.spv' -exec sha256sum {} \;
+            cargo test --manifest-path engine/Cargo.toml --locked --lib benchmark_codebook_lookup -- --ignored --test-threads=1 --nocapture
+          } > projection-benchmark.log 2>&1
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         with:
           name: projection-benchmark
-          path: projection-benchmark.log
+          path: |
+            projection-benchmark.log
+            engine/target/debug/build/*/out/qmv*.spv
           if-no-files-found: warn
           retention-days: 14
 

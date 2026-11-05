@@ -192,3 +192,26 @@
   benchmarkalterné12cas prêts. Aucun code moteur compilé ni benchmark local
   lancé ; fmt/actionlint/diffcheck légers réussis. CIcorrectness AVANT mesure,
   rapportmicro séparé. Pas de déclaration de gain S24 à ce stade.
+
+#### Résultat353e7e8 et révision de vérification
+
+- Run42127003850 : Vulkan196608valeurs lookup/procédural/CPUbitexact,
+  24QMVoracleCPU, dense, fixtureLFM3 et microbenchmark12cas **réussis** ;
+  Kani6harnais **réussis**. APK **échoué** uniquement lintClippy dans le nouveau
+  testtable(chunks_exact→as_chunks), corrigé sans changer le moteur/shader.
+- UI **échouée** encore190px au secondcycle avecmode48 confirmé ; ADJUST_NOTHING
+  inutile, retiré. Champstateful conservé pour le chemin de saisie moderne ;
+  nouveaucorrectif au nœud de visibilité racine : propager le viewport déjà
+  ajusté par lesinsets au lieu de laisser Androidpan toute la conversation.
+  Scrolls internes texte/liste restent propriétaires du contenu. Pas d’offset
+  fixe ni toléranceassouplie. TestcycleIME inchangé à vérifierenCI.
+- PERF05correction : sortiesQMVbitexact sur12formes/codebooks avant chaque
+  chronométrage et après chaque appel ; 2warmups/7pairesalternées. Données et
+  dérives dans `docs/measurements/android-codebook-lookup-20261106/mesa-353e7e8.json`.
+  Cases2048x7680 dériventfortement, donc **pas de gain global établi** ; autres
+  caslogiciels descriptifs uniquement. Aucun résultatS24/macro1.7B revendiqué.
+- RépétitionCIcorrectness justifiée par linttest et correctifUI ; kernel/table
+  inchangés. Benchmarks désormais seulement sur workflow_dispatch explicite,
+  aucune nouvellemesure automatique nécessaire pour un changementUI. Provenance
+  rustc/glslc/SHAshaders etSPIR-V sera conservée lors d’un nouvelessaimanuel.
+  ProfilageDesktop n’a subi aucune mesure/compilation moteur locale de notrepart.

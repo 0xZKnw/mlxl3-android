@@ -1,8 +1,6 @@
 package tech.mlxl3.android
 
 import android.os.Bundle
-import android.os.Build
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +30,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.node.ModifierNodeElement
+import androidx.compose.ui.platform.InspectorInfo
+import androidx.compose.ui.relocation.BringIntoViewModifierNode
+import androidx.compose.ui.relocation.bringIntoView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -43,19 +47,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
-@Suppress("DEPRECATION") // Android 9/10 need adjustResize to dispatch IME insets.
-internal fun ComponentActivity.configureStudioWindow() {
-    enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-        navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
-    // Compose fits IME insets; avoid a second platform-level adjustment on Android 11+.
-    window.setSoftInputMode(if (Build.VERSION.SDK_INT >= 30)
-        WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-}
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        configureStudioWindow()
+        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         setContent {
             val model: StudioViewModel = viewModel()
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -65,6 +61,19 @@ class MainActivity : ComponentActivity() {
                 model.savedModel, { picker.launch(null) }, model::loadSaved, model::newChat,
                 model::send, model::stop, model::dismissError)
         }
+    }
+}
+
+private data object StudioViewport : ModifierNodeElement<StudioViewportNode>() {
+    override fun create() = StudioViewportNode()
+    override fun update(node: StudioViewportNode) {}
+    override fun InspectorInfo.inspectableProperties() { name = "studioViewport" }
+}
+
+private class StudioViewportNode : Modifier.Node(), BringIntoViewModifierNode {
+    override suspend fun bringIntoView(childCoordinates: LayoutCoordinates, boundsProvider: () -> Rect?) {
+        // Insets already fit this viewport; scrolling children handle their own cursor/content.
+        bringIntoView()
     }
 }
 
@@ -91,7 +100,7 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
         Surface(modifier = Modifier.fillMaxSize(), color = Canvas, contentColor = Ink) {
             Column(Modifier.fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                .imePadding()) {
+                .imePadding().then(StudioViewport)) {
                 Row(Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(34.dp))
                     Text("MLXL3", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,

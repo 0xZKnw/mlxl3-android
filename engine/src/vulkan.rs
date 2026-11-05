@@ -588,11 +588,9 @@ mod tests {
     fn codebook_table_has_all_finite_values_and_checked_offsets() {
         let table = codebook_table();
         assert_eq!(table.len(), CODEBOOK_BYTES);
-        assert!(
-            table
-                .chunks_exact(4)
-                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite())
-        );
+        let (values, tail) = table.as_chunks::<4>();
+        assert!(tail.is_empty());
+        assert!(values.iter().all(|b| f32::from_le_bytes(*b).is_finite()));
         assert_eq!(codebook_offset(0, 0), Some(0));
         assert_eq!(codebook_offset(2, u16::MAX), Some(CODEBOOK_BYTES - 4));
         assert_eq!(codebook_offset(3, 0), None);
