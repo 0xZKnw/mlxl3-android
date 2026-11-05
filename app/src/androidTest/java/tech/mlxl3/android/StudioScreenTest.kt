@@ -94,9 +94,10 @@ class StudioScreenTest {
         val keyboardHeight = requireNotNull(ViewCompat.getRootWindowInsets(view)).getInsets(WindowInsetsCompat.Type.ime()).bottom
         assertTrue("A real software keyboard must be visible", keyboardHeight > 0)
         val composer = compose.onNodeWithTag("composer").fetchSemanticsNode().boundsInWindow
+        val focusedRect = compose.runOnIdle { android.graphics.Rect().also { view.findFocus()?.getFocusedRect(it) } }
         val keyboardTop = view.height - keyboardHeight
         val gap = keyboardTop - composer.bottom
-        assertTrue("Composer must sit just above the keyboard: gap=$gap, composer=$composer, window=${view.height}, ime=$keyboardHeight, mode=${compose.activity.window.attributes.softInputMode}",
+        assertTrue("Composer must sit just above the keyboard: gap=$gap, composer=$composer, window=${view.height}, ime=$keyboardHeight, mode=${compose.activity.window.attributes.softInputMode}, focus=$focusedRect",
             gap >= -2f && gap <= 12f * view.resources.displayMetrics.density)
         compose.onAllNodesWithText("MLXL3").onFirst().assertIsDisplayed()
         assertTrue("The input and send control must remain fully visible", composer.height > 80f)

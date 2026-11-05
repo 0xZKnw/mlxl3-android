@@ -215,3 +215,11 @@
   aucune nouvellemesure automatique nécessaire pour un changementUI. Provenance
   rustc/glslc/SHAshaders etSPIR-V sera conservée lors d’un nouvelessaimanuel.
   ProfilageDesktop n’a subi aucune mesure/compilation moteur locale de notrepart.
+
+- UI6abcc46/run42127962806 : nœudviewport **échoue** encore au secondcycleIME
+  (190px,mode16), retiré sans l’intégrer dans main. Remplacé par synchronisation
+  requestLayout de la View Android lors des changementsIME/brouillon, pour
+  recalculer le rectanglefocus de ViewRoot après les relayouts internesCompose.
+  Aucun ajustementpixel, mode standardadjustResize conservé. Testdiagnostique
+  étendu au rectanglefocus ; CIUI sur320x640/mdpi ET1080x2400/dpi420 pour couvrir
+  petit et grandécran. Vérifications lourdes toujours uniquementGitHub.

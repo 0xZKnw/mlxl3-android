@@ -123,6 +123,10 @@ jobs:
           retention-days: 14
 
   ui:
+    strategy:
+      fail-fast: false
+      matrix:
+        display: [small, phone]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -149,11 +153,12 @@ jobs:
           disable-animations: true
           script: |
             set -e
+            if [ "${{ matrix.display }}" = phone ]; then adb shell wm size 1080x2400; adb shell wm density 420; fi
             ./gradlew --no-daemon -PuiTest :app:connectedDebugAndroidTest
             adb pull /sdcard/Pictures/MLXL3-tests ui-screenshots
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-ui-screenshots
+          name: android-ui-screenshots-${{ matrix.display }}
           path: ui-screenshots/
           if-no-files-found: warn

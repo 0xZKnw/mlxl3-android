@@ -28,14 +28,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.node.ModifierNodeElement
-import androidx.compose.ui.platform.InspectorInfo
-import androidx.compose.ui.relocation.BringIntoViewModifierNode
-import androidx.compose.ui.relocation.bringIntoView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -64,19 +59,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data object StudioViewport : ModifierNodeElement<StudioViewportNode>() {
-    override fun create() = StudioViewportNode()
-    override fun update(node: StudioViewportNode) {}
-    override fun InspectorInfo.inspectableProperties() { name = "studioViewport" }
-}
-
-private class StudioViewportNode : Modifier.Node(), BringIntoViewModifierNode {
-    override suspend fun bringIntoView(childCoordinates: LayoutCoordinates, boundsProvider: () -> Rect?) {
-        // Insets already fit this viewport; scrolling children handle their own cursor/content.
-        bringIntoView()
-    }
-}
-
 private val Canvas = Color(0xFF121212)
 private val Panel = Color(0xFF1C1C1E)
 private val Ink = Color(0xFFF0F0EF)
@@ -94,13 +76,18 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
         var menu by remember { mutableStateOf(false) }
         val list = rememberLazyListState()
         val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+        val view = LocalView.current
+        LaunchedEffect(imeBottom, draft.text) {
+            // Keep ViewRoot's focused rectangle in sync with Compose-only IME/text relayouts.
+            view.requestLayout()
+        }
         LaunchedEffect(messages.size, messages.lastOrNull()?.text, imeBottom) {
             if (messages.isNotEmpty()) list.scrollToItem(messages.lastIndex)
         }
         Surface(modifier = Modifier.fillMaxSize(), color = Canvas, contentColor = Ink) {
             Column(Modifier.fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                .imePadding().then(StudioViewport)) {
+                .imePadding()) {
                 Row(Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(34.dp))
                     Text("MLXL3", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
