@@ -3,6 +3,7 @@ package tech.mlxl3.android
 import android.os.Bundle
 import android.os.Build
 import android.view.View
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,7 +49,9 @@ import androidx.core.view.updatePadding
 
 private val hostFitsBottomInsets get() = Build.VERSION.SDK_INT >= 30
 
+@Suppress("DEPRECATION") // Match the manifest resize mode, including Android 9/10.
 internal fun ComponentActivity.configureStudioWindow() {
+    window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
     if (hostFitsBottomInsets) {
