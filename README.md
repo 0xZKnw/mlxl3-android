@@ -11,16 +11,17 @@ is required. Support on a device is established by testing, not its GPU name.
 
 ## Status
 
-Initial experimental implementation, with local component checks passing. Full-checkpoint numeric parity,
+Experimental implementation, with component checks passing in CI. Full-checkpoint numeric parity,
 memory usage, speed and thermal behavior on the S24 have **not been validated**.
 This is not a performance release. The APK contains no model weights and
 requests no Internet permission.
 
-The engine implements the LFM3 text path: EXL3 procedural codebooks and tiled
+The engine implements the LFM3 text path: cached EXL3 codebooks and tiled
 matrix-vector multiplication, Hadamard/scales, gated width-7 convolution,
 full/sliding grouped attention, zero-tail partial RoPE, per-head sigmoid gates,
 sandwich RMSNorm, SwiGLU and greedy generation. Projections run on Vulkan;
-small operators and attention/cache control currently run on CPU. Prompts
+small operators and attention/cache control currently run on CPU. The codebook
+lookup uses an extra 768 KiB per loaded GPU; weights remain compressed. Prompts
 are processed token by token. This conservative baseline will need profiling
 on real hardware before speed work.
 
@@ -86,7 +87,9 @@ nonempty finite projection outputs with CPU
 reconstruction, for all 1–8-bit EXL3 layouts and all three codebooks. These
 tests do not prove complete-model equivalence. Five emulator UI tests cover
 contrast, import, sending, cancellation and the composer above the real keyboard.
-See [the local verification record](docs/verification-2026-11-05.md). Kani properties and limits,
+The five UI cases run on two screen sizes and check real keyboard reopening
+and cursor anchoring. See [the current verification record](docs/verification-2026-11-06.md)
+and [the initial record](docs/verification-2026-11-05.md). Kani properties and limits,
 failures and actual verification results are recorded in [opti.md](opti.md).
 See [the S24 validation protocol](docs/s24-validation.md) before reporting results.
 

@@ -1,6 +1,7 @@
 # First S24 validation
 
-Status: not executed. The first target is the Galaxy S24 Exynos 2400/Xclipse
+Status: structured validation not executed. The user reports using a 4.49 bpw
+checkpoint on the S24; preserve that exact value and record its revision/hashes. The first target is the Galaxy S24 Exynos 2400/Xclipse
 940; record Android version, driver/device name, physical RAM and APK SHA-256.
 Tests on Mesa or MoltenVK do not validate the Xclipse driver.
 

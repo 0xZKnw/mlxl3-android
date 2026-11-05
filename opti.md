@@ -272,3 +272,32 @@
   l’ancienpaddingCompose/adjustResize pour l’émulationd’insetslegacy. Testshôtes
   utilisent exactement la configurationproduction, oraclesgéométriques inchangés.
   Hypothèse à valider avant intégrationmain ; aucun gain moteur supplémentaire.
+
+#### Bilan final ee39235 — 6 novembre
+
+- ANDROID-UI-04 **validé enCI**, codequalifiéee39235a7b39646e74a4bf54d775aefe4c3f419c,
+  run https://github.com/0xZKnw/mlxl3-android/actions/runs/42132302512 :5jobsréussis.
+  5casUIx2écrans, vraiIME/3lignes/fermeture/réouverture, gap<=12dp et popup
+  effectivementdans le composer ; captures2résolutions inspectéesvisuellement.
+  Source58b7454 intermédiaire nonmesurée annulée après ajoutdu modepartagé16,
+  run42132173495 obsolète ; seulsrésultatsfinauxee39235 qualifient l’intégration.
+- ANDROID-PERF05 **validé numériquement**, performanceglobale **non concluante**
+  surMesaetS24 **non mesuré** ; table786432octets retenue commeoptimisation
+  expérimentale du calculrépété.196608codesbitexact,24casCPUoracle,4testsGPU
+  explicites etfixtureLFM3réussis ; aucune modification desopérateurs/caches.
+  Le microbenchmark utiliseK4synthetique, pas lecheckpoint4,49bpwduS24 ;
+  2048x7680 dériveforte, pas d’agrégatboost. Asymétriehostdocumentée (validation
+  productionincluse lookup, référencecompute directe), pas de tempsGPUisolé.
+- 13testsCPUréussis/5ignoréspar défaut (4GPUexplicitementexécutés, benchmark
+  optionnel nonrépété),3JVM,10exécutionsUI ; fmt/Clippyhost+ARM64/lint/SPIR-V/
+  buildreleaseARM64/APK réussis. Kaniindexciblé27obligations+3covers puis suite
+ 6harnais/449obligations+11covers,1assertionformatinatteignable. Ancienharnais
+  greedyflottantresteICE/nonvérifié ; aucunetheorieGPU/JNI/Compose complète.
+- APKee39235 téléchargé,33975708octets, checksumdedcc748615ae83122df524a30585e399feb7601dd712f297eefc533a03ac833
+  conformeau manifeste, signaturedebug etalignement16Kvalidés ; aucune donnée
+  modèleembarquée. Résultats/commandes/bornes dans `docs/verification-2026-11-06.md`.
+- Décision : sourcepubliquedansbranchequalifiée, publicationmain autorisée,
+  sans release ni appS24remplacée. ProfilageDesktop respecté : aucunecompilation
+  moteur/preuve/modèle/mesurelocale lancée. Tousessaisdece lot sont clos dans
+  les statutsci-dessus ; vitessephysique/fullcheckpoint/Android9-10 restent
+  explicitement à qualifier. La publication regroupe ces sourcesetleursrapports.
