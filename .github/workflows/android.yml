@@ -48,7 +48,11 @@ jobs:
           cargo test --manifest-path engine/Cargo.toml --locked
           find engine/target/debug/build -path '*/out/*.spv' -exec spirv-val --target-env vulkan1.1 {} \;
       - name: Android NDK
-        run: sdkmanager 'ndk;27.2.12479018' 'platforms;android-35' 'build-tools;35.0.0'
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'ndk;27.2.12479018 platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: false
       - name: Build ARM64 engine
         run: |
           cargo clippy --manifest-path engine/Cargo.toml --locked --lib --target aarch64-linux-android -- -D warnings
