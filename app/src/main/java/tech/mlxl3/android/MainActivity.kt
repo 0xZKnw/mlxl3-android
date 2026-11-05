@@ -1,6 +1,8 @@
 package tech.mlxl3.android
 
 import android.os.Bundle
+import android.os.Build
+import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -40,12 +42,30 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
+
+private val hostFitsBottomInsets get() = Build.VERSION.SDK_INT >= 30
+
+internal fun ComponentActivity.configureStudioWindow() {
+    enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+    if (hostFitsBottomInsets) {
+        val content = findViewById<View>(android.R.id.content)
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            // Give Compose and Android focus/popups the same visible viewport.
+            view.updatePadding(bottom = insets.getInsets(WindowInsetsCompat.Type.ime() or WindowInsetsCompat.Type.navigationBars()).bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(content)
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+        configureStudioWindow()
         setContent {
             val model: StudioViewModel = viewModel()
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -81,7 +101,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
         Surface(modifier = Modifier.fillMaxSize(), color = Canvas, contentColor = Ink) {
             Column(Modifier.fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                .imePadding()) {
+                .then(if (hostFitsBottomInsets) Modifier.consumeWindowInsets(WindowInsets.ime.union(WindowInsets.navigationBars).only(WindowInsetsSides.Bottom))
+                    else Modifier.imePadding())) {
                 Row(Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Image(painterResource(R.drawable.mlxl3_brand), null, Modifier.size(34.dp))
                     Text("MLXL3", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
@@ -155,7 +176,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                         }
                     }
                 }
-                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Column(Modifier.fillMaxWidth().then(if (hostFitsBottomInsets) Modifier else Modifier.navigationBarsPadding())
+                    .padding(horizontal = 12.dp, vertical = 8.dp)) {
                     Column(Modifier.fillMaxWidth().testTag("composer")
                         .border(1.dp, Edge, RoundedCornerShape(24.dp)).background(Panel, RoundedCornerShape(24.dp))
                         .padding(start = 18.dp, top = 16.dp, end = 10.dp, bottom = 8.dp)) {

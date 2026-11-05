@@ -260,3 +260,15 @@
   `build/AndroidComposeView{,-new}.kt` ; aucun codeamont copié dans l’app.
   MiseàjourBOMstable et suppression de TOUSles contournementslayout/focus/root,
   TextFieldState et testsréels conservés. À confronterenCI, pas encore validé.
+
+- UI6631d86/run42131287988 : ComposeBOMnouveau **ne corrige pas** le pan,
+  gap168px surpetitécran, rectanglefocus138,236..140,260 ; testéchoué. L’hypothèse
+  sur getFocusedRectamont ne suffisaitpas (la fonctionembedded résout aussi du
+  focusCompose). MiseàjourBOM retirée pour conserver le style/dépendancesvalidés.
+- Nouveaucorrectiffrontière hôteAndroid API30+ : contentFrame applique unefois
+  lebottommax(IME,navbars), sonComposeView a réellement la hauteurvisible ;
+  Composeconsomme cesinsets déjàappliqués au lieu d’ajouter un secondpadding.
+  Rectanglesdefocus/popup et layoutpartagent lemêmeviewport. Android9/10 garde
+  l’ancienpaddingCompose/adjustResize pour l’émulationd’insetslegacy. Testshôtes
+  utilisent exactement la configurationproduction, oraclesgéométriques inchangés.
+  Hypothèse à valider avant intégrationmain ; aucun gain moteur supplémentaire.

@@ -15,9 +15,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
 import android.view.KeyEvent
-import android.view.WindowManager
-import androidx.activity.SystemBarStyle
-import androidx.activity.enableEdgeToEdge
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Rule
@@ -28,13 +25,8 @@ class StudioScreenTest {
     private val answer = "Oui. LFM3 tourne directement sur ton téléphone, avec le moteur EXL3 de MLXL3."
     private val conversation get() = listOf(ChatMessage("user", "Salut, tu fonctionnes en local ?"), ChatMessage("assistant", answer))
 
-    @Suppress("DEPRECATION") // Match the production resize mode, including Android 9/10.
     @Before fun prepareWindow() {
-        compose.activityRule.scenario.onActivity {
-            it.enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-                navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
-            it.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        }
+        compose.activityRule.scenario.onActivity { it.configureStudioWindow() }
         InstrumentationRegistry.getInstrumentation().uiAutomation
             .executeShellCommand("settings put secure show_ime_with_hard_keyboard 1").close()
     }
