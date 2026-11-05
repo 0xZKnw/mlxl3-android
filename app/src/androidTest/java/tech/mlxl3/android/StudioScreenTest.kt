@@ -14,6 +14,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
+import android.view.KeyEvent
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Rule
@@ -71,6 +72,21 @@ class StudioScreenTest {
             ViewCompat.getRootWindowInsets(compose.activity.window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true
         }
         compose.onNodeWithContentDescription("Message LFM3").performTextInput("Première ligne\nDeuxième ligne\nTroisième ligne")
+        assertComposerAboveKeyboard()
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        compose.waitUntil(15_000) {
+            ViewCompat.getRootWindowInsets(compose.activity.window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == false
+        }
+        compose.onNodeWithContentDescription("Message LFM3").performClick()
+        compose.waitUntil(15_000) {
+            ViewCompat.getRootWindowInsets(compose.activity.window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+        }
+        assertComposerAboveKeyboard()
+        compose.onNodeWithContentDescription("Message LFM3").assertTextEquals("Première ligne\nDeuxième ligne\nTroisième ligne")
+        screenshot("keyboard.png")
+    }
+
+    private fun assertComposerAboveKeyboard() {
         // IME/window updates continue outside Compose; measure after they settle.
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(300, 5_000)
         compose.waitForIdle()
@@ -85,7 +101,6 @@ class StudioScreenTest {
         compose.onAllNodesWithText("MLXL3").onFirst().assertIsDisplayed()
         assertTrue("The input and send control must remain fully visible", composer.height > 80f)
         compose.onNodeWithContentDescription("Envoyer").assertIsDisplayed().assertIsEnabled()
-        screenshot("keyboard.png")
     }
 
     @Test fun initialModelImportScreen() {

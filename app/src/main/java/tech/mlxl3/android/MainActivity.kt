@@ -18,15 +18,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -70,10 +72,14 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  onStop: () -> Unit, onDismissError: () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
-        var draft by rememberSaveable { mutableStateOf("") }
+        val draft = rememberTextFieldState()
         var menu by remember { mutableStateOf(false) }
         val list = rememberLazyListState()
         val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+        val focus = LocalFocusManager.current
+        LaunchedEffect(imeBottom) {
+            if (imeBottom == 0) focus.clearFocus()
+        }
         LaunchedEffect(messages.size, messages.lastOrNull()?.text, imeBottom) {
             if (messages.isNotEmpty()) list.scrollToItem(messages.lastIndex)
         }
@@ -158,19 +164,19 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                     Column(Modifier.fillMaxWidth().testTag("composer")
                         .border(1.dp, Edge, RoundedCornerShape(24.dp)).background(Panel, RoundedCornerShape(24.dp))
                         .padding(start = 18.dp, top = 16.dp, end = 10.dp, bottom = 8.dp)) {
-                        BasicTextField(value = draft, onValueChange = { draft = it }, enabled = !busy && ready,
+                        BasicTextField(state = draft, enabled = !busy && ready,
                             textStyle = TextStyle(color = Ink, fontSize = 16.sp, lineHeight = 24.sp), cursorBrush = SolidColor(Ink),
-                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences), maxLines = 5,
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences), lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
                             modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 136.dp)
                                 .semantics { contentDescription = "Message LFM3" },
-                            decorationBox = { inner -> Box { if (draft.isEmpty()) Text("Écrivez à LFM3…", color = Quiet, fontSize = 16.sp); inner() } })
+                            decorator = { inner -> Box { if (draft.text.isEmpty()) Text("Écrivez à LFM3…", color = Quiet, fontSize = 16.sp); inner() } })
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(5.dp).background(if (ready) Color(0xFF99B7A5) else Quiet, CircleShape))
                             Text(if (busy) status else if (ready) "LFM3 1.7B · Local" else "Modèle non chargé",
                                 color = Quiet, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
-                            val canSend = ready && draft.isNotBlank()
-                            FilledIconButton(onClick = { if (busy) onStop() else { onSend(draft); draft = "" } },
+                            val canSend = ready && draft.text.isNotBlank()
+                            FilledIconButton(onClick = { if (busy) onStop() else { onSend(draft.text.toString()); draft.edit { replace(0, length, "") } } },
                                 enabled = busy || canSend,
                                 colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink, contentColor = Canvas,
                                     disabledContainerColor = Color(0xFF303033), disabledContentColor = Color(0xFF727275)),

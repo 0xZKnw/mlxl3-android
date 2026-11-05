@@ -89,3 +89,61 @@
   réussie ; pas de modification du design approuvé. Premier ajoutducontrôle
   header a sélectionné2labelsMLXL3, assertioncorrigée vers le premierheader
   (`build/ui-small-regression.log`, `ui-small-final.log`, `ui-small-suite.log`).
+
+#### Arrêt des modifications demandé par l’utilisateur — lot3358834
+
+- Run42123893204/source33588346dd262ba16ddf9dfc52d11f04bbd19083 terminé :
+  APK,Vulkan,Kani **réussis**, UI **échouée** sur le nouveau contrôleproximitéIME
+  (gap190px, composerbottom156, fenêtre640, IME294). Le succès antérieur des
+ 5tests avec oracleanti-chevauchement ne valide donc pas ce cas. Log
+  `build/ci-335-ui.log`. Codeapplication/moteur identique à7af1cf7 ; seul le
+  test et la documentation changent. Aucun correctif supplémentaire poussé.
+- Investigation locale :320x640/mdpi, suite5testsavecproximité réussie avec
+  animationsnormales ; test ciblé aussi réussi avec animationssystème0
+  (`build/ui-small-strengthened.log`, `ui-normal-strengthened.log`,
+  `ui-ime-zero-animation.log`). L’imageAOSPARM64 API35 a été téléchargée pour
+  reproduire l’environnement, mais aucun test sur cette image n’a été lancé.
+- À la demande « laisse déjà ça finir histoire que je puisse tester l’app »,
+  investigation **interrompue** et aucun nouveau changement de code ;
+  émulateurlocal arrêté. APKCI disponible, capture/proximité sur émulateurAOSP
+  reste **non résolue**. S24 et modèlecomplet toujoursnonvérifiés.
+
+### ANDROID-UI-2026-11-05-04 — reprise du correctif IME — en cours
+
+- Autorisation de reprise : « ok c’est bon tu peux fix ». Baseline3358834,
+  oracleUIstrict conservé (gap<=12dp et header visible) ; échecCI190px conservé.
+- Périmètre : fenêtreActivity/insets/composer, hôte des tests et CIUI. Aucun
+  changement moteur, benchmark ou gain de vitesse prévu. Reproduire sur AOSP35
+  ARM64/mdpi320x640 avant correctif ; comparer au GoogleAPI35 déjà passé.
+- Vérifier le parcours réel clavier/saisie multilignes/fermeture et réouverture,
+  puis suiteUI/JVM/lint/APK ; vérifier le runGitHub exact après publication.
+  Kotlin/Compose n’a pas de vérificateur source praticable installé ; aucune
+  preuve formelle de dispositionAndroid revendiquée. Limites physiquesS24 inchangées.
+
+- RepriseUI : contre-exemple190px reproduit sur AOSP35ARM64
+  (`build/ui-aosp-before-retry.log`). Inversionordre fenêtre puis mode
+  ADJUST_NOTHING essayés, mêmes190px, retirés (`ui-aosp-window-order.log`,
+  `ui-aosp-fixed.log`). DiagnosticcontenuY=-182 avecsurface640 confirmepan.
+  Remplacement du champvalue/callback par TextFieldState déjà disponible dans
+  Compose1.8 : testclavier strict réussi (`ui-aosp-stateful-retry.log`).
+  Premier essai utilisait une extensiondelete non importée, remplacée par le
+  membre replace ; aucun ajout de dépendance. Testscomplets et cyclesIME à finir.
+- Nouvelle demande lenteurprefill+decode sur S24. Relecture du moteur et du
+  journal : poidsGPU déjà résidents, décodageprocéduralcodebook par poids.
+  Piste tableprécalculée identifiée, **aucun prototype ni benchmark moteur lancé**.
+  L’utilisateur signale un profilage dans un autrechat : mesuresmoteur différées
+  pour ne pas interférer ; attendre ces résultats avant optimisation. Moteur
+  inchangé. ÉmulateursUI utilisentSwiftShaderlogiciel, testsUI uniquement.
+
+- Vérification supplémentaire : le champTextFieldState seul passe l’ouverture
+  initiale mais échoue après fermeture/réouverture sur l’AVDAOSP sansprofil
+  (mêmes190px, `build/ui-aosp-ci-final-retry.log`). Régression conservée et
+  aucune conclusion de correction complète. TestcycleIME maintenu, brouillon
+  conservé attendu. Essai complémentaire : libérer le focus à la fermetureIME.
+- Hôte des tests : premierAVDPixel6 redimensionné320x640 avait une découpe128px
+  héritée, retiré du protocole principal ; nouvelAVDsansprofil conformeCI.
+  Premier lancement du secondAVDtransportADB absent, relancewipe-data sur5584
+  fonctionnelle. Tous nos émulateurs arrêtés avant la capture de l’autrechat.
+- Consultation du chat « Consulter l’issue75 » : profilageAR39Desktop/M5 en
+  préparation. Aucun benchmarkAndroid ni modèleGPUsupplémentaire lancé.
+  Vérifications lourdes suivantes déportées enCI pour laisser le Mac libre.
