@@ -247,3 +247,16 @@
 - Utilisateur précise quantificationS24 **4,49bpw exactement** ; ne pas assimiler
   au benchmarksynthetique4bits. Tousbitratessont couvertsnumériquement mais
   aucun débit ni paritécomplète de cecheckpoint physique n’est mesuré.
+
+- UIa66373e/run42130625343 : testsrenforcés **détectent** le popupmalancré sur
+ 2résolutions (petitécran centre139,98 vscomposer30,215..298,330), donc oracle
+  géométrique crédible. doOnNextLayout+requestRectangleimmédiat ne résout pas
+  l’ancrage, retiré. Moteur/format/kernels inchangés.
+- Rechercheamont : source officielleCompose1.8 getFocusedRect renvoie le focus
+  interne ; source1.12.1 renvoie la vuecomplète pour contenuCompose et réserve
+  le rectanglelocal aux vuesembarquées, évitant le panViewRoot parasite. Maven
+  Google publie BOM2026.09.00→UI/Foundation/Runtime1.12.1/Material3 1.4.0,
+  Kotlinstdlib2.1.20 compatible compilateur2.2.10 existant. Comparaisonsources
+  `build/AndroidComposeView{,-new}.kt` ; aucun codeamont copié dans l’app.
+  MiseàjourBOMstable et suppression de TOUSles contournementslayout/focus/root,
+  TextFieldState et testsréels conservés. À confronterenCI, pas encore validé.

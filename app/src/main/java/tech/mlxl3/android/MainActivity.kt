@@ -28,7 +28,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -41,7 +40,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.core.view.doOnNextLayout
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,18 +75,6 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
         var menu by remember { mutableStateOf(false) }
         val list = rememberLazyListState()
         val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
-        val view = LocalView.current
-        LaunchedEffect(imeBottom, draft.text) {
-            // Sync the focused rect before popups are positioned, without a second native pan animation.
-            view.doOnNextLayout {
-                if (it.hasFocus()) {
-                    val rect = android.graphics.Rect()
-                    it.getFocusedRect(rect)
-                    it.requestRectangleOnScreen(rect, true)
-                }
-            }
-            view.requestLayout()
-        }
         LaunchedEffect(messages.size, messages.lastOrNull()?.text, imeBottom) {
             if (messages.isNotEmpty()) list.scrollToItem(messages.lastIndex)
         }
