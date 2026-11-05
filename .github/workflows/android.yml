@@ -8,10 +8,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: android-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   apk:
     runs-on: ubuntu-24.04
@@ -131,7 +127,7 @@ jobs:
           script: |
             set -e
             ./gradlew --no-daemon -PuiTest :app:connectedDebugAndroidTest
-            adb pull /sdcard/Android/data/tech.mlxl3.android/files/screenshots ui-screenshots
+            adb pull /sdcard/Pictures/MLXL3-tests ui-screenshots
       - uses: actions/upload-artifact@v4
         if: always()
         with:
