@@ -2017,20 +2017,17 @@ mod tests {
 
     #[test]
     fn cooperative_k4_load_windows_cover_every_lane_and_wrap() {
-        let words: Vec<u32> = (0..32)
-            .map(|i| 0x9e37_79b9u32.wrapping_mul(i + 1))
-            .collect();
+        let mut requested = [0u32; 32];
         for lane in 0..32u32 {
             let bit = ((8 * lane + 1) * 4 + 256 * 4 - 16) % (256 * 4);
             let word = bit / 32;
             let shift = bit % 32;
-            let loads = (shift + 7 * 4 + 16 + 31) / 32;
+            let loads = (shift + 7 * 4 + 16).div_ceil(32);
             assert_eq!(loads, 2);
-            let direct = [words[word as usize], words[((word + 1) % 32) as usize]];
-            // A full wave32 owns exactly one word per subgroup invocation.
-            let cooperative = [words[word as usize], words[((word + 1) % 32) as usize]];
-            assert_eq!(cooperative, direct, "lane {lane}");
+            requested[word as usize] += 1;
+            requested[((word + 1) % 32) as usize] += 1;
         }
+        assert_eq!(requested, [2; 32]);
     }
 
     fn resident_matrix(gpu: &mut Gpu, input: usize, output: usize, seed: usize) -> Exl3Matrix {
