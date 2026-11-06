@@ -1350,20 +1350,23 @@ impl Gpu {
     ) -> Result<(Vec<Vec<f32>>, Vec<f32>)> {
         ensure!(valid_group_size(matrices.len()), "Invalid QKV group size");
         ensure!(
-            matrices.iter().all(|m| Arc::ptr_eq(&m.weights.device, &self.device)
-                && x.len() == m.shape.input)
+            matrices
+                .iter()
+                .all(|m| Arc::ptr_eq(&m.weights.device, &self.device) && x.len() == m.shape.input)
                 && Arc::ptr_eq(&gate_weights.device, &self.device)
                 && x.iter().all(|v| v.is_finite()),
             "Invalid grouped attention input or device"
         );
         ensure!(
-            matrices.iter().enumerate().all(|(i, m)| matrices[..i]
+            matrices
                 .iter()
-                .all(|other| other.command != m.command)),
+                .enumerate()
+                .all(|(i, m)| matrices[..i].iter().all(|other| other.command != m.command)),
             "Duplicate matrix in QKV group"
         );
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
-        let params = self.validate_projection(gate_weights, &rounded, gate_outputs, 0, gate_dtype)?;
+        let params =
+            self.validate_projection(gate_weights, &rounded, gate_outputs, 0, gate_dtype)?;
         if self.gate_input.is_none() {
             let input = self.scratch_buffer()?;
             let output = self.scratch_buffer()?;
@@ -1372,14 +1375,22 @@ impl Gpu {
         }
         self.upload(x)?;
         let input = self.gate_input.as_ref().context("Gate input unavailable")?;
-        let output = self.gate_output.as_ref().context("Gate output unavailable")?;
+        let output = self
+            .gate_output
+            .as_ref()
+            .context("Gate output unavailable")?;
         let bytes = unsafe {
-            std::slice::from_raw_parts(rounded.as_ptr().cast::<u8>(), std::mem::size_of_val(rounded.as_slice()))
+            std::slice::from_raw_parts(
+                rounded.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(rounded.as_slice()),
+            )
         };
         input.write(bytes)?;
         let recording = Instant::now();
         unsafe {
-            self.device.raw.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .raw
+                .reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
         }
         self.record_jobs(
             self.command,
@@ -1406,7 +1417,10 @@ impl Gpu {
         }
         self.collect_gate_interval();
         let started = Instant::now();
-        let qkv = matrices.iter().map(|m| m.output.read_f32(m.shape.output)).collect::<Result<Vec<_>>>()?;
+        let qkv = matrices
+            .iter()
+            .map(|m| m.output.read_f32(m.shape.output))
+            .collect::<Result<Vec<_>>>()?;
         let gate = output.read_f32(gate_outputs)?;
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
         Ok((qkv, gate))
@@ -1431,11 +1445,13 @@ impl Gpu {
             match result {
                 Ok(()) => {
                     if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
-                        let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
+                        let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period))
+                            as u64;
                         p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
                         p.device_other_ns = p.device_other_ns.saturating_add(ns);
                         p.device_attention_gate_ns = p.device_attention_gate_ns.saturating_add(ns);
-                        p.device_attention_gate_samples = p.device_attention_gate_samples.saturating_add(1);
+                        p.device_attention_gate_samples =
+                            p.device_attention_gate_samples.saturating_add(1);
                         p.device_samples = p.device_samples.saturating_add(1);
                     }
                 }
@@ -2137,14 +2153,20 @@ mod tests {
         let v = resident_matrix(&mut gpu, 128, 128, 3);
         let x: Vec<f32> = (0..128).map(|i| (i as f32 - 63.5) / 127.).collect();
         let gate_bytes: Vec<u8> = (0..128 * 16)
-            .flat_map(|i| half::f16::from_f32((i as f32 % 29. - 14.) / 32.).to_bits().to_le_bytes())
+            .flat_map(|i| {
+                half::f16::from_f32((i as f32 % 29. - 14.) / 32.)
+                    .to_bits()
+                    .to_le_bytes()
+            })
             .collect();
         let weights = gpu.buffer(&gate_bytes).unwrap();
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
         let expected_qkv = gpu.project_exl3_batch(&[&q, &k, &v], &x).unwrap();
         let expected_gate = gpu.multiply(&weights, &rounded, 16, 0, 0).unwrap();
         let before = gpu.submission_count();
-        let (actual_qkv, actual_gate) = gpu.project_exl3_with_dense_gate(&[&q, &k, &v], &weights, 16, 0, &x).unwrap();
+        let (actual_qkv, actual_gate) = gpu
+            .project_exl3_with_dense_gate(&[&q, &k, &v], &weights, 16, 0, &x)
+            .unwrap();
         assert_eq!(gpu.submission_count() - before, 1);
         assert_eq!(actual_qkv, expected_qkv);
         assert_eq!(actual_gate, expected_gate);

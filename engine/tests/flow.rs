@@ -169,7 +169,8 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
-        assert_eq!(engine.model.gpu.submission_count() - before, 11);
+        // Two attention gates now share their QKV submissions.
+        assert_eq!(engine.model.gpu.submission_count() - before, 9);
         assert_eq!(reference[index].len(), last.len());
         for (actual, bits) in last.iter().zip(&reference[index]) {
             let expected = f32::from_bits(*bits);

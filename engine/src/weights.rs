@@ -210,15 +210,25 @@ impl Linear {
         ensure!(gate.input == x.len(), "Gate input shape mismatch");
         if let Storage::Dense { chunks, dtype } = &gate.storage {
             if let [(weights, rows)] = chunks.as_slice() {
-                let matrices = qkv.iter().map(|l| match &l.storage {
-                    Storage::Exl3(matrix) => Ok(matrix),
-                    Storage::Dense { .. } => anyhow::bail!("Grouped projections require EXL3 weights"),
-                }).collect::<Result<Vec<_>>>()?;
+                let matrices = qkv
+                    .iter()
+                    .map(|l| match &l.storage {
+                        Storage::Exl3(matrix) => Ok(matrix),
+                        Storage::Dense { .. } => {
+                            anyhow::bail!("Grouped projections require EXL3 weights")
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let (values, mut gate_values) =
                     gpu.project_exl3_with_dense_gate(&matrices, weights, *rows, *dtype, x)?;
                 gate_values.iter_mut().for_each(|v| *v = math::half(*v));
-                ensure!(gate_values.len() == gate.output && gate_values.iter().all(|v| v.is_finite()), "Invalid gate output");
-                let values = values.try_into().map_err(|_| anyhow::anyhow!("Grouped linear output count mismatch"))?;
+                ensure!(
+                    gate_values.len() == gate.output && gate_values.iter().all(|v| v.is_finite()),
+                    "Invalid gate output"
+                );
+                let values = values
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Grouped linear output count mismatch"))?;
                 return Ok((values, gate_values));
             }
         }
