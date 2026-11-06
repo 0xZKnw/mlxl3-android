@@ -299,6 +299,8 @@ pub struct Gpu {
     wave_kernels: [bool; 8],
     force_wave32: bool,
     allow_wave32: bool,
+    allow_cooperative_k4: bool,
+    cooperative_k4_active: bool,
     native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
     prepared: usize,
@@ -558,6 +560,11 @@ impl Gpu {
             force_wave32,
             allow_wave32: (force_wave32 || (1..=32).contains(&subgroup.subgroup_size))
                 && props.limits.max_compute_work_group_count[1] >= 4,
+            allow_cooperative_k4: (force_wave32 || subgroup.subgroup_size == 32)
+                && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::SHUFFLE)
+                && props.limits.max_compute_work_group_count[1] >= 4,
+            cooperative_k4_active: false,
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
@@ -967,6 +974,7 @@ impl Gpu {
             "projection":"gpu_resident_mlp_conv",
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|v.then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":"four_rows_fp32",
+            "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
             "limits":{"storage_buffer_bytes":self.max_range,"shared_memory_bytes":self.properties.limits.max_compute_shared_memory_size,
@@ -1047,6 +1055,20 @@ impl Gpu {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
         if self.qmv_stream[index] == vk::Pipeline::null() {
+            if bits == 4 && self.native_verified && self.allow_cooperative_k4 {
+                let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"));
+                match self.pipeline_with_subgroup(bytes, None, true) {
+                    Ok(pipeline) => {
+                        self.qmv_stream[index] = pipeline;
+                        self.native_kernels[index] = true;
+                        self.wave_kernels[index] = true;
+                        self.cooperative_k4_active = true;
+                        self.capture_stats("exl3_4bit_wave32_cooperative".into(), pipeline);
+                        return Ok(pipeline);
+                    }
+                    Err(err) => self.native_pipeline_errors.push(format!("cooperative K4: {err}")),
+                }
+            }
             if self.native_verified && self.allow_wave32 {
                 let binaries: [&[u8]; 8] = [
                     include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_1.spv")),
@@ -1235,7 +1257,9 @@ impl Gpu {
             bits: shape.bits,
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
-            kernel: if split {
+            kernel: if split && shape.bits == 4 && self.cooperative_k4_active {
+                "wave32_split4_cooperative_k4"
+            } else if split {
                 "wave32_split4_native_f16"
             } else if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
                 "native_f16_literal"
@@ -1984,6 +2008,23 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cooperative_k4_load_windows_cover_every_lane_and_wrap() {
+        let words: Vec<u32> = (0..32).map(|i| 0x9e37_79b9u32.wrapping_mul(i + 1)).collect();
+        for lane in 0..32u32 {
+            let bit = ((8 * lane + 1) * 4 + 256 * 4 - 16) % (256 * 4);
+            let word = bit / 32;
+            let shift = bit % 32;
+            let loads = (shift + 7 * 4 + 16 + 31) / 32;
+            assert_eq!(loads, 2);
+            let direct = [words[word as usize], words[((word + 1) % 32) as usize]];
+            // A full wave32 owns exactly one word per subgroup invocation.
+            let cooperative = [words[word as usize], words[((word + 1) % 32) as usize]];
+            assert_eq!(cooperative, direct, "lane {lane}");
+        }
+    }
+
     fn resident_matrix(gpu: &mut Gpu, input: usize, output: usize, seed: usize) -> Exl3Matrix {
         let packed = codec::pack(
             &(0..input * output)
