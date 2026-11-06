@@ -30,7 +30,9 @@ struct TraceSpan;
 impl TraceSpan {
     fn begin(name: &CStr) -> Self {
         #[cfg(target_os = "android")]
-        unsafe { ATrace_beginSection(name.as_ptr()) };
+        unsafe {
+            ATrace_beginSection(name.as_ptr())
+        };
         #[cfg(not(target_os = "android"))]
         let _ = name;
         Self
@@ -39,7 +41,9 @@ impl TraceSpan {
 impl Drop for TraceSpan {
     fn drop(&mut self) {
         #[cfg(target_os = "android")]
-        unsafe { ATrace_endSection() };
+        unsafe {
+            ATrace_endSection()
+        };
     }
 }
 
@@ -1091,13 +1095,13 @@ impl Gpu {
             "kernel":if self.wave_kernels.iter().chain(&self.mcg_cooperative).any(|n| *n) {"register_window_16_wave32_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
             "native_float16_enabled":self.native_float16,"native_codebook_self_test":self.native_self_test,
             "native_codebook_arithmetic":"default/mcg: precise FP16 pair add; mul1: exact LUT; accumulation: FP32",
-            "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| n.then_some(i+1)).collect::<Vec<_>>(),
+            "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| (*n || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "projection":"gpu_resident_mlp_conv",
-            "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|v.then_some(i+1)).collect::<Vec<_>>(),
+            "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
-            "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
-            "cooperative_k4_self_test":self.cooperative_k4_self_test,
-            "cooperative_k5_active":self.cooperative_k5_active,"cooperative_k5_self_test":self.cooperative_k5_self_test,
+            "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
+            "cooperative_k4_self_test":if self.cooperative_k4_active {self.cooperative_k4_self_test} else if self.mcg_cooperative[3] {"passed_mcg"} else {self.cooperative_k4_self_test},
+            "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
             "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
             "split_k":self.split_k,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
