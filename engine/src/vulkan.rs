@@ -1105,11 +1105,7 @@ impl Gpu {
             5 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv")),
             _ => anyhow::bail!("Unsupported cooperative self-test bitrate"),
         };
-        let reference = self.pipeline_with_subgroup(
-            reference_bytes,
-            None,
-            true,
-        )?;
+        let reference = self.pipeline_with_subgroup(reference_bytes, None, true)?;
         let result = (|| -> Result<bool> {
             let rows = 128usize;
             let cols = 128usize;
@@ -1119,12 +1115,32 @@ impl Gpu {
             let packed = codec::pack(&states, bits as usize)?;
             let bytes: Vec<u8> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
             let weights = self.buffer(&bytes)?;
-            let x: Vec<f32> = (0..rows).map(|i| ((i * 13 % 17) as f32 - 8.) / 64.).collect();
+            let x: Vec<f32> = (0..rows)
+                .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+                .collect();
             for codebook in 0..3 {
                 let params = [rows as u32, cols as u32, bits, codebook];
-                let expected = self.compute_groups(reference, &weights, &x, params, cols * 4, (cols / 16) as u32)?;
-                let actual = self.compute_groups(candidate, &weights, &x, params, cols * 4, (cols / 16) as u32)?;
-                if !expected.iter().zip(&actual).all(|(a, b)| a.to_bits() == b.to_bits()) {
+                let expected = self.compute_groups(
+                    reference,
+                    &weights,
+                    &x,
+                    params,
+                    cols * 4,
+                    (cols / 16) as u32,
+                )?;
+                let actual = self.compute_groups(
+                    candidate,
+                    &weights,
+                    &x,
+                    params,
+                    cols * 4,
+                    (cols / 16) as u32,
+                )?;
+                if !expected
+                    .iter()
+                    .zip(&actual)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+                {
                     return Ok(false);
                 }
             }
@@ -1151,10 +1167,11 @@ impl Gpu {
                         let verified = match self.verify_cooperative(bits, pipeline) {
                             Ok(verified) => verified,
                             Err(err) => {
-                                if !self.device.abandoned.load(Ordering::Relaxed) {
-                                    unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                                if self.device.abandoned.load(Ordering::Relaxed) {
+                                    return Err(err);
                                 }
-                                return Err(err);
+                                self.native_pipeline_errors.push(format!("cooperative K{bits} self-test: {err}"));
+                                false
                             }
                         };
                         if verified {
@@ -1168,13 +1185,21 @@ impl Gpu {
                                 self.cooperative_k5_active = true;
                                 self.cooperative_k5_self_test = "passed";
                             }
-                            self.capture_stats(format!("exl3_{bits}bit_wave32_cooperative"), pipeline);
+                            self.capture_stats(
+                                format!("exl3_{bits}bit_wave32_cooperative"),
+                                pipeline,
+                            );
                             return Ok(pipeline);
                         }
-                        if bits == 4 { self.cooperative_k4_self_test = "mismatch_fallback"; }
-                        else { self.cooperative_k5_self_test = "mismatch_fallback"; }
+                        if bits == 4 {
+                            self.cooperative_k4_self_test = "mismatch_fallback";
+                        } else {
+                            self.cooperative_k5_self_test = "mismatch_fallback";
+                        }
                         unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
-                        self.native_pipeline_errors.push(format!("cooperative K{bits} parity mismatch; using fallback"));
+                        self.native_pipeline_errors.push(format!(
+                            "cooperative K{bits} parity mismatch; using fallback"
+                        ));
                     }
                     Err(err) => self
                         .native_pipeline_errors
@@ -1529,7 +1554,9 @@ impl Gpu {
         );
         let started = Instant::now();
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
-        self.record_profile(|p| p.projection_cpu_ns = p.projection_cpu_ns.saturating_add(elapsed_ns(started)));
+        self.record_profile(|p| {
+            p.projection_cpu_ns = p.projection_cpu_ns.saturating_add(elapsed_ns(started))
+        });
         ensure!(
             rounded.iter().all(|v| v.is_finite()),
             "Invalid rounded gate input"
