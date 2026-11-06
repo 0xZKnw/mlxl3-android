@@ -1,5 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#ifdef EXL3_COOPERATIVE_K4
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#endif
 #ifdef EXL3_NATIVE
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #endif
@@ -54,10 +58,20 @@ void main() {
     vec2 acc = vec2(0.0);
     for (uint tile = begin; tile < end; ++tile) {
         uint base = (tile * (p.cols / 16u) + gl_WorkGroupID.x) * WORDS;
+#ifdef EXL3_COOPERATIVE_K4
+        // K4 has exactly 32 packed words per tile. This variant is selected
+        // only for a full, shuffle-capable subgroup of 32 invocations.
+        uint owned = packed[base + gl_SubgroupInvocationID];
+        uint w0 = subgroupShuffle(owned, word);
+        uint w1 = subgroupShuffle(owned, (word + 1u) % WORDS);
+        uint w2 = 0u;
+        uint w3 = 0u;
+#else
         uint w0 = packed[base + word];
         uint w1 = loads > 1u ? packed[base + (word + 1u) % WORDS] : 0u;
         uint w2 = loads > 2u ? packed[base + (word + 2u) % WORDS] : 0u;
         uint w3 = loads > 3u ? packed[base + (word + 3u) % WORDS] : 0u;
+#endif
         uvec3 a = uvec3((w0 << shift) | ((w1 >> 1u) >> (31u - shift)),
                        ALIGNED > 1u ? (w1 << shift) | ((w2 >> 1u) >> (31u - shift)) : 0u,
                        ALIGNED > 2u ? (w2 << shift) | ((w3 >> 1u) >> (31u - shift)) : 0u);
