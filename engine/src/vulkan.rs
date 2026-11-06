@@ -316,6 +316,8 @@ pub struct Gpu {
     output: Option<Buffer>,
     codebooks: Option<Buffer>,
     batch_outputs: Vec<Buffer>,
+    gate_input: Option<Buffer>,
+    gate_output: Option<Buffer>,
     submissions: Cell<u64>,
     profile: RefCell<Profile>,
     projection_meta: Vec<ProjectionMeta>,
@@ -584,6 +586,8 @@ impl Gpu {
             output: None,
             codebooks: None,
             batch_outputs: vec![],
+            gate_input: None,
+            gate_output: None,
             submissions: Cell::new(0),
             profile: RefCell::new(Profile::default()),
             projection_meta: vec![],
@@ -1334,6 +1338,115 @@ impl Gpu {
         result
     }
 
+    /// Submit independent Q/K/V projections and a dense attention gate together.
+    /// The gate has its own FP16-rounded input buffer; EXL3 still receives x unchanged.
+    pub(crate) fn project_exl3_with_dense_gate(
+        &mut self,
+        matrices: &[&Exl3Matrix],
+        gate_weights: &Buffer,
+        gate_outputs: usize,
+        gate_dtype: u32,
+        x: &[f32],
+    ) -> Result<(Vec<Vec<f32>>, Vec<f32>)> {
+        ensure!(valid_group_size(matrices.len()), "Invalid QKV group size");
+        ensure!(
+            matrices.iter().all(|m| Arc::ptr_eq(&m.weights.device, &self.device)
+                && x.len() == m.shape.input)
+                && Arc::ptr_eq(&gate_weights.device, &self.device)
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid grouped attention input or device"
+        );
+        ensure!(
+            matrices.iter().enumerate().all(|(i, m)| matrices[..i]
+                .iter()
+                .all(|other| other.command != m.command)),
+            "Duplicate matrix in QKV group"
+        );
+        let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
+        let params = self.validate_projection(gate_weights, &rounded, gate_outputs, 0, gate_dtype)?;
+        if self.gate_input.is_none() {
+            let input = self.scratch_buffer()?;
+            let output = self.scratch_buffer()?;
+            self.gate_input = Some(input);
+            self.gate_output = Some(output);
+        }
+        self.upload(x)?;
+        let input = self.gate_input.as_ref().context("Gate input unavailable")?;
+        let output = self.gate_output.as_ref().context("Gate output unavailable")?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(rounded.as_ptr().cast::<u8>(), std::mem::size_of_val(rounded.as_slice()))
+        };
+        input.write(bytes)?;
+        let recording = Instant::now();
+        unsafe {
+            self.device.raw.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
+        }
+        self.record_jobs(
+            self.command,
+            &self.descriptors,
+            &[Dispatch {
+                input,
+                weights: gate_weights,
+                output,
+                params,
+                outputs: gate_outputs,
+                groups: dense_groups(gate_outputs).context("Invalid gate groups")?,
+                groups_y: 1,
+                pipeline: self.dense,
+                barrier_after: false,
+            }],
+            vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            Some(2),
+        )?;
+        let mut commands: Vec<_> = matrices.iter().map(|m| m.command).collect();
+        commands.push(self.command);
+        self.submit_graph(&commands, recording)?;
+        for matrix in matrices {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
+        self.collect_gate_interval();
+        let started = Instant::now();
+        let qkv = matrices.iter().map(|m| m.output.read_f32(m.shape.output)).collect::<Result<Vec<_>>>()?;
+        let gate = output.read_f32(gate_outputs)?;
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        Ok((qkv, gate))
+    }
+
+    fn collect_gate_interval(&self) {
+        if self.queries == vk::QueryPool::null() {
+            return;
+        }
+        let mut ticks = [0u64; 2];
+        let started = Instant::now();
+        let result = unsafe {
+            self.device.raw.get_query_pool_results(
+                self.queries,
+                2,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        self.record_profile(|p| {
+            p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started));
+            match result {
+                Ok(()) => {
+                    if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
+                        let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
+                        p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
+                        p.device_other_ns = p.device_other_ns.saturating_add(ns);
+                        p.device_attention_gate_ns = p.device_attention_gate_ns.saturating_add(ns);
+                        p.device_attention_gate_samples = p.device_attention_gate_samples.saturating_add(1);
+                        p.device_samples = p.device_samples.saturating_add(1);
+                    }
+                }
+                Err(err) => {
+                    p.query_read_failures = p.query_read_failures.saturating_add(1);
+                    p.last_query_error = Some(format!("attention gate: {err:?}"));
+                }
+            }
+        });
+    }
+
     fn submit_graph(&self, commands: &[vk::CommandBuffer], recording: Instant) -> Result<()> {
         let mut batch = Vec::with_capacity(commands.len() + 2);
         batch.push(self.queue_start);
@@ -2014,6 +2127,28 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; mixed dense attention gate and QKV"]
+    fn resident_grouped_gate_matches_separate_submissions() {
+        let mut gpu = Gpu::new().unwrap();
+        let q = resident_matrix(&mut gpu, 128, 128, 1);
+        let k = resident_matrix(&mut gpu, 128, 128, 2);
+        let v = resident_matrix(&mut gpu, 128, 128, 3);
+        let x: Vec<f32> = (0..128).map(|i| (i as f32 - 63.5) / 127.).collect();
+        let gate_bytes: Vec<u8> = (0..128 * 16)
+            .flat_map(|i| half::f16::from_f32((i as f32 % 29. - 14.) / 32.).to_bits().to_le_bytes())
+            .collect();
+        let weights = gpu.buffer(&gate_bytes).unwrap();
+        let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
+        let expected_qkv = gpu.project_exl3_batch(&[&q, &k, &v], &x).unwrap();
+        let expected_gate = gpu.multiply(&weights, &rounded, 16, 0, 0).unwrap();
+        let before = gpu.submission_count();
+        let (actual_qkv, actual_gate) = gpu.project_exl3_with_dense_gate(&[&q, &k, &v], &weights, 16, 0, &x).unwrap();
+        assert_eq!(gpu.submission_count() - before, 1);
+        assert_eq!(actual_qkv, expected_qkv);
+        assert_eq!(actual_gate, expected_gate);
+    }
 
     #[test]
     fn cooperative_k4_load_windows_cover_every_lane_and_wrap() {

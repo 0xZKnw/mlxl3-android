@@ -470,7 +470,8 @@ impl Attention {
         c: &Config,
         position: usize,
     ) -> Result<Vec<f32>> {
-        let [mut q, mut k, v] = Linear::forward_group([&self.q, &self.k, &self.v], gpu, x)?;
+        let ([mut q, mut k, v], gate) =
+            Linear::forward_qkv_gate([&self.q, &self.k, &self.v], &self.gate, gpu, x)?;
         for head in q.chunks_exact_mut(c.head_dim) {
             head.copy_from_slice(&normalize(gpu, head, &self.q_norm, c.norm_eps)?);
         }
@@ -507,7 +508,6 @@ impl Attention {
                 .attention_cpu_ns
                 .saturating_add(crate::vulkan::elapsed_ns(started))
         });
-        let gate = self.gate.forward(gpu, x)?;
         let started = std::time::Instant::now();
         let attended = attention(
             &q,
