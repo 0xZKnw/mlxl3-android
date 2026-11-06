@@ -109,3 +109,33 @@ et les coûts du profiler. Aucun percentile ni capteur de fréquence n'est inven
 
 Aucun benchmarkGPUmatérielMac ni vrai checkpoint concurrent. Parité complète
 LFM3-1.7B4,49bpw, débit/stabilité/température/RAMS24 de cetAPK nonvérifiés ici.
+
+## Réception CI et APK
+
+Source `45cc54a9e1cebabb585c205b9ed5ad86a2f2ec37`,
+[run42293170049](https://github.com/0xZKnw/mlxl3-android/actions/runs/42293170049) :
+**cinqjobs réussis**, logs/résultats inspectés.21CPU, dixcontrôlesVulkan,
+batch+Engine répétés souscoucheKhronos/syncvalidation, douzetestsUI (six par
+écran). Natif393216comparaisons réellement activé surMesa et repli volontaire
+testés ; aucunVUID/SYNC-HAZARD surlesdeuxparcours contrôlés. Kani du commit
+exact :13harnais/1256obligations/28covers, troisformatstdinatteignables ;
+ciblémémoire190 préalable noncomptédeuxfois. TestsJVM inchangés depuiscache,
+Clippyhost/ARM64, fmt/SPIR-V/lint/builds réussis. Benchmark facultatif sauté.
+
+[APK13541170550](https://github.com/0xZKnw/mlxl3-android/actions/runs/42293170049/artifacts/13541170550) :
+
+- ZIP13 309 406octets, digestGitHub vérifié
+  `eb58fcee57cf34b4822cd5afbec3863a01661c73792334528b0796396ab52bc7`.
+- `debug/app-debug.apk`,34 201 796octets, SHA-256 contreSHA256SUMS
+  `9f94a9414bad64a43ff6ffdbf055c044ff2fea4d973c6f132ebc46f7d42b99cd`.
+- Signaturev2 vérifiée parapksigner36.0.0 ; zipalign16K, deuxlibsARM64 et
+  segmentsLOAD moteur0x4000 vérifiés. SourceSHA etmarqueursnatif/diagnostic
+  retrouvés dans le moteur embarqué, SHA-256
+  `4c478adc0ce1aac6ab8b5047cd96e164194e4c29934e44701f1486b3c45a4527`.
+
+APK local `build/apk-45cc54a/debug/app-debug.apk`, logsCI
+`build/perf14-15-ci-{apk,proofs,vulkan,ui-small,ui-phone}.log` nonversionnés.
+[Log de validationVulkan](https://github.com/0xZKnw/mlxl3-android/actions/runs/42293170049/artifacts/13540782006).
+État **public/APKCI**, aucune release ni installationtéléphone. Recherche14
+terminée, diagnostic etvariante15 fonctionnellement validés dans les domaines
+décrits ; gainS24 **nonmesuré/nonconcluant**. Aucun essai encore en cours.

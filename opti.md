@@ -967,3 +967,27 @@
   **GainS24 nonmesuré/nonconcluant** ; aucune mesureGPUmatérielleMac ni vrai
   checkpoint concurrent. Correction complète1.7B/Xclipse etperformances
   physiques restentàqualifier. Aucun débitprévu inventé ni promesse20tok/s.
+
+#### Publication et clôture14/15
+
+- Source `45cc54a9e1cebabb585c205b9ed5ad86a2f2ec37`,
+  [run42293170049](https://github.com/0xZKnw/mlxl3-android/actions/runs/42293170049) :
+  **cinqjobs réussis** inspectés.21CPU/10Vulkan/12UI, plusbatch+Engine sous
+  Khronos/syncvalidation sansVUID/SYNC-HAZARD. Nouveaucheminréellementactif
+  surMesa (393216comparaisons), repli explicitementtesté, pasunfauxvert de
+  fallback.13harnaisKani1256obligations/28covers, troisformatstdinatteignables ;
+  ciblémémoire190 préalable noncomptédeuxfois. JVMdepuiscache, Clippyhost/ARM64,
+  fmt, SPIR-V, lint, buildsréussis ; benchmarkLUT facultatif sauté.
+- [Artefact13541170550](https://github.com/0xZKnw/mlxl3-android/actions/runs/42293170049/artifacts/13541170550),
+  `debug/app-debug.apk`,34 201 796octets, SHA-256
+  `9f94a9414bad64a43ff6ffdbf055c044ff2fea4d973c6f132ebc46f7d42b99cd`.
+  ZIPdigest/manifest, signaturev2, zipalign16K etdeuxlibsARM64 vérifiés ; moteur
+  SHA-256 `4c478adc0ce1aac6ab8b5047cd96e164194e4c29934e44701f1486b3c45a4527`,
+  LOAD0x4000, SHA source etmarqueursnatif/diagnostic présents dans le binaire.
+- [Rapportfinal](docs/android-native-codebooks-2026-11-06.md), JSONutilisateur
+  e554439 etpreuves conservés ; logs `build/perf14-15-ci-*`, APK
+  `build/apk-45cc54a/`, contre-exempleMul1 `build/perf15-native.log`.
+  État **public/APKCI**, pas de release/installation. Recherche14 terminée ;
+  diagnostic etvariante15 **validés fonctionnellement** danslesdomainesdécrits,
+  **nonconcluants pourvitesseS24**. Aucun essai lancé encore en cours. Plein
+  checkpoint/driverXclipse etgainréel àmesurer ; aucune promesse20tok/s.
