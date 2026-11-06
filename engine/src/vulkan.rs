@@ -317,6 +317,7 @@ pub struct Gpu {
     allow_wave32: bool,
     allow_cooperative_k4: bool,
     cooperative_k4_active: bool,
+    cooperative_k4_self_test: &'static str,
     native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
     prepared: usize,
@@ -587,6 +588,7 @@ impl Gpu {
                     .contains(vk::SubgroupFeatureFlags::SHUFFLE)
                 && props.limits.max_compute_work_group_count[1] >= 4,
             cooperative_k4_active: false,
+            cooperative_k4_self_test: "not_run",
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
@@ -999,6 +1001,7 @@ impl Gpu {
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|v.then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":"four_rows_fp32",
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
+            "cooperative_k4_self_test":self.cooperative_k4_self_test,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
             "limits":{"storage_buffer_bytes":self.max_range,"shared_memory_bytes":self.properties.limits.max_compute_shared_memory_size,
@@ -1091,6 +1094,38 @@ impl Gpu {
         });
     }
 
+    fn verify_cooperative_k4(&mut self, candidate: vk::Pipeline) -> Result<bool> {
+        let reference = self.pipeline_with_subgroup(
+            include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv")),
+            None,
+            true,
+        )?;
+        let result = (|| -> Result<bool> {
+            let rows = 128usize;
+            let cols = 128usize;
+            let states: Vec<u16> = (0..rows * cols)
+                .map(|i| (i.wrapping_mul(181).wrapping_add(i / 13 * 911 + 37)) as u16)
+                .collect();
+            let packed = codec::pack(&states, 4)?;
+            let bytes: Vec<u8> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let weights = self.buffer(&bytes)?;
+            let x: Vec<f32> = (0..rows).map(|i| ((i * 13 % 17) as f32 - 8.) / 64.).collect();
+            for codebook in 0..3 {
+                let params = [rows as u32, cols as u32, 4, codebook];
+                let expected = self.compute_groups(reference, &weights, &x, params, cols * 4, (cols / 16) as u32)?;
+                let actual = self.compute_groups(candidate, &weights, &x, params, cols * 4, (cols / 16) as u32)?;
+                if !expected.iter().zip(&actual).all(|(a, b)| a.to_bits() == b.to_bits()) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        if !self.device.abandoned.load(Ordering::Relaxed) {
+            unsafe { self.device.raw.destroy_pipeline(reference, None) };
+        }
+        result
+    }
+
     fn stream_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
@@ -1099,12 +1134,27 @@ impl Gpu {
                 let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"));
                 match self.pipeline_with_subgroup(bytes, None, true) {
                     Ok(pipeline) => {
-                        self.qmv_stream[index] = pipeline;
-                        self.native_kernels[index] = true;
-                        self.wave_kernels[index] = true;
-                        self.cooperative_k4_active = true;
-                        self.capture_stats("exl3_4bit_wave32_cooperative".into(), pipeline);
-                        return Ok(pipeline);
+                        let verified = match self.verify_cooperative_k4(pipeline) {
+                            Ok(verified) => verified,
+                            Err(err) => {
+                                if !self.device.abandoned.load(Ordering::Relaxed) {
+                                    unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                                }
+                                return Err(err);
+                            }
+                        };
+                        if verified {
+                            self.qmv_stream[index] = pipeline;
+                            self.native_kernels[index] = true;
+                            self.wave_kernels[index] = true;
+                            self.cooperative_k4_active = true;
+                            self.cooperative_k4_self_test = "passed";
+                            self.capture_stats("exl3_4bit_wave32_cooperative".into(), pipeline);
+                            return Ok(pipeline);
+                        }
+                        self.cooperative_k4_self_test = "mismatch_fallback";
+                        unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                        self.native_pipeline_errors.push("cooperative K4 parity mismatch; using fallback".into());
                     }
                     Err(err) => self
                         .native_pipeline_errors
@@ -1422,7 +1472,9 @@ impl Gpu {
         let bytes = unsafe {
             std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
         };
+        let started = Instant::now();
         input.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
         self.submit_graph(&[gate.command], Instant::now())?;
         self.collect_gate_interval();
         output.read_f32(gate.outputs)
@@ -1453,7 +1505,9 @@ impl Gpu {
                 .all(|(i, m)| matrices[..i].iter().all(|other| other.command != m.command)),
             "Duplicate matrix in QKV group"
         );
+        let started = Instant::now();
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
+        self.record_profile(|p| p.projection_cpu_ns = p.projection_cpu_ns.saturating_add(elapsed_ns(started)));
         ensure!(
             rounded.iter().all(|v| v.is_finite()),
             "Invalid rounded gate input"
@@ -1470,7 +1524,9 @@ impl Gpu {
                 std::mem::size_of_val(rounded.as_slice()),
             )
         };
+        let started = Instant::now();
         input.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
         let recording = Instant::now();
         let mut commands: Vec<_> = matrices.iter().map(|m| m.command).collect();
         commands.push(gate.command);
