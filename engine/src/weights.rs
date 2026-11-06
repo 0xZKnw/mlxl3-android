@@ -223,8 +223,7 @@ impl Linear {
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let (values, mut gate_values) =
-                gpu.project_exl3_with_dense_gate(&matrices, plan, x)?;
+            let (values, mut gate_values) = gpu.project_exl3_with_dense_gate(&matrices, plan, x)?;
             gate_values.iter_mut().for_each(|v| *v = math::half(*v));
             ensure!(
                 gate_values.len() == gate.output && gate_values.iter().all(|v| v.is_finite()),

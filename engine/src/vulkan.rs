@@ -1387,7 +1387,10 @@ impl Gpu {
         let command = self.prepare_operator(Dispatch {
             input: self.gate_input.as_ref().context("Gate input unavailable")?,
             weights: &weights,
-            output: self.gate_output.as_ref().context("Gate output unavailable")?,
+            output: self
+                .gate_output
+                .as_ref()
+                .context("Gate output unavailable")?,
             params,
             outputs,
             groups: dense_groups(outputs).context("Invalid gate groups")?,
@@ -1395,14 +1398,30 @@ impl Gpu {
             pipeline: self.dense,
             barrier_after: false,
         })?;
-        Ok(DenseGatePlan { device: self.device.clone(), _weights: weights, input_len, outputs, command })
+        Ok(DenseGatePlan {
+            device: self.device.clone(),
+            _weights: weights,
+            input_len,
+            outputs,
+            command,
+        })
     }
 
     pub(crate) fn forward_dense_gate(&self, gate: &DenseGatePlan, x: &[f32]) -> Result<Vec<f32>> {
-        ensure!(Arc::ptr_eq(&gate.device, &self.device) && x.len() == gate.input_len && x.iter().all(|v| v.is_finite()), "Invalid gate input");
+        ensure!(
+            Arc::ptr_eq(&gate.device, &self.device)
+                && x.len() == gate.input_len
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid gate input"
+        );
         let input = self.gate_input.as_ref().context("Gate input unavailable")?;
-        let output = self.gate_output.as_ref().context("Gate output unavailable")?;
-        let bytes = unsafe { std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x)) };
+        let output = self
+            .gate_output
+            .as_ref()
+            .context("Gate output unavailable")?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
+        };
         input.write(bytes)?;
         self.submit_graph(&[gate.command], Instant::now())?;
         self.collect_gate_interval();
@@ -1435,7 +1454,10 @@ impl Gpu {
             "Duplicate matrix in QKV group"
         );
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
-        ensure!(rounded.iter().all(|v| v.is_finite()), "Invalid rounded gate input");
+        ensure!(
+            rounded.iter().all(|v| v.is_finite()),
+            "Invalid rounded gate input"
+        );
         self.upload(x)?;
         let input = self.gate_input.as_ref().context("Gate input unavailable")?;
         let output = self
