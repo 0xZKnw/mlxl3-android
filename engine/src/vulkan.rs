@@ -561,8 +561,12 @@ impl Gpu {
             allow_wave32: (force_wave32 || (1..=32).contains(&subgroup.subgroup_size))
                 && props.limits.max_compute_work_group_count[1] >= 4,
             allow_cooperative_k4: (force_wave32 || subgroup.subgroup_size == 32)
-                && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
-                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::SHUFFLE)
+                && subgroup
+                    .supported_stages
+                    .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::SHUFFLE)
                 && props.limits.max_compute_work_group_count[1] >= 4,
             cooperative_k4_active: false,
             native_pipeline_errors: vec![],
@@ -1066,7 +1070,9 @@ impl Gpu {
                         self.capture_stats("exl3_4bit_wave32_cooperative".into(), pipeline);
                         return Ok(pipeline);
                     }
-                    Err(err) => self.native_pipeline_errors.push(format!("cooperative K4: {err}")),
+                    Err(err) => self
+                        .native_pipeline_errors
+                        .push(format!("cooperative K4: {err}")),
                 }
             }
             if self.native_verified && self.allow_wave32 {
@@ -2011,7 +2017,9 @@ mod tests {
 
     #[test]
     fn cooperative_k4_load_windows_cover_every_lane_and_wrap() {
-        let words: Vec<u32> = (0..32).map(|i| 0x9e37_79b9u32.wrapping_mul(i + 1)).collect();
+        let words: Vec<u32> = (0..32)
+            .map(|i| 0x9e37_79b9u32.wrapping_mul(i + 1))
+            .collect();
         for lane in 0..32u32 {
             let bit = ((8 * lane + 1) * 4 + 256 * 4 - 16) % (256 * 4);
             let word = bit / 32;
