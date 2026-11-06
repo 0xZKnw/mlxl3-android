@@ -13,15 +13,18 @@ void main() {
     uint index = gl_WorkGroupID.x * 128u + tid;
     // Padded activations are +0 even when the padded SU scale is negative.
     precise float dot = 0.0;
-    if (p.phase == 2u) {
-        // Preserve the reference's sixteen sequential additions before the FP16 boundary.
-        for (uint part = 0u; part < 4u; ++part)
+    uint phase = p.phase & 255u;
+    uint splits = p.phase >> 8u;
+    if (splits == 0u) splits = 4u;
+    if (phase == 2u) {
+        // Preserve ordered additions before the FP16 boundary for the selected split count.
+        for (uint part = 0u; part < splits; ++part)
             for (uint quad = 0u; quad < 4u; ++quad)
                 dot += x[(part * p.cols + index) * 4u + quad];
     }
-    precise float value = p.phase == 0u
+    precise float value = phase == 0u
         ? (index < p.logical ? halfRound(halfRound(x[index]) * scale[index]) : 0.0)
-        : halfRound(p.phase == 2u ? dot : x[index]);
+        : halfRound(phase == 2u ? dot : x[index]);
     block[tid] = value;
     barrier();
     for (uint stride = 1u; stride < 128u; stride *= 2u) {
@@ -33,6 +36,6 @@ void main() {
     }
     // Same f32 sqrt(128) and FP16 boundaries as the independent CPU reference.
     value = halfRound(value / uintBitsToFloat(0x413504f3u));
-    if (p.phase != 0u) value = halfRound(value * scale[p.rows + index]);
+    if (phase != 0u) value = halfRound(value * scale[p.rows + index]);
     y[index] = value;
 }

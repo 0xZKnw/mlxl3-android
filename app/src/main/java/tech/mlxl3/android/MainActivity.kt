@@ -80,7 +80,7 @@ class MainActivity : ComponentActivity() {
             }
             StudioScreen(model.messages, model.busy, model.ready, model.status, model.device, model.error,
                 model.savedModel, { picker.launch(null) }, model::loadSaved, model::newChat,
-                model::send, model::stop, model::dismissError, model.diagnostics)
+                model::send, model::stop, model::dismissError, model.diagnostics, model.splitK, model::chooseSplitK)
         }
     }
 }
@@ -95,7 +95,8 @@ private val Edge = Color(0xFF303032)
 fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, status: String,
                  device: String, error: String?, savedModel: Boolean, onImport: () -> Unit,
                  onLoad: () -> Unit, onNew: () -> Unit, onSend: (String) -> Unit,
-                 onStop: () -> Unit, onDismissError: () -> Unit, diagnostics: String? = null) {
+                 onStop: () -> Unit, onDismissError: () -> Unit, diagnostics: String? = null,
+                 splitK: Int = 4, onSplitK: (Int) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -125,6 +126,10 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Importer un dossier EXL3") }, onClick = { menu = false; onImport() })
                             if (savedModel) DropdownMenuItem(text = { Text("Charger le modèle enregistré") }, onClick = { menu = false; onLoad() })
+                            listOf(1, 2, 4, 8).forEach { value ->
+                                DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
+                                    onClick = { menu = false; onSplitK(value) })
+                            }
                             if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
                                 menu = false
                                 context.getSystemService(ClipboardManager::class.java)

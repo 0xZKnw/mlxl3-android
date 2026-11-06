@@ -37,9 +37,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val prefs = application.getSharedPreferences("studio", 0)
+    var splitK by mutableStateOf(prefs.getInt("split_k", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
+    fun chooseSplitK(value: Int) {
+        if (busy || value !in listOf(1, 2, 4, 8)) return
+        splitK = value
+        prefs.edit().putInt("split_k", value).apply()
+        status = "Split-K $value sélectionné · rechargez le modèle"
+    }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
     private fun environment(): JSONObject = runCatching {
@@ -97,6 +104,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun loadSaved() = task {
         val path = prefs.getString("model", null) ?: error("Import a model first")
         main.post { ready = false; status = "Loading LFM3…" }
+        check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -130,6 +138,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
             ModelImport.validateFolder(stage)
             main.post { ready = false; status = "Loading LFM3…" }
+            check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

@@ -7,7 +7,7 @@ use std::{
     ffi::{CStr, CString},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Instant,
 };
@@ -37,6 +37,15 @@ fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
 }
 
 const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
+static REQUESTED_SPLIT_K: AtomicU32 = AtomicU32::new(4);
+
+pub fn set_split_k(value: u32) -> bool {
+    if ![1, 2, 4, 8].contains(&value) {
+        return false;
+    }
+    REQUESTED_SPLIT_K.store(value, Ordering::Relaxed);
+    true
+}
 
 fn codebook_offset(codebook: u32, state: u16) -> Option<usize> {
     if codebook >= 3 {
@@ -86,6 +95,23 @@ fn convolution_state_len(hidden: usize) -> Option<usize> {
 
 fn can_force_wave32(min: u32, max: u32, stages: u32, max_subgroups: u32) -> bool {
     min > 0 && min <= 32 && max >= 32 && stages & 32 != 0 && max_subgroups > 0
+}
+
+fn wave_kernel_label(split: u32, cooperative: u32) -> &'static str {
+    match (split, cooperative) {
+        (1, 4) => "wave32_split1_cooperative_k4",
+        (2, 4) => "wave32_split2_cooperative_k4",
+        (4, 4) => "wave32_split4_cooperative_k4",
+        (8, 4) => "wave32_split8_cooperative_k4",
+        (1, 5) => "wave32_split1_cooperative_k5",
+        (2, 5) => "wave32_split2_cooperative_k5",
+        (4, 5) => "wave32_split4_cooperative_k5",
+        (8, 5) => "wave32_split8_cooperative_k5",
+        (1, _) => "wave32_split1_native_f16",
+        (2, _) => "wave32_split2_native_f16",
+        (8, _) => "wave32_split8_native_f16",
+        _ => "wave32_split4_native_f16",
+    }
 }
 
 pub(crate) struct MlpPlan {
@@ -320,6 +346,7 @@ pub struct Gpu {
     cooperative_k4_self_test: &'static str,
     cooperative_k5_active: bool,
     cooperative_k5_self_test: &'static str,
+    split_k: u32,
     native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
     prepared: usize,
@@ -555,6 +582,7 @@ impl Gpu {
         });
         let amd_info = amd_info_enabled
             .then(|| ash::amd::shader_info::Device::new(&device._instance.raw, &device.raw));
+        let requested_split_k = REQUESTED_SPLIT_K.load(Ordering::Relaxed);
         let mut gpu = Self {
             device,
             properties: props,
@@ -593,6 +621,12 @@ impl Gpu {
             cooperative_k4_self_test: "not_run",
             cooperative_k5_active: false,
             cooperative_k5_self_test: "not_run",
+            split_k: if props.limits.max_compute_work_group_count[1] >= requested_split_k
+                && (requested_split_k <= 4 || props.limits.max_storage_buffer_range >= 32768 * 32 * 4) {
+                requested_split_k
+            } else {
+                4
+            },
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
@@ -734,7 +768,8 @@ impl Gpu {
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
             gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/convolution.spv")))?;
-        gpu.partials = Some(gpu.buffer(&vec![0; 32768 * 16 * 4])?);
+        let partial_bytes = 32768 * 4 * gpu.split_k.max(4) as usize * 4;
+        gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
         gpu.hadamard = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/hadamard.spv")))?;
         gpu.input = Some(gpu.scratch_buffer()?);
@@ -997,7 +1032,7 @@ impl Gpu {
             "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
             "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
             "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
-            "kernel":if self.wave_kernels.iter().any(|n| *n) {"register_window_16_wave32_split4_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
+            "kernel":if self.wave_kernels.iter().any(|n| *n) {"register_window_16_wave32_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
             "native_float16_enabled":self.native_float16,"native_codebook_self_test":self.native_self_test,
             "native_codebook_arithmetic":"default/mcg: precise FP16 pair add; mul1: exact LUT; accumulation: FP32",
             "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| n.then_some(i+1)).collect::<Vec<_>>(),
@@ -1007,6 +1042,7 @@ impl Gpu {
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
             "cooperative_k4_self_test":self.cooperative_k4_self_test,
             "cooperative_k5_active":self.cooperative_k5_active,"cooperative_k5_self_test":self.cooperative_k5_self_test,
+            "split_k":self.split_k,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
             "limits":{"storage_buffer_bytes":self.max_range,"shared_memory_bytes":self.properties.limits.max_compute_shared_memory_size,
@@ -1016,7 +1052,7 @@ impl Gpu {
                 "max_allocations":self.properties.limits.max_memory_allocation_count},
             "memory_heaps":self.device.memory.memory_heaps[..self.device.memory.memory_heap_count as usize].iter()
                 .map(|h|serde_json::json!({"bytes":h.size,"flags":h.flags.as_raw()})).collect::<Vec<_>>(),
-            "host_visibility":"once_per_group","device_timing_scope":"device_queue_ns covers whole submission including final HOST_READ; matrix intervals exclude group barriers; split4 post-Hadamard includes ordered partial reduction",
+            "host_visibility":"once_per_group","device_timing_scope":"device_queue_ns covers whole submission including final HOST_READ; matrix intervals exclude group barriers; split post-Hadamard includes ordered partial reduction",
             "prepared_matrices":self.prepared,"gpu_timestamps":self.queries != vk::QueryPool::null(),
             "timestamp_valid_bits":self.timestamp_bits,"timestamp_period_ns":self.properties.limits.timestamp_period,
             "automatic_calibration":false,"scratch_mapping":"persistent"})
@@ -1338,10 +1374,10 @@ impl Gpu {
                 input: rotated,
                 weights: &weights,
                 output,
-                params: [params[0], params[1], shape.bits, shape.codebook],
+                params: [params[0], params[1], shape.bits | (self.split_k << 8), shape.codebook],
                 outputs: shape.cols,
                 groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
-                groups_y: if split { 4 } else { 1 },
+                groups_y: if split { self.split_k } else { 1 },
                 pipeline,
                 barrier_after: true,
             },
@@ -1352,7 +1388,7 @@ impl Gpu {
                 params: [
                     params[0],
                     params[1],
-                    if split { 2 } else { 1 },
+                    if split { 2 | (self.split_k << 8) } else { 1 },
                     shape.output as u32,
                 ],
                 outputs: shape.cols,
@@ -1394,12 +1430,10 @@ impl Gpu {
             bits: shape.bits,
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
-            kernel: if split && shape.bits == 4 && self.cooperative_k4_active {
-                "wave32_split4_cooperative_k4"
-            } else if split && shape.bits == 5 && self.cooperative_k5_active {
-                "wave32_split4_cooperative_k5"
-            } else if split {
-                "wave32_split4_native_f16"
+            kernel: if split {
+                let cooperative = if shape.bits == 4 && self.cooperative_k4_active { 4 }
+                    else if shape.bits == 5 && self.cooperative_k5_active { 5 } else { 0 };
+                wave_kernel_label(self.split_k, cooperative)
             } else if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
                 "native_f16_literal"
             } else if self.native_kernels[shape.bits as usize - 1] {
@@ -1866,7 +1900,7 @@ impl Gpu {
         bits: u32,
         codebook: u32,
     ) -> Result<Vec<f32>> {
-        let params = self.validate_projection(weights, x, outputs, bits, codebook)?;
+        let mut params = self.validate_projection(weights, x, outputs, bits, codebook)?;
         if bits == 0 {
             return self.compute_groups(
                 self.dense,
@@ -1882,6 +1916,7 @@ impl Gpu {
         if !self.wave_kernels[bits as usize - 1] {
             return self.compute_groups(pipeline, weights, x, params, outputs, groups);
         }
+        params[2] |= self.split_k << 8;
         let output = self.output.as_ref().context("GPU output unavailable")?;
         let partials = self.partials.as_ref().context("GPU partials unavailable")?;
         self.execute(
@@ -1894,7 +1929,7 @@ impl Gpu {
                     params,
                     outputs,
                     groups,
-                    groups_y: 4,
+                    groups_y: self.split_k,
                     pipeline,
                     barrier_after: true,
                 },
@@ -2400,6 +2435,28 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; split-K numerical parity"]
+    fn resident_split_k_variants_match_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        let input: Vec<f32> = (0..128).map(|i| (i as f32 % 17. - 8.) / 32.).collect();
+        for bits in [4usize, 5] {
+            let states: Vec<u16> = (0..128 * 128).map(|i| (i * 37 + i / 7) as u16).collect();
+            let packed = codec::pack(&states, bits).unwrap();
+            let bytes: Vec<u8> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let weights = gpu.buffer(&bytes).unwrap();
+            for codebook in 0..3 {
+                gpu.split_k = 4;
+                let baseline = gpu.multiply(&weights, &input, 128, bits as u32, codebook).unwrap();
+                for split in [1, 2, 4, 8] {
+                    gpu.split_k = split;
+                    let actual = gpu.multiply(&weights, &input, 128, bits as u32, codebook).unwrap();
+                    assert!(actual.iter().zip(&baseline).all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005), "split {split}, bits {bits}, codebook {codebook}");
+                }
+            }
+        }
+    }
 
     #[test]
     #[ignore = "requires Vulkan; prepared dense head parity and reuse"]

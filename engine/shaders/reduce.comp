@@ -7,7 +7,9 @@ void main() {
     uint index = gl_GlobalInvocationID.x;
     if (index >= p.cols) return;
     precise float sum = 0.0;
-    for (uint part=0u; part<4u; ++part)
+    uint splits = p.bits >> 8u;
+    if (splits == 0u) splits = 4u;
+    for (uint part=0u; part<splits; ++part)
         for (uint quad=0u; quad<4u; ++quad)
             sum += x[(part*p.cols+index)*4u+quad];
     y[index] = sum;

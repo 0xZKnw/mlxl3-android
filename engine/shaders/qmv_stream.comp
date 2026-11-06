@@ -53,8 +53,14 @@ void main() {
     uint loads = (shift + SPAN + 31u) / 32u;
     uint row = (lane % 4u) * 2u;
     uint tiles = p.rows / 16u;
-    uint begin = tiles * split / 4u;
-    uint end = tiles * (split + 1u) / 4u;
+#ifdef EXL3_PARTIALS
+    uint splits = p.bits >> 8u;
+    if (splits == 0u) splits = 4u;
+#else
+    const uint splits = 4u;
+#endif
+    uint begin = tiles * split / splits;
+    uint end = tiles * (split + 1u) / splits;
     vec2 acc = vec2(0.0);
     for (uint tile = begin; tile < end; ++tile) {
         uint base = (tile * (p.cols / 16u) + gl_WorkGroupID.x) * WORDS;

@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use jni::{
     JNIEnv,
     objects::{JClass, JObject, JString, JValue},
-    sys::jstring,
+    sys::{jboolean, jint, jstring},
 };
 use std::{
     path::Path,
@@ -15,6 +15,15 @@ use std::{
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 static CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setSplitK(
+    _env: JNIEnv,
+    _class: JClass,
+    value: jint,
+) -> jboolean {
+    u8::from(value > 0 && crate::vulkan::set_split_k(value as u32))
+}
 
 fn emit(env: &mut JNIEnv, callback: &JObject, event: serde_json::Value) -> Result<()> {
     let text = env.new_string(event.to_string())?;
