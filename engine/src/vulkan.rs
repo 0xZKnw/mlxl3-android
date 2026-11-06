@@ -128,6 +128,14 @@ fn can_force_wave32(min: u32, max: u32, stages: u32, max_subgroups: u32) -> bool
 
 fn wave_kernel_label(split: u32, cooperative: u32) -> &'static str {
     match (split, cooperative) {
+        (1, 14) => "wave32_split1_cooperative_k4_mcg",
+        (2, 14) => "wave32_split2_cooperative_k4_mcg",
+        (4, 14) => "wave32_split4_cooperative_k4_mcg",
+        (8, 14) => "wave32_split8_cooperative_k4_mcg",
+        (1, 15) => "wave32_split1_cooperative_k5_mcg",
+        (2, 15) => "wave32_split2_cooperative_k5_mcg",
+        (4, 15) => "wave32_split4_cooperative_k5_mcg",
+        (8, 15) => "wave32_split8_cooperative_k5_mcg",
         (1, 4) => "wave32_split1_cooperative_k4",
         (2, 4) => "wave32_split2_cooperative_k4",
         (4, 4) => "wave32_split4_cooperative_k4",
@@ -364,6 +372,9 @@ pub struct Gpu {
     layout: vk::PipelineLayout,
     qmv: vk::Pipeline,
     qmv_stream: [vk::Pipeline; 8],
+    qmv_mcg: [vk::Pipeline; 8],
+    mcg_cooperative: [bool; 8],
+    mcg_attempted: [bool; 8],
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -633,6 +644,9 @@ impl Gpu {
             layout: vk::PipelineLayout::null(),
             qmv: vk::Pipeline::null(),
             qmv_stream: [vk::Pipeline::null(); 8],
+            qmv_mcg: [vk::Pipeline::null(); 8],
+            mcg_cooperative: [false; 8],
+            mcg_attempted: [false; 8],
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -1074,7 +1088,7 @@ impl Gpu {
             "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
             "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
             "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
-            "kernel":if self.wave_kernels.iter().any(|n| *n) {"register_window_16_wave32_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
+            "kernel":if self.wave_kernels.iter().chain(&self.mcg_cooperative).any(|n| *n) {"register_window_16_wave32_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
             "native_float16_enabled":self.native_float16,"native_codebook_self_test":self.native_self_test,
             "native_codebook_arithmetic":"default/mcg: precise FP16 pair add; mul1: exact LUT; accumulation: FP32",
             "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| n.then_some(i+1)).collect::<Vec<_>>(),
@@ -1084,6 +1098,7 @@ impl Gpu {
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
             "cooperative_k4_self_test":self.cooperative_k4_self_test,
             "cooperative_k5_active":self.cooperative_k5_active,"cooperative_k5_self_test":self.cooperative_k5_self_test,
+            "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
             "split_k":self.split_k,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
@@ -1177,7 +1192,7 @@ impl Gpu {
         });
     }
 
-    fn verify_cooperative(&mut self, bits: u32, candidate: vk::Pipeline) -> Result<bool> {
+    fn verify_cooperative(&mut self, bits: u32, candidate: vk::Pipeline, mcg_only: bool) -> Result<bool> {
         let reference_bytes: &[u8] = match bits {
             4 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv")),
             5 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv")),
@@ -1197,6 +1212,7 @@ impl Gpu {
                 .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
                 .collect();
             for codebook in 0..3 {
+                if mcg_only && codebook != 1 { continue; }
                 let params = [rows as u32, cols as u32, bits, codebook];
                 let expected = self.compute_groups(
                     reference,
@@ -1230,9 +1246,34 @@ impl Gpu {
         result
     }
 
-    fn stream_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
+    fn stream_pipeline(&mut self, bits: u32, codebook: u32) -> Result<(vk::Pipeline, bool)> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
+        if codebook == 1 && (bits == 4 || bits == 5) && self.native_verified && self.allow_cooperative_k4 {
+            if !self.mcg_attempted[index] {
+                self.mcg_attempted[index] = true;
+                let bytes: &[u8] = if bits == 4 {
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg.spv"))
+                } else {
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg.spv"))
+                };
+                if let Ok(pipeline) = self.pipeline_with_subgroup(bytes, None, true) {
+                    let verified = self.verify_cooperative(bits, pipeline, true);
+                    if matches!(&verified, Ok(true)) {
+                        self.qmv_mcg[index] = pipeline;
+                        self.mcg_cooperative[index] = true;
+                        self.capture_stats(format!("exl3_{bits}bit_wave32_cooperative_mcg"), pipeline);
+                    } else {
+                        if self.device.abandoned.load(Ordering::Relaxed) {
+                            return Err(verified.err().unwrap_or_else(|| anyhow::anyhow!("GPU abandoned")));
+                        }
+                        unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                        self.native_pipeline_errors.push(format!("MCG K{bits} self-test failed; using generic path"));
+                    }
+                }
+            }
+            if self.mcg_cooperative[index] { return Ok((self.qmv_mcg[index], true)); }
+        }
         if self.qmv_stream[index] == vk::Pipeline::null() {
             if (bits == 4 || bits == 5) && self.native_verified && self.allow_cooperative_k4 {
                 let bytes: &[u8] = if bits == 4 {
@@ -1242,7 +1283,7 @@ impl Gpu {
                 };
                 match self.pipeline_with_subgroup(bytes, None, true) {
                     Ok(pipeline) => {
-                        let verified = match self.verify_cooperative(bits, pipeline) {
+                        let verified = match self.verify_cooperative(bits, pipeline, false) {
                             Ok(verified) => verified,
                             Err(err) => {
                                 if self.device.abandoned.load(Ordering::Relaxed) {
@@ -1268,7 +1309,7 @@ impl Gpu {
                                 format!("exl3_{bits}bit_wave32_cooperative"),
                                 pipeline,
                             );
-                            return Ok(pipeline);
+                            return Ok((pipeline, true));
                         }
                         if bits == 4 {
                             self.cooperative_k4_self_test = "mismatch_fallback";
@@ -1302,7 +1343,7 @@ impl Gpu {
                         self.native_kernels[index] = true;
                         self.wave_kernels[index] = true;
                         self.capture_stats(format!("exl3_{bits}bit_wave32"), pipeline);
-                        return Ok(pipeline);
+                        return Ok((pipeline, true));
                     }
                     Err(err) => self
                         .native_pipeline_errors
@@ -1325,7 +1366,7 @@ impl Gpu {
                         self.qmv_stream[index] = pipeline;
                         self.native_kernels[index] = true;
                         self.capture_stats(format!("exl3_{bits}bit_workgroup128"), pipeline);
-                        return Ok(pipeline);
+                        return Ok((pipeline, false));
                     }
                     Err(err) => self
                         .native_pipeline_errors
@@ -1337,7 +1378,7 @@ impl Gpu {
                 Some(bits),
             )?;
         }
-        Ok(self.qmv_stream[index])
+        Ok((self.qmv_stream[index], self.wave_kernels[index]))
     }
 
     pub fn prepare_exl3(
@@ -1382,7 +1423,7 @@ impl Gpu {
                 && shape.cols / 16 <= self.max_groups as usize,
             "EXL3 dispatch exceeds GPU limit"
         );
-        let pipeline = self.stream_pipeline(shape.bits)?;
+        let (pipeline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
         let result = self.mapped_buffer(shape.cols * 4)?;
@@ -1393,7 +1434,6 @@ impl Gpu {
             .rotated
             .as_ref()
             .context("GPU rotation buffer unavailable")?;
-        let split = self.wave_kernels[shape.bits as usize - 1];
         let output = if split {
             self.partials.as_ref()
         } else {
@@ -1479,7 +1519,9 @@ impl Gpu {
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
             kernel: if split {
-                let cooperative = if shape.bits == 4 && self.cooperative_k4_active {
+                let cooperative = if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
+                    shape.bits + 10
+                } else if shape.bits == 4 && self.cooperative_k4_active {
                     4
                 } else if shape.bits == 5 && self.cooperative_k5_active {
                     5
@@ -1965,8 +2007,8 @@ impl Gpu {
             );
         }
         let groups = exl3_groups(outputs).context("Invalid EXL3 output shape")?;
-        let pipeline = self.stream_pipeline(bits)?;
-        if !self.wave_kernels[bits as usize - 1] {
+        let (pipeline, split) = self.stream_pipeline(bits, codebook)?;
+        if !split {
             return self.compute_groups(pipeline, weights, x, params, outputs, groups);
         }
         params[2] |= self.split_k << 8;
@@ -2483,6 +2525,9 @@ impl Drop for Gpu {
             for pipeline in self.qmv_stream {
                 d.destroy_pipeline(pipeline, None);
             }
+            for pipeline in self.qmv_mcg {
+                d.destroy_pipeline(pipeline, None);
+            }
             d.destroy_pipeline(self.dense, None);
             d.destroy_pipeline(self.dense_pair, None);
             d.destroy_pipeline(self.reduce, None);
@@ -2910,7 +2955,7 @@ mod tests {
                 .unwrap();
             let actual = gpu.multiply(&weights, &x, cols, bits as u32, 1).unwrap();
             assert!(
-                gpu.wave_kernels[bits - 1],
+                gpu.wave_kernels[bits - 1] || gpu.mcg_cooperative[bits - 1],
                 "test must exercise split4, not fallback"
             );
             assert_eq!(actual.len(), cols);

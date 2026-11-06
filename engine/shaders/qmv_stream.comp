@@ -23,6 +23,11 @@ layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
 layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
 layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
 layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint codebook; } p;
+#ifdef EXL3_FIXED_MCG
+#define QMV_CODEBOOK 1u
+#else
+#define QMV_CODEBOOK p.codebook
+#endif
 #ifndef EXL3_PARTIALS
 shared vec2 partial[128];
 #endif
@@ -102,10 +107,10 @@ void main() {
         vec4 inputValues = vec4(x[tile * 16u + row], x[tile * 16u + row + 1u],
                                x[tile * 16u + row + 8u], x[tile * 16u + row + 9u]);
 #ifdef EXL3_NATIVE
-        acc = fma(vec2(inputValues[0]), codewordPair(stateAt(a, 0u), stateAt(a, 4u), p.codebook), acc);
-        acc = fma(vec2(inputValues[1]), codewordPair(stateAt(a, 1u), stateAt(a, 5u), p.codebook), acc);
-        acc = fma(vec2(inputValues[2]), codewordPair(stateAt(a, 2u), stateAt(a, 6u), p.codebook), acc);
-        acc = fma(vec2(inputValues[3]), codewordPair(stateAt(a, 3u), stateAt(a, 7u), p.codebook), acc);
+        acc = fma(vec2(inputValues[0]), codewordPair(stateAt(a, 0u), stateAt(a, 4u), QMV_CODEBOOK), acc);
+        acc = fma(vec2(inputValues[1]), codewordPair(stateAt(a, 1u), stateAt(a, 5u), QMV_CODEBOOK), acc);
+        acc = fma(vec2(inputValues[2]), codewordPair(stateAt(a, 2u), stateAt(a, 6u), QMV_CODEBOOK), acc);
+        acc = fma(vec2(inputValues[3]), codewordPair(stateAt(a, 3u), stateAt(a, 7u), QMV_CODEBOOK), acc);
 #else
         acc.x = fma(inputValues[0], codeword(stateAt(a, 0u), p.codebook), acc.x);
         acc.x = fma(inputValues[1], codeword(stateAt(a, 1u), p.codebook), acc.x);

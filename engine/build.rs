@@ -98,5 +98,22 @@ fn main() {
             .status()
             .expect("glslc");
         assert!(status.success(), "cooperative K{bits} shader compilation failed");
+        let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+                "-DEXL3_PARTIALS=1",
+                "-DEXL3_FIXED_MCG=1",
+            ])
+            .arg(format!("-DEXL3_BITS={bits}"))
+            .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"))
+            .arg("shaders/qmv_stream.comp")
+            .arg("-o")
+            .arg(out.join(format!("qmv_wave_{bits}_mcg.spv")))
+            .status()
+            .expect("glslc");
+        assert!(status.success(), "specialized MCG K{bits} shader compilation failed");
     }
 }
