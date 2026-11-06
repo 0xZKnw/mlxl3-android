@@ -97,3 +97,19 @@ hits a compiler internal error, as recorded in the previous report. No proof
 of Vulkan/JNI/Compose, concurrent behavior or complete-model inference is
 claimed. No local engine compilation, prover, model load or benchmark was
 started during the other chat's Desktop profiling; qualification ran remotely.
+
+## Main publication receipt
+
+Published application/engine source: `9ae3b94b0ec530ff7de700ceb17feb09de31a511`.
+[Main run 42133293698](https://github.com/0xZKnw/mlxl3-android/actions/runs/42133293698)
+passes all five jobs. Its executable sources and workflow are identical to the
+qualified ee39235 source; only documentation was added. The subsequent receipt
+commit updates documentation only and does not trigger the path-filtered CI.
+
+[APK artifact](https://github.com/0xZKnw/mlxl3-android/actions/runs/42133293698/artifacts/13463758703):
+install `debug/app-debug.apk` (33,975,708 bytes). SHA-256:
+`28b7de1a77102f7f343704f341d82d7e32331c937622b33d128a451fcedaded8`.
+The downloaded checksum matches the manifest; signature and 16KiB zip alignment
+verify. Packaged ARM64 engine SHA-256:
+`b4c6dfc13345ddf2485bd43f9231a58fa7a09adc2337e448559dc234c97a1509`.
+No model weights are included. No release or phone installation was performed.

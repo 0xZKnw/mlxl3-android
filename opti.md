@@ -301,3 +301,19 @@
   moteur/preuve/modèle/mesurelocale lancée. Tousessaisdece lot sont clos dans
   les statutsci-dessus ; vitessephysique/fullcheckpoint/Android9-10 restent
   explicitement à qualifier. La publication regroupe ces sourcesetleursrapports.
+
+#### Intégrationeffective main et reçuAPK
+
+- Sources9ae3b94b0ec530ff7de700ceb17feb09de31a511 publiées surmain ; diffexécutable
+  nul avec ee39235qualifié. Run https://github.com/0xZKnw/mlxl3-android/actions/runs/42133293698
+  **5jobs réussis** inspectés. Publicationeffective **code+APKCIexpérimentaux**,
+  pas de release ni appinstallée. Reçu documentaire ultérieur sans changement
+  exécutable, donc pas de nouvelleCI exigée par le filtrepaths.
+- APK33975708octets, sha25628b7de1a77102f7f343704f341d82d7e32331c937622b33d128a451fcedaded8,
+  manifestes/signaturedebug/zipalign16K vérifiés après téléchargement. Natif
+  b4c6dfc13345ddf2485bd43f9231a58fa7a09adc2337e448559dc234c97a1509.
+  Artefact13463758703, détails dans `docs/verification-2026-11-06.md`.
+- Aucun essai encore en cours : UIvalidée2résolutions, LUTnumériquementvalidée,
+  performanceglobaleMesa nonconcluante, S24/4,49bpw physique nonmesuré. Aucun
+  benchmarklocal durant le profilageDesktop ; ces limites ne sont pas transformées
+  en validation de débit/qualitécomplètedu modèle.
