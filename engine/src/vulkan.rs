@@ -19,6 +19,30 @@ pub(crate) fn elapsed_ns(start: Instant) -> u64 {
     start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
 
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+unsafe extern "C" {
+    fn ATrace_beginSection(name: *const std::ffi::c_char);
+    fn ATrace_endSection();
+}
+
+struct TraceSpan;
+impl TraceSpan {
+    fn begin(name: &CStr) -> Self {
+        #[cfg(target_os = "android")]
+        unsafe { ATrace_beginSection(name.as_ptr()) };
+        #[cfg(not(target_os = "android"))]
+        let _ = name;
+        Self
+    }
+}
+impl Drop for TraceSpan {
+    fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        unsafe { ATrace_endSection() };
+    }
+}
+
 fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
     let required =
         (vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT).as_raw();
@@ -292,6 +316,7 @@ impl Buffer {
         Ok(())
     }
     fn read_f32(&self, count: usize) -> Result<Vec<f32>> {
+        let _trace = TraceSpan::begin(c"MLXL3 readback");
         ensure!(
             count.checked_mul(4).is_some_and(|n| n <= self.size),
             "GPU buffer read exceeds allocation"
@@ -2023,7 +2048,11 @@ impl Gpu {
                 outputs: *rows,
                 groups: dense_groups(*rows).expect("validated dense head shape"),
                 groups_y: 1,
-                pipeline: if self.fast_head { self.dense_pair } else { self.dense },
+                pipeline: if self.fast_head {
+                    self.dense_pair
+                } else {
+                    self.dense
+                },
                 barrier_after: false,
             })
             .collect();
@@ -2156,6 +2185,7 @@ impl Gpu {
     }
 
     fn upload(&self, x: &[f32]) -> Result<()> {
+        let _trace = TraceSpan::begin(c"MLXL3 upload");
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
@@ -2198,6 +2228,7 @@ impl Gpu {
         flags: vk::CommandBufferUsageFlags,
         phase_queries: Option<u32>,
     ) -> Result<()> {
+        let _trace = TraceSpan::begin(c"MLXL3 record commands");
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
@@ -2359,7 +2390,11 @@ impl Gpu {
             let d = &self.device.raw;
             d.reset_fences(&[self.fence])?;
             let submits = [vk::SubmitInfo::default().command_buffers(commands)];
-            if let Err(err) = d.queue_submit(self.queue, &submits, self.fence) {
+            let submitted = {
+                let _trace = TraceSpan::begin(c"MLXL3 queue submit");
+                d.queue_submit(self.queue, &submits, self.fence)
+            };
+            if let Err(err) = submitted {
                 self.device.abandoned.store(true, Ordering::Relaxed);
                 bail!("Vulkan submit failed ({err:?}); restart the app");
             }
@@ -2368,7 +2403,10 @@ impl Gpu {
                 p.record_submit_ns = p.record_submit_ns.saturating_add(elapsed_ns(recording))
             });
             let waiting = Instant::now();
-            let waited = d.wait_for_fences(&[self.fence], true, 30_000_000_000);
+            let waited = {
+                let _trace = TraceSpan::begin(c"MLXL3 fence wait");
+                d.wait_for_fences(&[self.fence], true, 30_000_000_000)
+            };
             self.record_profile(|p| p.wait_ns = p.wait_ns.saturating_add(elapsed_ns(waiting)));
             if let Err(err) = waited {
                 // Pending work may still own buffers; retain resources until process exit.
@@ -2473,16 +2511,28 @@ mod tests {
         for input in [128usize, 129, 2048] {
             let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
             for dtype in 0..=1 {
-                let bytes: Vec<u8> = (0..input * 5).flat_map(|i| {
-                    let v = (i as f32 % 29. - 14.) / 64.;
-                    (if dtype == 0 { half::f16::from_f32(v).to_bits() } else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
-                }).collect();
+                let bytes: Vec<u8> = (0..input * 5)
+                    .flat_map(|i| {
+                        let v = (i as f32 % 29. - 14.) / 64.;
+                        (if dtype == 0 {
+                            half::f16::from_f32(v).to_bits()
+                        } else {
+                            half::bf16::from_f32(v).to_bits()
+                        })
+                        .to_le_bytes()
+                    })
+                    .collect();
                 let chunks = vec![(gpu.buffer(&bytes).unwrap(), 5)];
                 let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
                 gpu.fast_head = true;
                 let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
                 let actual = gpu.forward_dense_head(&plan, &x).unwrap();
-                assert!(actual.iter().zip(&reference).all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005));
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
                 gpu.fast_head = false;
             }
         }
