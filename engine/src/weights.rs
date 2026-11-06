@@ -247,7 +247,7 @@ impl Linear {
             let su = rounded_scales(scale("suh", "su", rows)?)?;
             let sv = rounded_scales(scale("svh", "sv", cols)?)?;
             let buffer = gpu.buffer(w.bytes(&trellis)?)?;
-            Storage::Exl3(gpu.prepare_exl3(
+            Storage::Exl3(gpu.prepare_named_exl3(
                 buffer,
                 Exl3Shape {
                     input,
@@ -259,6 +259,7 @@ impl Linear {
                 },
                 &su,
                 &sv,
+                name,
             )?)
         } else {
             let key = format!("{name}.weight");

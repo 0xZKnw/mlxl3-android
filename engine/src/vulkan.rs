@@ -3,7 +3,7 @@ use crate::codec::{self, Codebook};
 use anyhow::{Context, Result, bail, ensure};
 use ash::{Entry, vk};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::{CStr, CString},
     sync::{
         Arc,
@@ -12,24 +12,8 @@ use std::{
     time::Instant,
 };
 
-#[derive(Clone, Copy, Default, serde::Serialize)]
-pub struct Profile {
-    pub upload_ns: u64,
-    pub record_submit_ns: u64,
-    pub wait_ns: u64,
-    pub readback_ns: u64,
-    pub projection_cpu_ns: u64,
-    pub model_ns: u64,
-    pub head_ns: u64,
-    pub device_compute_ns: u64,
-    pub device_samples: u64,
-    pub device_exl3_samples: u64,
-    pub device_exl3_input_ns: u64,
-    pub device_exl3_matvec_ns: u64,
-    pub device_exl3_output_ns: u64,
-    pub device_other_ns: u64,
-    pub query_read_ns: u64,
-}
+pub use crate::profiling::Profile;
+use crate::profiling::ProjectionMeta;
 
 pub(crate) fn elapsed_ns(start: Instant) -> u64 {
     start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
@@ -276,6 +260,11 @@ pub struct Gpu {
     layout: vk::PipelineLayout,
     qmv: vk::Pipeline,
     qmv_stream: [vk::Pipeline; 8],
+    native_float16: bool,
+    native_verified: bool,
+    native_self_test: serde_json::Value,
+    native_kernels: [bool; 8],
+    native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
     prepared: usize,
     queries: vk::QueryPool,
@@ -287,7 +276,8 @@ pub struct Gpu {
     codebooks: Option<Buffer>,
     batch_outputs: Vec<Buffer>,
     submissions: Cell<u64>,
-    profile: Cell<Profile>,
+    profile: RefCell<Profile>,
+    projection_meta: Vec<ProjectionMeta>,
     used_memory_types: Cell<u32>,
     pub name: String,
     pub max_range: usize,
@@ -297,6 +287,10 @@ pub struct Gpu {
 
 impl Gpu {
     pub fn new() -> Result<Self> {
+        Self::new_with_native(true)
+    }
+
+    fn new_with_native(allow_native: bool) -> Result<Self> {
         let entry = unsafe { Entry::load().context("Vulkan loader is unavailable")? };
         let app_name = CString::new("MLXL3 Android")?;
         let app = vk::ApplicationInfo::default()
@@ -376,6 +370,10 @@ impl Gpu {
                         | "VK_NV_cooperative_matrix"
                         | "VK_EXT_subgroup_size_control"
                         | "VK_KHR_shader_subgroup_extended_types"
+                        | "VK_KHR_shader_float_controls"
+                        | "VK_KHR_pipeline_executable_properties"
+                        | "VK_AMD_shader_info"
+                        | "VK_EXT_memory_budget"
                 )
             })
             .collect();
@@ -392,16 +390,77 @@ impl Gpu {
                     .get_physical_device_features2(physical, &mut features2)
             };
         }
+        let has_extension = |name: &str| {
+            device_extensions.iter().any(|e| {
+                unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }.to_bytes() == name.as_bytes()
+            })
+        };
+        let mut controls = vk::PhysicalDeviceFloatControlsProperties::default();
+        let mut driver = vk::PhysicalDeviceDriverProperties::default();
+        if props.api_version >= vk::API_VERSION_1_2 || has_extension("VK_KHR_shader_float_controls")
+        {
+            let mut p = vk::PhysicalDeviceProperties2::default().push_next(&mut controls);
+            unsafe {
+                instance
+                    .raw
+                    .get_physical_device_properties2(physical, &mut p)
+            };
+        }
+        if props.api_version >= vk::API_VERSION_1_2 || has_extension("VK_KHR_driver_properties") {
+            let mut p = vk::PhysicalDeviceProperties2::default().push_next(&mut driver);
+            unsafe {
+                instance
+                    .raw
+                    .get_physical_device_properties2(physical, &mut p)
+            };
+        }
+        let mut sizes = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
+        let mut size_features = vk::PhysicalDeviceSubgroupSizeControlFeatures::default();
+        if props.api_version >= vk::API_VERSION_1_3 || has_extension("VK_EXT_subgroup_size_control")
+        {
+            let mut p = vk::PhysicalDeviceProperties2::default().push_next(&mut sizes);
+            unsafe {
+                instance
+                    .raw
+                    .get_physical_device_properties2(physical, &mut p)
+            };
+            let mut f = vk::PhysicalDeviceFeatures2::default().push_next(&mut size_features);
+            unsafe { instance.raw.get_physical_device_features2(physical, &mut f) };
+        }
         let capabilities = serde_json::json!({"subgroup_size":subgroup.subgroup_size,
             "subgroup_operations":subgroup.supported_operations.as_raw(),
             "subgroup_stages":subgroup.supported_stages.as_raw(),
             "shader_float16_supported":float16.shader_float16 == vk::TRUE,
-            "optional_extensions":supported_extensions});
+            "optional_extensions":supported_extensions,"extension_count":device_extensions.len(),
+            "subgroup_size_control":{"supported":size_features.subgroup_size_control == vk::TRUE,
+                "min":sizes.min_subgroup_size,"max":sizes.max_subgroup_size,
+                "required_stages":sizes.required_subgroup_size_stages.as_raw(),
+                "max_workgroup_subgroups":sizes.max_compute_workgroup_subgroups},
+            "float_controls":{"rte_float16":controls.shader_rounding_mode_rte_float16 == vk::TRUE,
+                "rtz_float16":controls.shader_rounding_mode_rtz_float16 == vk::TRUE,
+                "denorm_preserve_float16":controls.shader_denorm_preserve_float16 == vk::TRUE,
+                "denorm_flush_float16":controls.shader_denorm_flush_to_zero_float16 == vk::TRUE},
+            "driver":{"id":driver.driver_id.as_raw(),"name":unsafe {CStr::from_ptr(driver.driver_name.as_ptr())}.to_string_lossy(),
+                "info":unsafe {CStr::from_ptr(driver.driver_info.as_ptr())}.to_string_lossy()}});
         let portability = device_extensions.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == ash::khr::portability_subset::NAME);
-        let extension_names = [ash::khr::portability_subset::NAME.as_ptr()];
-        let mut device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queues);
+        let native_float16 = allow_native
+            && float16.shader_float16 == vk::TRUE
+            && supported_extensions
+                .iter()
+                .any(|s| s == "VK_KHR_shader_float16_int8");
+        let mut extension_names = vec![];
         if portability {
-            device_info = device_info.enabled_extension_names(&extension_names);
+            extension_names.push(ash::khr::portability_subset::NAME.as_ptr());
+        }
+        if native_float16 {
+            extension_names.push(c"VK_KHR_shader_float16_int8".as_ptr());
+        }
+        let mut device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queues);
+        device_info = device_info.enabled_extension_names(&extension_names);
+        let mut enabled_float16 =
+            vk::PhysicalDeviceShaderFloat16Int8Features::default().shader_float16(true);
+        if native_float16 {
+            device_info = device_info.push_next(&mut enabled_float16);
         }
         let raw = unsafe { instance.raw.create_device(physical, &device_info, None)? };
         let queue = unsafe { raw.get_device_queue(family, 0) };
@@ -427,6 +486,11 @@ impl Gpu {
             layout: vk::PipelineLayout::null(),
             qmv: vk::Pipeline::null(),
             qmv_stream: [vk::Pipeline::null(); 8],
+            native_float16,
+            native_verified: false,
+            native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
+            native_kernels: [false; 8],
+            native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
             queries: vk::QueryPool::null(),
@@ -438,7 +502,8 @@ impl Gpu {
             codebooks: None,
             batch_outputs: vec![],
             submissions: Cell::new(0),
-            profile: Cell::new(Profile::default()),
+            profile: RefCell::new(Profile::default()),
+            projection_meta: vec![],
             used_memory_types: Cell::new(0),
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
                 .to_string_lossy()
@@ -537,7 +602,66 @@ impl Gpu {
         gpu.rotated = Some(gpu.scratch_buffer()?);
         gpu.output = Some(gpu.scratch_buffer()?);
         gpu.codebooks = Some(gpu.buffer(&codebook_table())?);
+        if native_float16 {
+            let started = Instant::now();
+            match gpu.check_native_codebooks() {
+                Ok(()) => {
+                    gpu.native_verified = true;
+                    gpu.native_self_test = serde_json::json!({"status":"verified_bit_exact","checked_values":393216,"unique_values":196608,"lanes_tested":2});
+                }
+                Err(err) => {
+                    if gpu.device.abandoned.load(Ordering::Relaxed) {
+                        return Err(err);
+                    }
+                    gpu.native_self_test =
+                        serde_json::json!({"status":"fallback","error":err.to_string()});
+                }
+            }
+            gpu.native_self_test["elapsed_ns"] = elapsed_ns(started).into();
+            // Startup validation is reported separately from generation counters.
+            gpu.take_profile();
+            gpu.submissions.set(0);
+        }
         Ok(gpu)
+    }
+
+    fn check_native_codebooks(&mut self) -> Result<()> {
+        let pipeline = self.pipeline(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/codebook_native.spv"
+        )))?;
+        let result = (|| {
+            let dummy = self.buffer(&[0; 4])?;
+            for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
+                for offset in [0, 32768] {
+                    for lane in 0..2 {
+                        let values = self.compute_groups(
+                            pipeline,
+                            &dummy,
+                            &[0.],
+                            [offset, 32768, lane, cb as u32],
+                            32768,
+                            128,
+                        )?;
+                        ensure!(values.len() == 32768, "Incomplete native codebook check");
+                        for (i, actual) in values.iter().enumerate() {
+                            let expected =
+                                codec::decode_codeword((offset as usize + i) as u16, cb).to_f32();
+                            ensure!(
+                                actual.to_bits() == expected.to_bits(),
+                                "Native codebook {cb:?}/{}: {actual} != {expected}",
+                                offset as usize + i
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if !self.device.abandoned.load(Ordering::Relaxed) {
+            unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+        }
+        result
     }
 
     fn pipeline(&self, bytes: &[u8]) -> Result<vk::Pipeline> {
@@ -669,13 +793,15 @@ impl Gpu {
     }
 
     pub(crate) fn record_profile(&self, update: impl FnOnce(&mut Profile)) {
-        let mut profile = self.profile.get();
-        update(&mut profile);
-        self.profile.set(profile);
+        update(&mut self.profile.borrow_mut());
     }
 
     pub(crate) fn take_profile(&self) -> Profile {
-        self.profile.replace(Profile::default())
+        self.profile.take()
+    }
+
+    pub(crate) fn projection_metadata(&self) -> &[ProjectionMeta] {
+        &self.projection_meta
     }
 
     pub fn diagnostics(&self) -> serde_json::Value {
@@ -690,8 +816,19 @@ impl Gpu {
             "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
             "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
             "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
-            "kernel":"register_window_16","projection":"gpu_hadamard_prepared_grouped",
+            "kernel":if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
+            "native_float16_enabled":self.native_float16,"native_codebook_self_test":self.native_self_test,
+            "native_codebook_arithmetic":"default/mcg: precise FP16 pair add; mul1: exact LUT; accumulation: FP32",
+            "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| n.then_some(i+1)).collect::<Vec<_>>(),
+            "projection":"gpu_hadamard_prepared_grouped",
             "capabilities":self.capabilities,
+            "limits":{"storage_buffer_bytes":self.max_range,"shared_memory_bytes":self.properties.limits.max_compute_shared_memory_size,
+                "workgroup_invocations":self.properties.limits.max_compute_work_group_invocations,
+                "workgroup_size":self.properties.limits.max_compute_work_group_size,
+                "workgroup_count":self.properties.limits.max_compute_work_group_count,
+                "max_allocations":self.properties.limits.max_memory_allocation_count},
+            "memory_heaps":self.device.memory.memory_heaps[..self.device.memory.memory_heap_count as usize].iter()
+                .map(|h|serde_json::json!({"bytes":h.size,"flags":h.flags.as_raw()})).collect::<Vec<_>>(),
             "host_visibility":"once_per_group","device_timing_scope":"matrix intervals exclude final batch HOST_READ barrier",
             "prepared_matrices":self.prepared,"gpu_timestamps":self.queries != vk::QueryPool::null(),
             "timestamp_valid_bits":self.timestamp_bits,"timestamp_period_ns":self.properties.limits.timestamp_period,
@@ -763,6 +900,28 @@ impl Gpu {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
         if self.qmv_stream[index] == vk::Pipeline::null() {
+            if self.native_verified {
+                let binaries: [&[u8]; 8] = [
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_1.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_2.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_3.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_4.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_5.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_6.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_7.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_native_8.spv")),
+                ];
+                match self.pipeline(binaries[index]) {
+                    Ok(pipeline) => {
+                        self.qmv_stream[index] = pipeline;
+                        self.native_kernels[index] = true;
+                        return Ok(pipeline);
+                    }
+                    Err(err) => self
+                        .native_pipeline_errors
+                        .push(format!("{bits}bit: {err}")),
+                }
+            }
             self.qmv_stream[index] = self.specialized_pipeline(
                 include_bytes!(concat!(env!("OUT_DIR"), "/qmv_stream.spv")),
                 Some(bits),
@@ -777,6 +936,17 @@ impl Gpu {
         shape: Exl3Shape,
         su: &[f32],
         sv: &[f32],
+    ) -> Result<Exl3Matrix> {
+        self.prepare_named_exl3(weights, shape, su, sv, "unnamed_projection")
+    }
+
+    pub(crate) fn prepare_named_exl3(
+        &mut self,
+        weights: Buffer,
+        shape: Exl3Shape,
+        su: &[f32],
+        sv: &[f32],
+        name: &str,
     ) -> Result<Exl3Matrix> {
         ensure!(shape.valid(), "Invalid EXL3 projection shape");
         ensure!(self.prepared < MAX_EXL3_MATRICES, "Too many EXL3 matrices");
@@ -870,6 +1040,23 @@ impl Gpu {
             vk::CommandBufferUsageFlags::empty(),
             Some(query_first),
         )?;
+        self.projection_meta.push(ProjectionMeta {
+            name: name.into(),
+            input: shape.input,
+            output: shape.output,
+            rows: shape.rows,
+            cols: shape.cols,
+            bits: shape.bits,
+            codebook: shape.codebook,
+            packed_bytes: weights.size as u64,
+            kernel: if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
+                "native_f16_literal"
+            } else if self.native_kernels[shape.bits as usize - 1] {
+                "lut_literal"
+            } else {
+                "lut_f32"
+            },
+        });
         self.prepared += 1;
         Ok(Exl3Matrix {
             weights,
@@ -1256,7 +1443,14 @@ impl Gpu {
         self.record_profile(|p| {
             p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started))
         });
-        if result.is_err() {
+        if let Err(err) = result {
+            self.record_profile(|p| {
+                p.query_read_failures = p.query_read_failures.saturating_add(1);
+                p.last_query_error = Some(format!("{err:?}"));
+                if let Some(first) = phase_queries {
+                    p.record_projection((first / 4 - 1) as usize, None);
+                }
+            });
             return;
         }
         let mut durations = [0u64; 3];
@@ -1271,7 +1465,8 @@ impl Gpu {
             let total = durations.iter().fold(0u64, |sum, v| sum.saturating_add(*v));
             p.device_compute_ns = p.device_compute_ns.saturating_add(total);
             p.device_samples = p.device_samples.saturating_add(1);
-            if phase_queries.is_some() {
+            if let Some(first) = phase_queries {
+                p.record_projection((first / 4 - 1) as usize, Some(durations));
                 p.device_exl3_input_ns = p.device_exl3_input_ns.saturating_add(durations[0]);
                 p.device_exl3_matvec_ns = p.device_exl3_matvec_ns.saturating_add(durations[1]);
                 p.device_exl3_output_ns = p.device_exl3_output_ns.saturating_add(durations[2]);
@@ -1309,6 +1504,28 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires Vulkan shaderFloat16; native codec qualification and forced portable fallback"]
+    fn native_codebooks_are_exhaustive_and_portable_fallback_is_usable() {
+        let gpu = Gpu::new().unwrap();
+        assert!(gpu.native_float16, "test requires shaderFloat16 support");
+        assert!(gpu.native_verified, "{}", gpu.native_self_test);
+        assert_eq!(gpu.native_self_test["checked_values"], 393216);
+        assert_eq!(gpu.native_self_test["lanes_tested"], 2);
+        assert_eq!(gpu.submission_count(), 0);
+        let mut fallback = Gpu::new_with_native(false).unwrap();
+        assert!(!fallback.native_float16 && !fallback.native_verified);
+        let packed = codec::pack(&vec![1234; 128 * 128], 4).unwrap();
+        let bytes: Vec<_> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let buffer = fallback.buffer(&bytes).unwrap();
+        let actual = fallback
+            .multiply(&buffer, &[0.125; 128], 128, 4, 1)
+            .unwrap();
+        assert_eq!(actual.len(), 128);
+        assert!(actual.iter().all(|v| v.is_finite()));
+        assert!(actual.iter().any(|v| v.abs() > 0.01));
+        assert!(!fallback.native_kernels.iter().any(|v| *v));
+    }
     #[test]
     fn memory_selection_preserves_requirements_and_prefers_local() {
         assert_eq!(choose_memory_type(&[6, 7, 7], 7), Some(1));
@@ -1517,11 +1734,32 @@ mod tests {
                 let packed = codec::pack(&states, bits).unwrap();
                 let bytes: Vec<_> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
                 let buffer = gpu.buffer(&bytes).unwrap();
+                let baseline = gpu
+                    .specialized_pipeline(
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_stream.spv")),
+                        Some(bits as u32),
+                    )
+                    .unwrap();
                 for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
                     let matrix = codec::reconstruct_inner(&packed, bits, cb, rows, cols).unwrap();
                     let actual = gpu
                         .multiply(&buffer, &x, cols, bits as u32, cb as u32)
                         .unwrap();
+                    let reference = gpu
+                        .compute_groups(
+                            baseline,
+                            &buffer,
+                            &x,
+                            [rows as u32, cols as u32, bits as u32, cb as u32],
+                            cols,
+                            (cols / 16) as u32,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "native/lut {rows}x{cols}, K{bits}, cb{cb:?}"
+                    );
                     assert_eq!(actual.len(), cols);
                     assert!(actual.iter().any(|v| v.abs() > 0.01));
                     for n in 0..cols {
@@ -1535,6 +1773,7 @@ mod tests {
                         );
                     }
                 }
+                unsafe { gpu.device.raw.destroy_pipeline(baseline, None) };
             }
         }
     }

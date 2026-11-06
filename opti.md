@@ -862,3 +862,108 @@
   fonctionnellement** danslesdomainesdécrits, **nonconcluant pourvitesseS24**.
   Aucun essai lancé encore en cours. Pleincheckpoint, driverXclipse, effet
   physique desgroupes ettempsphases restent àmesurer ; pas de promesse20tok/s.
+
+#### Retour physique S24 sur13
+
+- Rapport sourcee554439 conservé `docs/measurements/s24-e554439-user.json` :
+  3,495986tok/s,13tokensprompt/13decode, thermique1,108soumissions/token
+  confirmé. MatvecEXL3 198,210ms/token, Hadamardentrée1,299ms +sortie0,636ms ;
+  matvec92,28% desintervallesGPU et69,74%du modèlehost284,21ms/token.
+  Head16,96ms/tokenimbriqué, lecturequeries0,139ms/token : pasunposteprincipal.
+- Subgroupsnatifs64, shaderFloat16supporté, extensionsfloat16/subgroup-size
+  controlannoncées ; aucunecoopmatKHR/NV dansla listefiltrée. Pas de preuve de
+  modesd'arrondi16bits ni de sousgroupes32 imposables avantinterrogation.
+  Débit3,222→3,496descriptif (+8,5%), prompts/thermaldifférents, pas de gain
+  reproductible attribué. Le groupementseul ne résout pasle coûtmatvec.
+
+### ANDROID-PERF-2026-11-06-14 — recherche matvec natif et diagnostic exploitable — préenregistré
+
+- Baseline exécutablee554439/arbrecd6b1a8. Relire essais05..13 et sources
+  déjàconsultées ; ne pas refaire aveuglémenttuilage4/LUT/autotunerdéjàrejetés.
+  But : cibler matvec198ms/token, pasHadamard<2ms niqueries0,14ms.
+- Rechercheprévue : shadersEXL3 natifsFP16 et contraintesfloat-controls,
+  sousgroupesRDNA/Vulkan etspécialisation effective duSPIR-V. Vérifier les
+  exigencesmatérielles/arrondis avant de choisir unprototype ; pas de gain
+  présumé des seuls noms de features. Sourcesprimaires/versions conservées.
+- Diagnosticprévu : coûtsGPU parforme/quantification ettopmatricesnommées,
+  min/max/moyennes/samples manquants, volumeslogiques de poids et limitesGPU,
+  driver, float-controls et tailles de sousgroupesimposables. Préfill/decode
+  séparés, compteurshost toujoursdistincts, pas de prompt/texte/cheminlocal.
+  Rapportcompact (agrégats+top), pasdescentaines de lignes identiques.
+- Chaque prototype dekernel sera préenregistré séparément avantcompilation,
+  avec oracle indépendant, tolérances/préconditions et protocole. AucunGPU
+  matérielMac ni vrai checkpointconcurrent avecprofilageDesktop. GainS24
+  nonmesuré jusqu'au nouvelAPK ; recherche/diagnostic en cours.
+
+### ANDROID-PERF-2026-11-06-15 — codebooks FP16 natifs et bitrates littéraux — préenregistré
+
+- Motifnouveau : rapportphysique14 isole198ms/token dansmatvec etconfirme
+  shaderFloat16supporté ; LUTtest05 concernait vieuxscalaire, pas cesfenêtres
+  de huitcodes ni cecheminFP16 natif. Réductiondeslecturesdispersées envisagée,
+  sansaffirmerlatencecache/bande passante comme causephysique prouvée.
+- Variante : mêmefenêtretrellis16sorties et mêmeordreFMA/réductionFP32 ;
+  reconstructiondescodewords en arithmétiqueFP16 native (add/FMA précis),
+  pasd'accumulationFP16. HuitSPIR-V avecBITS1..8 littéral pour simplifier
+  indices/shifts aucompilateur GLSL, plutôt que dépendre seulementdupliage
+  de constantesdespécialisation parpilote. Aucun format/modèle/changementHad.
+- Activationconditionnée à shaderFloat16+extensioncompatible API1.1 ;
+  autocontrôleGPU au chargement des196608codewords contrecodecCPU bitexact,
+  valeursfinies/nombreexact, sinon repliLUT. Cecontrôle est fonctionnel,
+  pasunautotuner deperformance. Erreur/unsupportedclairementdiagnostiqués.
+  Ne pas imposerwave32 sansdonnées : propriétésdecontrôle seront exposées.
+- Protocole avantcompilation :196608valeurs CPU/LUT/natif,96projections
+  1..8bits×3codebooks×4formes contreCPU/f64 (tolérance1e-4+2e-5relative)
+  etcomparaisonbitexact auLUT surmêmeGPU ; projectioncomplète/fixture128logits
+  tolérancesinchangées, batch/reuse/erreurs. Testerrefusducheminnatif et repli,
+  CIcoucheKhronos, SPIR-VFloat16 et FMA32 inspectés. Kani sur vraishelpers
+  Rustprofilage/bornes ; pas de preuveGLSL/GPU annoncée.
+- Aucun benchmarkmatériel local/Mac, pasde modèleGPUconcurrent ; choixpar
+  capacité+correction, pas parmicrobenchMesa. GainS24 **nonmesuré**, APKàtester.
+
+#### Révision15 — contre-exemple natif avant publication
+
+- Premierprototype FP16FMA pourMul1 rejeté par autocontrôle réelMesa :
+  codebookMul1/état1,0,640625 au lieu0,6411133. Les131072codesDefault/Mcg
+  étaientpassés avantcetécart. Log `build/perf15-native.log` conservé ;
+  rawQMV/fixturepassaientuniquement grâceaurepliLUT, pasunevalidationdukernel
+  natif. Testnatif dédié échoueexplicitement, évitant cefauxpositif.
+- Avant nouvelessai : conserveraddFP16 précis pourDefault/Mcg, utiliser le
+  FMAFP32+arrondiRTE explicite de référence pourMul1. Pas detoléranceassouplie,
+  pasderéductiondudomaine ; revérifier196608codes et96QMVs contreLUT/CPU.
+  Le motnatif désignera l'additionFP16 descodebooksDefault/Mcg ; accumulation
+  et Mul1 restentFP32. Correctnessguard resteactifsurtéléphoneréel.
+- Extensionavantcode : reconstruire les deuxcolonnes par f16vec2 pour les
+  additionsDefault/Mcg, quatreFMAsvec2FP32au lieu huitappelscodewordsscalaires,
+  sanschanger l'ordre parsortie. Autocontrôle de chaqueétat sur lesdeuxlanes
+  (393216comparaisons,196608valeursdistinctes), plusparité96QMVsbitexactLUT.
+- Résultatintermédiaire : codebookhybride et96QMVs natif/LUT/CPU passent ;
+  logs `build/perf15-native-{paired,vs-lut}.log`. Décisionavantintégration :
+  garder **LUTpourMul1** dans la varianterapide, plutôt qu'ajouterFMAFP32 et
+  arrondi logiciels sansavantageFP16. Mul1 gagne seulementlepliageBITS ;
+  Default/Mcg utilisentl'additionFP16parpaires. Mêmeautocontrôledesdeuxlanes,
+  pasderégressionarithmétique attendue ; revérifiercontrôlesaffectés.
+
+#### Résultats locaux14/15 avantpublication
+
+- Recherche14 terminée : sourceEXL3 PR204 etspécificationGLSL16bits relues,
+  guideRDNA consulté ; wave32 nonimposé faute de mesure. Rapport
+  [détaillé](docs/android-native-codebooks-2026-11-06.md) et JSONphysiquee554439
+  conservés. Nouveauprofilage parforme/top8 etCPUopérateurs câblé dansEngine.
+- Variante15 finale : Default/Mcg additionsFP16parpaires, Mul1LUT exact,
+  huitSPIR-Vbitlittéral, mêmeaccumulationFP32. Autocontrôle393216comparaisons/
+  196608valeursdistinctes surdeuxlanes réussi surMesa, repli sansFloat16 testé.
+  L'ancienFMAFP16Mul1 rejeté etle FMAFP32transitoire nonlivré restent documentés.
+- **21CPU/10Vulkan explicites réussis**,96QMVsbitexactancienLUT+oracleCPU/f64,
+  72projectionscomplètes/fixture128logits/batch/reuse/erreurs, tolérancesinchangées.
+  Sommesdegroupes/top8/compteursCPUs vérifiées parvraiEngine, pasunrapportvide.
+  SPIR-Vinspecté : Float16/OpFAddv2half précis, Fmav2float, pasOpSpecConstant.
+- Kani13harnais réussis,1256obligations/28covers, troisformatstdinatteignables ;
+  ciblé137/2covers vérifiecomptage/échecs/minmax/saturation surdeuxéchantillons
+  u64[3]symboliques, sansassume. Pas de preuveGLSL/JSON complet/GPU/FFI/modèle.
+  Ancienharnaisfloatincompatible toujoursnonexécuté. Clippyhost/ARM64strict,
+  fmt/actionlint/diffcheck etvalidationSPIR-V réussis. Logs `build/perf14-*`,
+  `build/perf15-*`, `build/perf14-15-*` conservés, dontcontre-exempleMul1.
+- État : code localretenu, publication/CI/APKàinspecter sousautorisationexistante.
+  **GainS24 nonmesuré/nonconcluant** ; aucune mesureGPUmatérielleMac ni vrai
+  checkpoint concurrent. Correction complète1.7B/Xclipse etperformances
+  physiques restentàqualifier. Aucun débitprévu inventé ni promesse20tok/s.

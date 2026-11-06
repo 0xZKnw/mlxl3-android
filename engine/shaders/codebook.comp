@@ -1,10 +1,22 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#ifdef EXL3_NATIVE
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
 layout(local_size_x = 128) in;
 layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
 layout(push_constant) uniform Params { uint offset; uint count; uint unused; uint codebook; } p;
 #include "exl3.glsl"
 void main() {
+#ifdef EXL3_NATIVE
+    uint n = gl_GlobalInvocationID.x * 2u;
+    if (n + 1u < p.count) {
+        vec2 value = codewordPair(p.offset + n + p.unused, p.offset + n + (1u - p.unused), p.codebook);
+        y[n + p.unused] = value.x;
+        y[n + (1u - p.unused)] = value.y;
+    }
+#else
     uint n = gl_WorkGroupID.x;
     if (gl_LocalInvocationID.x == 0u && n < p.count) y[n] = codeword(p.offset + n, p.codebook);
+#endif
 }

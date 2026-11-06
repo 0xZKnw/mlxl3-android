@@ -1,0 +1,110 @@
+{
+  "engine": {
+    "decode_seconds": 3.718550821,
+    "decode_submissions": 1404,
+    "decode_tokens": 13,
+    "decode_tokens_per_second": 3.495985566899961,
+    "finish_reason": "stop",
+    "performance": {
+      "decode": {
+        "device_compute_ns": 2792240860,
+        "device_exl3_input_ns": 16890393,
+        "device_exl3_matvec_ns": 2576727737,
+        "device_exl3_output_ns": 8267450,
+        "device_exl3_samples": 1846,
+        "device_other_ns": 190355280,
+        "device_samples": 2002,
+        "head_ns": 220429101,
+        "model_ns": 3694707735,
+        "projection_cpu_ns": 22311575,
+        "query_read_ns": 1809330,
+        "readback_ns": 34038961,
+        "record_submit_ns": 153249178,
+        "upload_ns": 2238515,
+        "wait_ns": 3197758684
+      },
+      "gpu": {
+        "api_version": 4206896,
+        "automatic_calibration": false,
+        "capabilities": {
+          "optional_extensions": [
+            "VK_KHR_shader_float16_int8",
+            "VK_KHR_shader_subgroup_extended_types",
+            "VK_EXT_subgroup_size_control"
+          ],
+          "shader_float16_supported": true,
+          "subgroup_operations": 1791,
+          "subgroup_size": 64,
+          "subgroup_stages": 15679
+        },
+        "codebook_bytes": 393216,
+        "device": "Samsung Xclipse 940",
+        "device_id": 39846400,
+        "device_timing_scope": "matrix intervals exclude final batch HOST_READ barrier",
+        "device_type": 1,
+        "driver_version": 104869891,
+        "gpu_timestamps": true,
+        "host_visibility": "once_per_group",
+        "kernel": "register_window_16",
+        "logical_buffer_bytes": 1355800576,
+        "memory_types": [
+          {
+            "flags": 7,
+            "heap": 0,
+            "index": 0
+          }
+        ],
+        "prepared_matrices": 142,
+        "projection": "gpu_hadamard_prepared_grouped",
+        "scratch_mapping": "persistent",
+        "timestamp_period_ns": 39.0625,
+        "timestamp_valid_bits": 64,
+        "vendor_id": 5197
+      },
+      "prefill": {
+        "device_compute_ns": 2633794165,
+        "device_exl3_input_ns": 16743667,
+        "device_exl3_matvec_ns": 2591592461,
+        "device_exl3_output_ns": 8287164,
+        "device_exl3_samples": 1846,
+        "device_other_ns": 17170873,
+        "device_samples": 1990,
+        "head_ns": 20903711,
+        "model_ns": 3252924766,
+        "projection_cpu_ns": 3749455,
+        "query_read_ns": 1821201,
+        "readback_ns": 25398543,
+        "record_submit_ns": 121619441,
+        "upload_ns": 1749540,
+        "wait_ns": 2913257414
+      },
+      "source_sha": "e554439c975f31f556ab86677252173140e10cf2",
+      "timing_scope": "host latency; head overlaps model/GPU; device phases are GPU timestamps when device_samples > 0; samples count commands, submissions count fences"
+    },
+    "prefill_seconds": 3.2536496870000002,
+    "prefill_submissions": 1392,
+    "prompt_tokens": 13,
+    "tokens": 13,
+    "type": "done"
+  },
+  "environment_before": {
+    "device": "samsung SM-S921B",
+    "android_sdk": 37,
+    "available_ram_bytes": 1150046208,
+    "total_ram_bytes": 7574827008,
+    "low_memory": false,
+    "app_pss_kib": 1865270,
+    "power_save": false,
+    "thermal_status": 1
+  },
+  "environment_after": {
+    "device": "samsung SM-S921B",
+    "android_sdk": 37,
+    "available_ram_bytes": 1080225792,
+    "total_ram_bytes": 7574827008,
+    "low_memory": false,
+    "app_pss_kib": 1702328,
+    "power_save": false,
+    "thermal_status": 1
+  }
+}

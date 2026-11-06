@@ -30,4 +30,29 @@ fn main() {
             .expect("install glslc (shaderc) or set GLSLC");
         assert!(status.success(), "{name} shader compilation failed");
     }
+    for bits in 0..=8 {
+        let (source, name) = if bits == 0 {
+            ("codebook", "codebook_native".to_owned())
+        } else {
+            ("qmv_stream", format!("qmv_native_{bits}"))
+        };
+        let mut compiler = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()));
+        compiler
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+            ])
+            .arg(format!("shaders/{source}.comp"))
+            .arg("-o")
+            .arg(out.join(format!("{name}.spv")));
+        if bits > 0 {
+            compiler.arg(format!("-DEXL3_BITS={bits}"));
+        }
+        assert!(
+            compiler.status().expect("glslc").success(),
+            "{name} shader compilation failed"
+        );
+    }
 }

@@ -207,8 +207,15 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert_eq!(done["type"], "done");
     assert_eq!(done["performance"]["gpu"]["automatic_calibration"], false);
     assert_eq!(done["performance"]["gpu"]["scratch_mapping"], "persistent");
-    assert_eq!(done["performance"]["gpu"]["kernel"], "register_window_16");
+    assert!(
+        done["performance"]["gpu"]["kernel"]
+            .as_str()
+            .unwrap()
+            .starts_with("register_window_16")
+    );
     assert_eq!(done["performance"]["gpu"]["prepared_matrices"], 19);
+    assert_eq!(done["performance"]["schema_version"], 2);
+    assert_eq!(done["performance"]["model"]["architecture"], "lfm3");
     for phase in ["prefill", "decode"] {
         let p = &done["performance"][phase];
         assert!(p["wait_ns"].as_u64().unwrap() > 0);
@@ -238,6 +245,36 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .map(|key| p[key].as_u64().unwrap())
             .sum();
             assert_eq!(p["device_compute_ns"].as_u64().unwrap(), phases);
+            let groups = p["projection_groups"].as_array().unwrap();
+            assert!(!groups.is_empty());
+            let grouped_samples: u64 = groups
+                .iter()
+                .map(|g| g["timing"]["samples"].as_u64().unwrap())
+                .sum();
+            let grouped_matvec: u64 = groups
+                .iter()
+                .map(|g| g["timing"]["matvec_ns"].as_u64().unwrap())
+                .sum();
+            assert_eq!(grouped_samples, p["device_exl3_samples"].as_u64().unwrap());
+            assert_eq!(grouped_matvec, p["device_exl3_matvec_ns"].as_u64().unwrap());
+            assert_eq!(p["slowest_projections"].as_array().unwrap().len(), 8);
+            assert!(
+                p["slowest_projections"][0]["name"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("model.layers.")
+            );
+            assert_eq!(p["query_read_failures"], 0);
+        }
+        for field in [
+            "normalization_ns",
+            "embedding_ns",
+            "convolution_cpu_ns",
+            "attention_cpu_ns",
+            "rope_ns",
+            "activation_ns",
+        ] {
+            assert!(p[field].as_u64().unwrap() > 0, "missing {phase}/{field}");
         }
     }
     assert!(!done["performance"].to_string().contains("Hello"));

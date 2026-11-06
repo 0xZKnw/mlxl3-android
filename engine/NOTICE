@@ -10,6 +10,9 @@ ggml/src/ggml-vulkan/vulkan-shaders/exl3_common.glsl (MIT),
 Copyright (c) 2023-2026 The ggml authors. See THIRD_PARTY_NOTICES.md.
 Our shader uses core 32-bit arithmetic and shared-memory reductions rather
 than requiring the upstream wave32/FP16/coopmat paths.
+The optional native codebook shader also adapts the paired FP16 addition
+algorithm from exl3_common.glsl at the same revision; FP32 accumulation and
+the portable LUT fallback remain available.
 
 The LFM3 computation order follows LiquidAI/LFM3-1.7B, source revision
 0dc4268b561499c648c7ba7c9466bf3d8d01517a, modeling_lfm3.py (Apache-2.0,

@@ -1,9 +1,16 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#ifdef EXL3_NATIVE
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
 // Register-window trellis decoding: see engine/NOTICE for the upstream algorithm.
 // Four logical 32-lane groups split K; no hardware subgroup size is assumed.
 layout(local_size_x = 128) in;
+#ifdef EXL3_BITS
+const uint BITS = EXL3_BITS;
+#else
 layout(constant_id = 0) const uint BITS = 4u;
+#endif
 layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
 layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
 layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
@@ -46,6 +53,12 @@ void main() {
                        ALIGNED > 2u ? (w2 << shift) | ((w3 >> 1u) >> (31u - shift)) : 0u);
         vec4 inputValues = vec4(x[tile * 16u + row], x[tile * 16u + row + 1u],
                                x[tile * 16u + row + 8u], x[tile * 16u + row + 9u]);
+#ifdef EXL3_NATIVE
+        acc = fma(vec2(inputValues[0]), codewordPair(stateAt(a, 0u), stateAt(a, 4u), p.codebook), acc);
+        acc = fma(vec2(inputValues[1]), codewordPair(stateAt(a, 1u), stateAt(a, 5u), p.codebook), acc);
+        acc = fma(vec2(inputValues[2]), codewordPair(stateAt(a, 2u), stateAt(a, 6u), p.codebook), acc);
+        acc = fma(vec2(inputValues[3]), codewordPair(stateAt(a, 3u), stateAt(a, 7u), p.codebook), acc);
+#else
         acc.x = fma(inputValues[0], codeword(stateAt(a, 0u), p.codebook), acc.x);
         acc.x = fma(inputValues[1], codeword(stateAt(a, 1u), p.codebook), acc.x);
         acc.x = fma(inputValues[2], codeword(stateAt(a, 2u), p.codebook), acc.x);
@@ -54,6 +67,7 @@ void main() {
         acc.y = fma(inputValues[1], codeword(stateAt(a, 5u), p.codebook), acc.y);
         acc.y = fma(inputValues[2], codeword(stateAt(a, 6u), p.codebook), acc.y);
         acc.y = fma(inputValues[3], codeword(stateAt(a, 7u), p.codebook), acc.y);
+#endif
     }
     partial[tid] = acc;
     barrier();

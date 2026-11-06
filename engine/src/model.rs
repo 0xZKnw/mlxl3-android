@@ -190,7 +190,38 @@ pub struct Model {
     pub context_limit: usize,
 }
 
+fn normalize(gpu: &Gpu, x: &[f32], weight: &[f32], eps: f32) -> Result<Vec<f32>> {
+    let started = std::time::Instant::now();
+    let result = math::rms_norm(x, weight, eps);
+    gpu.record_profile(|p| {
+        p.normalization_ns = p
+            .normalization_ns
+            .saturating_add(crate::vulkan::elapsed_ns(started))
+    });
+    result
+}
+
 impl Model {
+    pub fn diagnostics(&self) -> serde_json::Value {
+        let mut cache_bytes = 0usize;
+        for layer in &self.layers {
+            cache_bytes += match &layer.operator {
+                Operator::Conv(c) => c.history.iter().map(|v| v.len() * 4).sum::<usize>(),
+                Operator::Attention(a) => a
+                    .keys
+                    .iter()
+                    .chain(&a.values)
+                    .map(|v| v.len() * 4)
+                    .sum::<usize>(),
+            };
+        }
+        serde_json::json!({"architecture":"lfm3","hidden_size":self.config.hidden_size,
+            "intermediate_size":self.config.intermediate_size,"layers":self.layers.len(),
+            "layer_types":self.config.layer_types,"attention_heads":self.config.num_attention_heads,
+            "kv_heads":self.config.num_key_value_heads,"vocabulary":self.config.vocab_size,
+            "context_limit":self.context_limit,"position":self.position,"cpu_cache_logical_bytes":cache_bytes,
+            "prefill_batch_size":1,"sampling":"greedy"})
+    }
     pub fn load(
         directory: &Path,
         context_limit: usize,
@@ -333,35 +364,69 @@ impl Model {
         cancel: &AtomicBool,
     ) -> Result<Option<Vec<f32>>> {
         ensure!(self.position < self.context_limit, "Context is full");
+        let started = std::time::Instant::now();
         let mut hidden =
             self.weights
                 .embedding(token, self.config.vocab_size, self.config.hidden_size)?;
+        self.gpu.record_profile(|p| {
+            p.embedding_ns = p
+                .embedding_ns
+                .saturating_add(crate::vulkan::elapsed_ns(started))
+        });
         for layer in &mut self.layers {
             ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
-            let normalized = math::rms_norm(&hidden, &layer.operator_norm, self.config.norm_eps)?;
+            let normalized = normalize(
+                &self.gpu,
+                &hidden,
+                &layer.operator_norm,
+                self.config.norm_eps,
+            )?;
             let output = match &mut layer.operator {
                 Operator::Conv(conv) => conv.forward(&mut self.gpu, &normalized, &self.config)?,
                 Operator::Attention(attn) => {
                     attn.forward(&mut self.gpu, &normalized, &self.config, self.position)?
                 }
             };
-            let output = math::rms_norm(&output, &layer.post_operator_norm, self.config.norm_eps)?;
+            let output = normalize(
+                &self.gpu,
+                &output,
+                &layer.post_operator_norm,
+                self.config.norm_eps,
+            )?;
+            let started = std::time::Instant::now();
             for (h, value) in hidden.iter_mut().zip(output) {
                 *h += value;
             }
-            let normalized = math::rms_norm(&hidden, &layer.ffn_norm, self.config.norm_eps)?;
+            self.gpu.record_profile(|p| {
+                p.activation_ns = p
+                    .activation_ns
+                    .saturating_add(crate::vulkan::elapsed_ns(started))
+            });
+            let normalized = normalize(&self.gpu, &hidden, &layer.ffn_norm, self.config.norm_eps)?;
             let [gate, up] =
                 Linear::forward_group([&layer.w1, &layer.w3], &mut self.gpu, &normalized)?;
+            let started = std::time::Instant::now();
             let activated: Vec<_> = gate
                 .iter()
                 .zip(up)
                 .map(|(g, u)| math::half(g / (1. + (-g).exp()) * u))
                 .collect();
+            self.gpu.record_profile(|p| {
+                p.activation_ns = p
+                    .activation_ns
+                    .saturating_add(crate::vulkan::elapsed_ns(started))
+            });
             let down = layer.w2.forward(&mut self.gpu, &activated)?;
-            let down = math::rms_norm(&down, &layer.post_ffn_norm, self.config.norm_eps)?;
+            let down = normalize(&self.gpu, &down, &layer.post_ffn_norm, self.config.norm_eps)?;
+            let started = std::time::Instant::now();
             for (h, value) in hidden.iter_mut().zip(down) {
                 *h += value;
             }
+            self.gpu.record_profile(|p| {
+                p.activation_ns = p
+                    .activation_ns
+                    .saturating_add(crate::vulkan::elapsed_ns(started))
+            });
         }
         ensure!(
             hidden.iter().all(|v| v.is_finite()),
@@ -369,7 +434,7 @@ impl Model {
         );
         self.position += 1;
         if logits {
-            let hidden = math::rms_norm(&hidden, &self.norm, self.config.norm_eps)?;
+            let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
             let started = std::time::Instant::now();
             let result = self.head.forward(&mut self.gpu, &hidden)?;
             self.gpu.record_profile(|p| {
@@ -385,6 +450,7 @@ impl Model {
 impl Conv {
     fn forward(&mut self, gpu: &mut Gpu, x: &[f32], c: &Config) -> Result<Vec<f32>> {
         let projected = self.input.forward(gpu, x)?;
+        let started = std::time::Instant::now();
         let h = c.hidden_size;
         let bx = projected[..h]
             .iter()
@@ -402,6 +468,11 @@ impl Conv {
             h,
             c.conv_length,
         )?;
+        gpu.record_profile(|p| {
+            p.convolution_cpu_ns = p
+                .convolution_cpu_ns
+                .saturating_add(crate::vulkan::elapsed_ns(started))
+        });
         self.output.forward(gpu, &y)
     }
 }
@@ -443,11 +514,12 @@ impl Attention {
     ) -> Result<Vec<f32>> {
         let [mut q, mut k, v] = Linear::forward_group([&self.q, &self.k, &self.v], gpu, x)?;
         for head in q.chunks_exact_mut(c.head_dim) {
-            head.copy_from_slice(&math::rms_norm(head, &self.q_norm, c.norm_eps)?);
+            head.copy_from_slice(&normalize(gpu, head, &self.q_norm, c.norm_eps)?);
         }
         for head in k.chunks_exact_mut(c.head_dim) {
-            head.copy_from_slice(&math::rms_norm(head, &self.k_norm, c.norm_eps)?);
+            head.copy_from_slice(&normalize(gpu, head, &self.k_norm, c.norm_eps)?);
         }
+        let started = std::time::Instant::now();
         math::rope(
             &mut q,
             c.head_dim,
@@ -462,13 +534,23 @@ impl Attention {
             self.rope.partial_rotary_factor,
             position,
         )?;
+        gpu.record_profile(|p| {
+            p.rope_ns = p.rope_ns.saturating_add(crate::vulkan::elapsed_ns(started))
+        });
+        let started = std::time::Instant::now();
         self.keys.push_back(k);
         self.values.push_back(v);
         if self.keys.len() > self.window {
             self.keys.pop_front();
             self.values.pop_front();
         }
+        gpu.record_profile(|p| {
+            p.attention_cpu_ns = p
+                .attention_cpu_ns
+                .saturating_add(crate::vulkan::elapsed_ns(started))
+        });
         let gate = self.gate.forward(gpu, x)?;
+        let started = std::time::Instant::now();
         let attended = attention(
             &q,
             &self.keys,
@@ -478,6 +560,11 @@ impl Attention {
             c.num_key_value_heads,
             c.head_dim,
         )?;
+        gpu.record_profile(|p| {
+            p.attention_cpu_ns = p
+                .attention_cpu_ns
+                .saturating_add(crate::vulkan::elapsed_ns(started))
+        });
         self.output.forward(gpu, &attended)
     }
 }
