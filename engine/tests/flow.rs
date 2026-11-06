@@ -273,6 +273,9 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             assert!(p["device_queue_ns"].as_u64().unwrap() > 0);
             assert!(p["device_swiglu_ns"].as_u64().unwrap() > 0);
             assert!(p["device_convolution_ns"].as_u64().unwrap() > 0);
+            assert!(p["device_head_ns"].as_u64().unwrap() > 0);
+            assert!(p["device_head_samples"].as_u64().unwrap() > 0);
+            assert!(p["device_attention_gate_ns"].as_u64().unwrap() > 0);
             assert_eq!(p["convolution_cpu_ns"], 0);
         }
         for field in [

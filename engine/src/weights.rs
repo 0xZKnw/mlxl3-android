@@ -1,7 +1,7 @@
 use crate::{
     codec::{self, Codebook},
     math,
-    vulkan::{Buffer, Exl3Matrix, Exl3Shape, Gpu},
+    vulkan::{Buffer, DenseHeadPlan, Exl3Matrix, Exl3Shape, Gpu},
 };
 use anyhow::{Context, Result, ensure};
 use half::{bf16, f16};
@@ -160,6 +160,7 @@ impl Weights {
 
 enum Storage {
     Exl3(Exl3Matrix),
+    Head(DenseHeadPlan),
     Dense {
         chunks: Vec<(Buffer, usize)>,
         dtype: u32,
@@ -169,12 +170,13 @@ pub struct Linear {
     storage: Storage,
     input: usize,
     output: usize,
+    is_head: bool,
 }
 impl Linear {
     pub(crate) fn into_exl3(self) -> Result<Exl3Matrix> {
         match self.storage {
             Storage::Exl3(matrix) => Ok(matrix),
-            Storage::Dense { .. } => {
+            Storage::Dense { .. } | Storage::Head(_) => {
                 anyhow::bail!("GPU resident operator requires EXL3 projections")
             }
         }
@@ -193,7 +195,7 @@ impl Linear {
             .iter()
             .map(|l| match &l.storage {
                 Storage::Exl3(matrix) => Ok(matrix),
-                Storage::Dense { .. } => anyhow::bail!("Grouped projections require EXL3 weights"),
+                Storage::Dense { .. } | Storage::Head(_) => anyhow::bail!("Grouped projections require EXL3 weights"),
             })
             .collect::<Result<Vec<_>>>()?;
         gpu.project_exl3_batch(&matrices, x)?
@@ -215,7 +217,7 @@ impl Linear {
                 .iter()
                 .map(|l| match &l.storage {
                     Storage::Exl3(matrix) => Ok(matrix),
-                    Storage::Dense { .. } => {
+                    Storage::Dense { .. } | Storage::Head(_) => {
                         anyhow::bail!("Grouped projections require EXL3 weights")
                     }
                 })
@@ -323,7 +325,11 @@ impl Linear {
             for bytes in w.bytes(&key)?.chunks(chunk_rows * bytes_per_row) {
                 chunks.push((gpu.buffer(bytes)?, bytes.len() / bytes_per_row));
             }
-            Storage::Dense { chunks, dtype }
+            if name == "lm_head" {
+                Storage::Head(gpu.prepare_dense_head(chunks, input, dtype)?)
+            } else {
+                Storage::Dense { chunks, dtype }
+            }
         };
         ensure!(
             !w.has(&format!("{name}.bias")),
@@ -333,6 +339,7 @@ impl Linear {
             storage,
             input,
             output,
+            is_head: name == "lm_head",
         })
     }
 
@@ -342,6 +349,19 @@ impl Linear {
         let mut result = match &self.storage {
             // GPU post-Hadamard already enforces the FP16 boundary and finite output.
             Storage::Exl3(matrix) => return gpu.project_exl3(matrix, x),
+            Storage::Head(plan) => {
+                let x: Vec<_> = x.iter().copied().map(math::half).collect();
+                gpu.record_profile(|p| {
+                    p.projection_cpu_ns = p
+                        .projection_cpu_ns
+                        .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
+                });
+                let before = gpu.dense_timing_snapshot();
+                let result = gpu.forward_dense_head(plan, &x)?;
+                gpu.record_head_timing(before);
+                cpu_started = std::time::Instant::now();
+                result
+            }
             Storage::Dense { chunks, dtype } => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();
                 gpu.record_profile(|p| {
@@ -349,7 +369,11 @@ impl Linear {
                         .projection_cpu_ns
                         .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
                 });
+                let before = gpu.dense_timing_snapshot();
                 let result = gpu.multiply_dense_chunks(chunks, &x, *dtype)?;
+                if self.is_head {
+                    gpu.record_head_timing(before);
+                }
                 cpu_started = std::time::Instant::now();
                 result
             }

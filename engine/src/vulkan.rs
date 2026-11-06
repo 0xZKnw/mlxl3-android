@@ -59,7 +59,7 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
-const MAX_DESCRIPTOR_SETS: usize = MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 48;
+const MAX_DESCRIPTOR_SETS: usize = 2 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 48;
 const QUERY_COUNT: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
 
 fn projection_queries(index: usize) -> Option<u32> {
@@ -100,6 +100,14 @@ pub(crate) struct ConvPlan {
     output: Exl3Matrix,
     state: Buffer,
     convolve: vk::CommandBuffer,
+}
+
+pub(crate) struct DenseHeadPlan {
+    chunks: Vec<(Buffer, usize)>,
+    outputs: Vec<Buffer>,
+    input_len: usize,
+    total: usize,
+    command: vk::CommandBuffer,
 }
 
 fn timestamp_delta(start: u64, end: u64, bits: u32) -> Option<u64> {
@@ -1059,6 +1067,18 @@ impl Gpu {
         self.submissions.get()
     }
 
+    pub(crate) fn dense_timing_snapshot(&self) -> (u64, u64) {
+        let profile = self.profile.borrow();
+        (profile.device_other_ns, profile.device_samples)
+    }
+
+    pub(crate) fn record_head_timing(&self, before: (u64, u64)) {
+        self.record_profile(|p| {
+            p.device_head_ns = p.device_head_ns.saturating_add(p.device_other_ns.saturating_sub(before.0));
+            p.device_head_samples = p.device_head_samples.saturating_add(p.device_samples.saturating_sub(before.1));
+        });
+    }
+
     fn stream_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
@@ -1746,6 +1766,75 @@ impl Gpu {
         output.read_f32(outputs)
     }
 
+    pub(crate) fn prepare_dense_head(
+        &mut self,
+        chunks: Vec<(Buffer, usize)>,
+        input_len: usize,
+        dtype: u32,
+    ) -> Result<DenseHeadPlan> {
+        let rows: Vec<_> = chunks.iter().map(|(_, rows)| *rows).collect();
+        let total = dense_batch_output_count(&rows).context("Invalid dense head chunks")?;
+        let dummy = vec![0.0; input_len];
+        let params = chunks
+            .iter()
+            .map(|(weights, rows)| self.validate_projection(weights, &dummy, *rows, 0, dtype))
+            .collect::<Result<Vec<_>>>()?;
+        let outputs = rows
+            .iter()
+            .map(|rows| self.mapped_buffer(rows * 4))
+            .collect::<Result<Vec<_>>>()?;
+        let layouts = vec![self.set_layout; chunks.len()];
+        let command = unsafe {
+            self.device.raw.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?
+        }[0];
+        let sets = unsafe {
+            self.device.raw.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.descriptor_pool)
+                    .set_layouts(&layouts),
+            )?
+        };
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let jobs: Vec<_> = chunks
+            .iter()
+            .zip(&params)
+            .zip(&outputs)
+            .map(|(((weights, rows), params), output)| Dispatch {
+                input,
+                weights,
+                output,
+                params: *params,
+                outputs: *rows,
+                groups: dense_groups(*rows).expect("validated dense head shape"),
+                groups_y: 1,
+                pipeline: self.dense,
+                barrier_after: false,
+            })
+            .collect();
+        self.record_jobs(command, &sets, &jobs, vk::CommandBufferUsageFlags::empty(), None)?;
+        Ok(DenseHeadPlan { chunks, outputs, input_len, total, command })
+    }
+
+    pub(crate) fn forward_dense_head(&self, plan: &DenseHeadPlan, x: &[f32]) -> Result<Vec<f32>> {
+        ensure!(x.len() == plan.input_len && x.iter().all(|v| v.is_finite()), "Invalid dense head input");
+        ensure!(plan.chunks.iter().all(|(weights, _)| Arc::ptr_eq(&weights.device, &self.device)), "Dense head belongs to another GPU");
+        self.upload(x)?;
+        self.submit(&[plan.command], Instant::now())?;
+        self.collect_timestamps(None);
+        let started = Instant::now();
+        let mut result = Vec::with_capacity(plan.total);
+        for ((_, rows), output) in plan.chunks.iter().zip(&plan.outputs) {
+            result.extend(output.read_f32(*rows)?);
+        }
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        Ok(result)
+    }
+
     pub fn multiply_dense_chunks(
         &mut self,
         chunks: &[(Buffer, usize)],
@@ -2143,6 +2232,31 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; prepared dense head parity and reuse"]
+    fn resident_prepared_dense_head_matches_dynamic() {
+        let mut gpu = Gpu::new().unwrap();
+        let input = 128usize;
+        let weights: Vec<u8> = (0..input * 9)
+            .flat_map(|i| half::f16::from_f32((i as f32 % 31. - 15.) / 32.).to_bits().to_le_bytes())
+            .collect();
+        let chunks = vec![
+            (gpu.buffer(&weights[..input * 4 * 2]).unwrap(), 4),
+            (gpu.buffer(&weights[input * 4 * 2..]).unwrap(), 5),
+        ];
+        let x: Vec<f32> = (0..input).map(|i| (i as f32 - 63.) / 128.).collect();
+        let expected = gpu.multiply_dense_chunks(&chunks, &x, 0).unwrap();
+        let plan = gpu.prepare_dense_head(chunks, input, 0).unwrap();
+        for _ in 0..3 {
+            let before = gpu.submission_count();
+            let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+            assert_eq!(gpu.submission_count() - before, 1);
+            assert_eq!(actual, expected);
+        }
+        assert!(gpu.forward_dense_head(&plan, &[f32::NAN; 128]).is_err());
+        assert!(gpu.forward_dense_head(&plan, &[0.; 127]).is_err());
+    }
 
     #[test]
     #[ignore = "requires Vulkan; mixed dense attention gate and QKV"]
