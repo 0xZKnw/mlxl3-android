@@ -38,6 +38,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val stopped = AtomicBoolean(false)
     private val prefs = application.getSharedPreferences("studio", 0)
     var splitK by mutableStateOf(prefs.getInt("split_k", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
+    var fastHead by mutableStateOf(prefs.getBoolean("fast_head", false)); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -46,6 +47,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         splitK = value
         prefs.edit().putInt("split_k", value).apply()
         status = "Split-K $value sélectionné · rechargez le modèle"
+    }
+    fun chooseFastHead(enabled: Boolean) {
+        if (busy) return
+        fastHead = enabled
+        prefs.edit().putBoolean("fast_head", enabled).apply()
+        status = "Tête expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -105,6 +112,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val path = prefs.getString("model", null) ?: error("Import a model first")
         main.post { ready = false; status = "Loading LFM3…" }
         check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
+        NativeEngine.setFastHead(fastHead)
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -139,6 +147,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             ModelImport.validateFolder(stage)
             main.post { ready = false; status = "Loading LFM3…" }
             check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
+            NativeEngine.setFastHead(fastHead)
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

@@ -38,6 +38,11 @@ fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
 
 const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
 static REQUESTED_SPLIT_K: AtomicU32 = AtomicU32::new(4);
+static REQUESTED_FAST_HEAD: AtomicBool = AtomicBool::new(false);
+
+pub fn set_fast_head(enabled: bool) {
+    REQUESTED_FAST_HEAD.store(enabled, Ordering::Relaxed);
+}
 
 pub fn set_split_k(value: u32) -> bool {
     if ![1, 2, 4, 8].contains(&value) {
@@ -353,6 +358,8 @@ pub struct Gpu {
     queries: vk::QueryPool,
     timestamp_bits: u32,
     dense: vk::Pipeline,
+    dense_pair: vk::Pipeline,
+    fast_head: bool,
     reduce: vk::Pipeline,
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
@@ -622,7 +629,9 @@ impl Gpu {
             cooperative_k5_active: false,
             cooperative_k5_self_test: "not_run",
             split_k: if props.limits.max_compute_work_group_count[1] >= requested_split_k
-                && (requested_split_k <= 4 || props.limits.max_storage_buffer_range >= 32768 * 32 * 4) {
+                && (requested_split_k <= 4
+                    || props.limits.max_storage_buffer_range >= 32768 * 32 * 4)
+            {
                 requested_split_k
             } else {
                 4
@@ -633,6 +642,8 @@ impl Gpu {
             queries: vk::QueryPool::null(),
             timestamp_bits,
             dense: vk::Pipeline::null(),
+            dense_pair: vk::Pipeline::null(),
+            fast_head: REQUESTED_FAST_HEAD.load(Ordering::Relaxed),
             reduce: vk::Pipeline::null(),
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
@@ -764,6 +775,12 @@ impl Gpu {
 
         gpu.qmv = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/qmv.spv")))?;
         gpu.dense = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense.spv")))?;
+        gpu.dense_pair = gpu
+            .pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_pair.spv")))
+            .unwrap_or(vk::Pipeline::null());
+        if gpu.dense_pair == vk::Pipeline::null() {
+            gpu.fast_head = false;
+        }
         gpu.reduce = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/reduce.spv")))?;
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
@@ -1038,7 +1055,7 @@ impl Gpu {
             "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| n.then_some(i+1)).collect::<Vec<_>>(),
             "projection":"gpu_resident_mlp_conv",
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|v.then_some(i+1)).collect::<Vec<_>>(),
-            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":"four_rows_fp32",
+            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
             "cooperative_k4_self_test":self.cooperative_k4_self_test,
             "cooperative_k5_active":self.cooperative_k5_active,"cooperative_k5_self_test":self.cooperative_k5_self_test,
@@ -1206,7 +1223,8 @@ impl Gpu {
                                 if self.device.abandoned.load(Ordering::Relaxed) {
                                     return Err(err);
                                 }
-                                self.native_pipeline_errors.push(format!("cooperative K{bits} self-test: {err}"));
+                                self.native_pipeline_errors
+                                    .push(format!("cooperative K{bits} self-test: {err}"));
                                 false
                             }
                         };
@@ -1374,7 +1392,12 @@ impl Gpu {
                 input: rotated,
                 weights: &weights,
                 output,
-                params: [params[0], params[1], shape.bits | (self.split_k << 8), shape.codebook],
+                params: [
+                    params[0],
+                    params[1],
+                    shape.bits | (self.split_k << 8),
+                    shape.codebook,
+                ],
                 outputs: shape.cols,
                 groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
                 groups_y: if split { self.split_k } else { 1 },
@@ -1431,8 +1454,13 @@ impl Gpu {
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
             kernel: if split {
-                let cooperative = if shape.bits == 4 && self.cooperative_k4_active { 4 }
-                    else if shape.bits == 5 && self.cooperative_k5_active { 5 } else { 0 };
+                let cooperative = if shape.bits == 4 && self.cooperative_k4_active {
+                    4
+                } else if shape.bits == 5 && self.cooperative_k5_active {
+                    5
+                } else {
+                    0
+                };
                 wave_kernel_label(self.split_k, cooperative)
             } else if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
                 "native_f16_literal"
@@ -1995,7 +2023,7 @@ impl Gpu {
                 outputs: *rows,
                 groups: dense_groups(*rows).expect("validated dense head shape"),
                 groups_y: 1,
-                pipeline: self.dense,
+                pipeline: if self.fast_head { self.dense_pair } else { self.dense },
                 barrier_after: false,
             })
             .collect();
@@ -2418,6 +2446,7 @@ impl Drop for Gpu {
                 d.destroy_pipeline(pipeline, None);
             }
             d.destroy_pipeline(self.dense, None);
+            d.destroy_pipeline(self.dense_pair, None);
             d.destroy_pipeline(self.reduce, None);
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
@@ -2437,6 +2466,29 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires Vulkan; experimental paired dense head"]
+    fn resident_paired_dense_head_matches_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        assert_ne!(gpu.dense_pair, vk::Pipeline::null());
+        for input in [128usize, 129, 2048] {
+            let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
+            for dtype in 0..=1 {
+                let bytes: Vec<u8> = (0..input * 5).flat_map(|i| {
+                    let v = (i as f32 % 29. - 14.) / 64.;
+                    (if dtype == 0 { half::f16::from_f32(v).to_bits() } else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
+                }).collect();
+                let chunks = vec![(gpu.buffer(&bytes).unwrap(), 5)];
+                let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+                gpu.fast_head = true;
+                let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
+                let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                assert!(actual.iter().zip(&reference).all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005));
+                gpu.fast_head = false;
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires Vulkan; split-K numerical parity"]
     fn resident_split_k_variants_match_reference() {
         let mut gpu = Gpu::new().unwrap();
@@ -2448,11 +2500,21 @@ mod tests {
             let weights = gpu.buffer(&bytes).unwrap();
             for codebook in 0..3 {
                 gpu.split_k = 4;
-                let baseline = gpu.multiply(&weights, &input, 128, bits as u32, codebook).unwrap();
+                let baseline = gpu
+                    .multiply(&weights, &input, 128, bits as u32, codebook)
+                    .unwrap();
                 for split in [1, 2, 4, 8] {
                     gpu.split_k = split;
-                    let actual = gpu.multiply(&weights, &input, 128, bits as u32, codebook).unwrap();
-                    assert!(actual.iter().zip(&baseline).all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005), "split {split}, bits {bits}, codebook {codebook}");
+                    let actual = gpu
+                        .multiply(&weights, &input, 128, bits as u32, codebook)
+                        .unwrap();
+                    assert!(
+                        actual
+                            .iter()
+                            .zip(&baseline)
+                            .all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005),
+                        "split {split}, bits {bits}, codebook {codebook}"
+                    );
                 }
             }
         }

@@ -4,6 +4,7 @@ object NativeEngine {
     init { System.loadLibrary("mlxl3_android") }
     fun interface Callback { fun onEvent(json: String) }
     external fun setSplitK(value: Int): Boolean
+    external fun setFastHead(enabled: Boolean)
     external fun load(path: String, callback: Callback): String
     external fun generate(messages: String, maxTokens: Int, callback: Callback): String
     external fun cancel()

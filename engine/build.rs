@@ -9,6 +9,7 @@ fn main() {
         "qmv_stream",
         "hadamard",
         "dense",
+        "dense_pair",
         "reduce",
         "swiglu",
         "convolution",
