@@ -1074,8 +1074,12 @@ impl Gpu {
 
     pub(crate) fn record_head_timing(&self, before: (u64, u64)) {
         self.record_profile(|p| {
-            p.device_head_ns = p.device_head_ns.saturating_add(p.device_other_ns.saturating_sub(before.0));
-            p.device_head_samples = p.device_head_samples.saturating_add(p.device_samples.saturating_sub(before.1));
+            p.device_head_ns = p
+                .device_head_ns
+                .saturating_add(p.device_other_ns.saturating_sub(before.0));
+            p.device_head_samples = p
+                .device_head_samples
+                .saturating_add(p.device_samples.saturating_sub(before.1));
         });
     }
 
@@ -1816,13 +1820,33 @@ impl Gpu {
                 barrier_after: false,
             })
             .collect();
-        self.record_jobs(command, &sets, &jobs, vk::CommandBufferUsageFlags::empty(), None)?;
-        Ok(DenseHeadPlan { chunks, outputs, input_len, total, command })
+        self.record_jobs(
+            command,
+            &sets,
+            &jobs,
+            vk::CommandBufferUsageFlags::empty(),
+            None,
+        )?;
+        Ok(DenseHeadPlan {
+            chunks,
+            outputs,
+            input_len,
+            total,
+            command,
+        })
     }
 
     pub(crate) fn forward_dense_head(&self, plan: &DenseHeadPlan, x: &[f32]) -> Result<Vec<f32>> {
-        ensure!(x.len() == plan.input_len && x.iter().all(|v| v.is_finite()), "Invalid dense head input");
-        ensure!(plan.chunks.iter().all(|(weights, _)| Arc::ptr_eq(&weights.device, &self.device)), "Dense head belongs to another GPU");
+        ensure!(
+            x.len() == plan.input_len && x.iter().all(|v| v.is_finite()),
+            "Invalid dense head input"
+        );
+        ensure!(
+            plan.chunks
+                .iter()
+                .all(|(weights, _)| Arc::ptr_eq(&weights.device, &self.device)),
+            "Dense head belongs to another GPU"
+        );
         self.upload(x)?;
         self.submit(&[plan.command], Instant::now())?;
         self.collect_timestamps(None);
@@ -2239,7 +2263,11 @@ mod tests {
         let mut gpu = Gpu::new().unwrap();
         let input = 128usize;
         let weights: Vec<u8> = (0..input * 9)
-            .flat_map(|i| half::f16::from_f32((i as f32 % 31. - 15.) / 32.).to_bits().to_le_bytes())
+            .flat_map(|i| {
+                half::f16::from_f32((i as f32 % 31. - 15.) / 32.)
+                    .to_bits()
+                    .to_le_bytes()
+            })
             .collect();
         let chunks = vec![
             (gpu.buffer(&weights[..input * 4 * 2]).unwrap(), 4),

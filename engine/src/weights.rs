@@ -195,7 +195,9 @@ impl Linear {
             .iter()
             .map(|l| match &l.storage {
                 Storage::Exl3(matrix) => Ok(matrix),
-                Storage::Dense { .. } | Storage::Head(_) => anyhow::bail!("Grouped projections require EXL3 weights"),
+                Storage::Dense { .. } | Storage::Head(_) => {
+                    anyhow::bail!("Grouped projections require EXL3 weights")
+                }
             })
             .collect::<Result<Vec<_>>>()?;
         gpu.project_exl3_batch(&matrices, x)?
