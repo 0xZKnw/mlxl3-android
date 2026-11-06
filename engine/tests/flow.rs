@@ -157,13 +157,24 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         .unwrap();
     let cancelled = AtomicBool::new(false);
     let mut engine = Engine::load(dir.path(), &cancelled, &mut |_| {}).unwrap();
+    // Captured from the sequential 38f2d17 engine; allow cross-driver FP32 reduction noise.
+    let reference: Vec<Vec<u32>> =
+        serde_json::from_str(include_str!("fixtures/lfm3-reduced-logits.json")).unwrap();
+    assert_eq!(reference.len(), 8);
     let mut last = vec![];
-    for token in [3, 4, 5, 6, 7, 8, 9, 10] {
+    for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {
+        let before = engine.model.gpu.submission_count();
         last = engine
             .model
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
+        assert_eq!(engine.model.gpu.submission_count() - before, 13);
+        assert_eq!(reference[index].len(), last.len());
+        for (actual, bits) in last.iter().zip(&reference[index]) {
+            let expected = f32::from_bits(*bits);
+            assert!((actual - expected).abs() <= 0.0005 + expected.abs() * 0.002);
+        }
         assert_eq!(last.len(), 16);
         assert!(last.iter().all(|v| v.is_finite()));
         assert!(last.iter().any(|v| v.abs() > 0.01));
@@ -192,7 +203,16 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .iter()
             .any(|e| e["type"] == "text" && !e["text"].as_str().unwrap().is_empty())
     );
-    assert_eq!(events.last().unwrap()["type"], "done");
+    let done = events.last().unwrap();
+    assert_eq!(done["type"], "done");
+    assert_eq!(
+        done["prefill_submissions"].as_u64().unwrap(),
+        done["prompt_tokens"].as_u64().unwrap() * 12 + 1
+    );
+    assert_eq!(
+        done["decode_submissions"].as_u64().unwrap(),
+        done["decode_tokens"].as_u64().unwrap() * 13
+    );
     cancelled.store(true, Ordering::Relaxed);
     assert!(
         engine

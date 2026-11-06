@@ -52,10 +52,20 @@ fn dense_batch_output_count(rows: &[usize]) -> Option<usize> {
 }
 
 struct Dispatch<'a> {
+    input: &'a Buffer,
     weights: &'a Buffer,
     output: &'a Buffer,
+    pipeline: vk::Pipeline,
     params: [u32; 4],
     outputs: usize,
+}
+
+pub(crate) struct Projection<'a> {
+    pub weights: &'a Buffer,
+    pub input: &'a [f32],
+    pub outputs: usize,
+    pub bits: u32,
+    pub codebook: u32,
 }
 
 struct Instance {
@@ -91,6 +101,13 @@ pub struct Buffer {
     size: usize,
 }
 impl Buffer {
+    fn write_f32(&self, values: &[f32]) -> Result<()> {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+        };
+        self.write(bytes)
+    }
+
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         ensure!(
             bytes.len() <= self.size,
@@ -161,6 +178,7 @@ pub struct Gpu {
     input: Option<Buffer>,
     output: Option<Buffer>,
     codebooks: Option<Buffer>,
+    batch_inputs: Vec<Buffer>,
     batch_outputs: Vec<Buffer>,
     submissions: Cell<u64>,
     pub name: String,
@@ -253,6 +271,7 @@ impl Gpu {
             input: None,
             output: None,
             codebooks: None,
+            batch_inputs: vec![],
             batch_outputs: vec![],
             submissions: Cell::new(0),
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -518,23 +537,71 @@ impl Gpu {
             let output = self.buffer(&vec![0; 32768 * 4])?;
             self.batch_outputs.push(output);
         }
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        input.write_f32(x)?;
         let jobs: Vec<_> = chunks
             .iter()
             .zip(&params)
             .zip(&self.batch_outputs)
             .map(|(((weights, rows), params), output)| Dispatch {
+                input,
                 weights,
                 output,
+                pipeline: self.dense,
                 params: *params,
                 outputs: *rows,
             })
             .collect();
-        self.execute(self.dense, x, &jobs)?;
+        self.execute(&jobs)?;
         let mut result = Vec::with_capacity(total);
         for job in jobs {
             result.extend(job.output.read_f32(job.outputs)?);
         }
         Ok(result)
+    }
+
+    pub(crate) fn multiply_many(
+        &mut self,
+        projections: &[Projection<'_>],
+    ) -> Result<Vec<Vec<f32>>> {
+        let rows: Vec<_> = projections.iter().map(|p| p.outputs).collect();
+        ensure!(
+            projections.len() <= 4 && dense_batch_output_count(&rows).is_some(),
+            "Invalid independent projection batch"
+        );
+        let params = projections
+            .iter()
+            .map(|p| self.validate_projection(p.weights, p.input, p.outputs, p.bits, p.codebook))
+            .collect::<Result<Vec<_>>>()?;
+        while self.batch_inputs.len() < projections.len() {
+            let input = self.buffer(&vec![0; 32768 * 4])?;
+            self.batch_inputs.push(input);
+        }
+        while self.batch_outputs.len() < projections.len() {
+            let output = self.buffer(&vec![0; 32768 * 4])?;
+            self.batch_outputs.push(output);
+        }
+        let mut jobs = Vec::with_capacity(projections.len());
+        for (index, projection) in projections.iter().enumerate() {
+            let input = &self.batch_inputs[index];
+            input.write_f32(projection.input)?;
+            jobs.push(Dispatch {
+                input,
+                weights: projection.weights,
+                output: &self.batch_outputs[index],
+                pipeline: if projection.bits == 0 {
+                    self.dense
+                } else {
+                    self.qmv
+                },
+                params: params[index],
+                outputs: projection.outputs,
+            });
+        }
+        self.execute(&jobs)?;
+        jobs.iter()
+            .map(|job| job.output.read_f32(job.outputs))
+            .collect()
     }
 
     fn compute(
@@ -545,44 +612,37 @@ impl Gpu {
         params: [u32; 4],
         outputs: usize,
     ) -> Result<Vec<f32>> {
+        let input = self.input.as_ref().context("GPU input unavailable")?;
         let output = self.output.as_ref().context("GPU output unavailable")?;
-        self.execute(
+        input.write_f32(x)?;
+        self.execute(&[Dispatch {
+            input,
+            weights,
+            output,
             pipeline,
-            x,
-            &[Dispatch {
-                weights,
-                output,
-                params,
-                outputs,
-            }],
-        )?;
+            params,
+            outputs,
+        }])?;
         output.read_f32(outputs)
     }
 
-    fn execute(&self, pipeline: vk::Pipeline, x: &[f32], jobs: &[Dispatch<'_>]) -> Result<()> {
+    fn execute(&self, jobs: &[Dispatch<'_>]) -> Result<()> {
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
         );
         ensure!(
-            !x.is_empty()
-                && x.len() <= 32768
-                && !jobs.is_empty()
+            !jobs.is_empty()
                 && jobs.len() <= self.descriptors.len()
                 && jobs.iter().all(|job| job.outputs > 0
                     && job.outputs <= 32768
                     && job.outputs <= self.max_groups as usize),
             "Invalid compute buffer dimensions"
         );
-        let input = self.input.as_ref().context("GPU input unavailable")?;
         let codebooks = self
             .codebooks
             .as_ref()
             .context("GPU codebooks unavailable")?;
-        let bytes = unsafe {
-            std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
-        };
-        input.write(bytes)?;
         unsafe {
             let d = &self.device.raw;
             d.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
@@ -592,13 +652,17 @@ impl Gpu {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            d.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::COMPUTE, pipeline);
+            let mut pipeline = vk::Pipeline::null();
             for (index, job) in jobs.iter().enumerate() {
+                if pipeline != job.pipeline {
+                    pipeline = job.pipeline;
+                    d.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::COMPUTE, pipeline);
+                }
                 // Each dispatch owns a descriptor set and output until the shared fence completes.
                 let infos = [
                     [vk::DescriptorBufferInfo::default()
-                        .buffer(input.raw)
-                        .range(input.size as u64)],
+                        .buffer(job.input.raw)
+                        .range(job.input.size as u64)],
                     [vk::DescriptorBufferInfo::default()
                         .buffer(job.weights.raw)
                         .range(job.weights.size as u64)],

@@ -318,7 +318,7 @@
   benchmarklocal durant le profilageDesktop ; ces limites ne sont pas transformées
   en validation de débit/qualitécomplètedu modèle.
 
-### ANDROID-PERF-2026-11-06-06 — issue1, head groupé et débit visible — en cours
+### ANDROID-PERF-2026-11-06-06 — issue1, head groupé et débit visible — validé fonctionnellement, performance non mesurée
 
 - Issue1 lue, aucun commentaire ; baseline544b0c3, moteur identique9ae3b94.
   Utilisateur demande explicitement implémentation/vérificationrapide/pushAPK,
@@ -351,3 +351,59 @@
   sur lavapipe. Compteur8→1 observé dans le test, pas une accélération8x.
   Kani borné4chunksymboliques/unwind6 et contrôlesAndroid délégués à CI ; pas
   de grossecampagne ajoutée conformément à la demandeexplicite de rapidité.
+
+#### Réception CI de l'essai 06
+
+- Source publique `38f2d17331ba52420f788b2f3481e3fd9afc0733` ;
+  [run 42211210916](https://github.com/0xZKnw/mlxl3-android/actions/runs/42211210916)
+  inspecté : **cinq jobs réussis**, APK, Vulkan, preuves et deux tailles UI.
+  15 tests CPU, cinq contrôles Vulkan, sept harnais Kani et dix tests UI passent.
+  APK disponible dans l'artefact `13499091839`, sans installation S24 ni release.
+  Code intégré/public, correction vérifiée dans ces domaines ; gain S24 **non
+  mesuré**, performance réelle **non concluante**. Logs `build/issue1-ci38f.log`.
+
+### ANDROID-PERF-2026-11-06-07 — recherche et projections indépendantes groupées — validé localement, CI à inspecter
+
+- Reprise demandée : utilisateur rapporte2,7tok/s sur S24/4,49bpw et veut des
+  pistesplusfortes, rechercheInternet autorisée. APKexact de la mesure non
+  confirmé ; ne pas convertir cechiffre en comparaison contrôlée.
+- Historique relu : LUT05 numériquevalidée/perfglobaleinconcluante ; head06
+  groupé8→1 testé mais pasdegainS24mesuré. CI38f2d17/run42211210916 inspectée :
+ 5jobsréussis, état06 codepublic/APKCI ; réceptiondocumentaire à compléter.
+- Rechercheprévue : guides officielsVulkan/ARM et moteursVulkanouverts pour
+  réduireattentes, garderactivationssurGPU, kernelsQMV et prefill. Pas de
+  gainchiffré extrapolé des autresmoteurs. Pas de benchmarkMac concurrent.
+- Pisteà vérifierdanslecode : W1/W3 et Q/K/V/gate partagent une activationCPU
+  et sont indépendants ; transformationsSU propresàchaquepoids à conserver.
+  Préparer leursentréesCPU commeavant, descripteurs/inputs/outputs distincts,
+  commandesgroupées/fencecommune. Réduire soumissionssans changer shader,
+  réduction, arrondi, ordrecausal des caches ni contexte. ÉtapesGPUdépendantes
+  restent synchronisées, ne pas simplement supprimerlesfences.
+- Protocole AVANT prototype : bitexact chaqueprojectiongroupée vs séquentielle,
+  casbits/codebooks/densemixtes, réutilisation/erreurs ; compterlesqueuesubmit
+  réelles. VérificationfocusedClippy/tests, fixtureEngine et Kani bornesbatch
+  déjàpratiques enCI. Pas de campagnephysique sans appareil ; garder les
+  écarts entre compteursdérivés, microtests et gainS24 mesuré explicites.
+
+#### Résultats de l'essai 07 avant push
+
+- Implémentation : FFN W1/W3 et attention Q/K/V/gate groupés, inputs transformés
+  indépendants, kernels et arrondis conservés. Baseline source `38f2d17`.
+  Décode théorique 154→97 soumissions sur 13 conv/11 attention ; fixture réelle
+  trois couches 22→13. Pas de conversion de ces compteurs en gain de débit.
+- Vérifications ciblées terminées : fmt, Clippy strict, actionlint, diff-check,
+  **15 tests CPU** ; sept GPU/benchmark ignorés par défaut, puis **six contrôles
+  Vulkan fonctionnels** exécutés explicitement avec succès sur Mesa logiciel.
+  Parité bit à bit des groupes (trois codebooks, 3/4/5 bits, F16/BF16, padding,
+  SU/SV différentes), erreurs sans soumission et reprise ; mutation entrée0
+  détectée puis restaurée. Fixture Engine : 128 logits/8 forwards bit à bit
+  contre les sources `38f2d17` ; oracle permanent et compteurs bridge vérifiés.
+- Kani bornes réelles des groupes : domaine 0..4 éléments/usize symboliques,
+  unwind6, **131 obligations/0 échec/2 covers**, une obligation interne format
+  inatteignable. Aucune preuve du pilote ou du calcul GPU. Commandes, diagnostic
+  du premier parseur de logs, sources Internet et limites dans
+  [le rapport](docs/android-speed-2026-11-06.md). Logs temporaires disponibles
+  `build/independent-*`, oracle permanent `engine/tests/fixtures/lfm3-reduced-logits.json`.
+- État : correction **validée localement**, code local prêt à publier sous
+  autorisation existante ; gain S24 **non mesuré/non concluant**. Aucun essai
+  physique ni campagne GPU concurrente. CI exacte/APK à inspecter après push.

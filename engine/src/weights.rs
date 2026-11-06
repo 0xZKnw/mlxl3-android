@@ -1,7 +1,7 @@
 use crate::{
     codec::{self, Codebook},
     math,
-    vulkan::{Buffer, Gpu},
+    vulkan::{Buffer, Gpu, Projection},
 };
 use anyhow::{Context, Result, ensure};
 use half::{bf16, f16};
@@ -266,36 +266,93 @@ impl Linear {
     }
 
     pub fn forward(&self, gpu: &mut Gpu, x: &[f32]) -> Result<Vec<f32>> {
-        ensure!(x.len() == self.input, "Linear input shape mismatch");
-        let mut result = match &self.storage {
+        let x = self.prepare_input(x)?;
+        let result = match &self.storage {
             Storage::Exl3 {
                 buffer,
-                input,
                 output,
                 bits,
                 cb,
-                su,
-                sv,
-            } => {
+                ..
+            } => gpu.multiply(buffer, &x, *output, *bits, *cb)?,
+            Storage::Dense { chunks, dtype } => gpu.multiply_dense_chunks(chunks, &x, *dtype)?,
+        };
+        self.finish_output(result)
+    }
+
+    pub fn forward_many<const N: usize>(
+        gpu: &mut Gpu,
+        linears: [&Self; N],
+        x: &[f32],
+    ) -> Result<[Vec<f32>; N]> {
+        let inputs = linears
+            .iter()
+            .map(|l| l.prepare_input(x))
+            .collect::<Result<Vec<_>>>()?;
+        let projections = linears
+            .iter()
+            .zip(&inputs)
+            .map(|(linear, input)| {
+                let (weights, outputs, bits, codebook) = match &linear.storage {
+                    Storage::Exl3 {
+                        buffer,
+                        output,
+                        bits,
+                        cb,
+                        ..
+                    } => (buffer, *output, *bits, *cb),
+                    Storage::Dense { chunks, dtype } => {
+                        ensure!(
+                            chunks.len() == 1,
+                            "Independent dense projection must fit one chunk"
+                        );
+                        (&chunks[0].0, chunks[0].1, 0, *dtype)
+                    }
+                };
+                Ok(Projection {
+                    weights,
+                    input,
+                    outputs,
+                    bits,
+                    codebook,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let outputs = gpu.multiply_many(&projections)?;
+        let result = linears
+            .iter()
+            .zip(outputs)
+            .map(|(l, y)| l.finish_output(y))
+            .collect::<Result<Vec<_>>>()?;
+        result
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Projection batch output count mismatch"))
+    }
+
+    fn prepare_input(&self, x: &[f32]) -> Result<Vec<f32>> {
+        ensure!(x.len() == self.input, "Linear input shape mismatch");
+        match &self.storage {
+            Storage::Exl3 { input, su, .. } => {
                 let mut xhat = vec![0.; *input];
                 for (i, value) in x.iter().enumerate() {
                     xhat[i] = math::half(math::half(*value) * math::half(su[i]));
                 }
                 math::hadamard(&mut xhat)?;
-                let mut y = gpu.multiply(buffer, &xhat, *output, *bits, *cb)?;
-                y.iter_mut().for_each(|v| *v = math::half(*v));
-                math::hadamard(&mut y)?;
-                for (v, scale) in y.iter_mut().zip(sv) {
-                    *v = math::half(*v * math::half(*scale));
-                }
-                y.truncate(self.output);
-                y
+                Ok(xhat)
             }
-            Storage::Dense { chunks, dtype } => {
-                let x: Vec<_> = x.iter().copied().map(math::half).collect();
-                gpu.multiply_dense_chunks(chunks, &x, *dtype)?
+            Storage::Dense { .. } => Ok(x.iter().copied().map(math::half).collect()),
+        }
+    }
+
+    fn finish_output(&self, mut result: Vec<f32>) -> Result<Vec<f32>> {
+        if let Storage::Exl3 { sv, .. } = &self.storage {
+            result.iter_mut().for_each(|v| *v = math::half(*v));
+            math::hadamard(&mut result)?;
+            for (v, scale) in result.iter_mut().zip(sv) {
+                *v = math::half(*v * math::half(*scale));
             }
-        };
+            result.truncate(self.output);
+        }
         // Match the FP16 projection boundary used by EXL3 reference execution.
         result.iter_mut().for_each(|v| *v = math::half(*v));
         ensure!(
@@ -303,5 +360,106 @@ impl Linear {
             "Invalid linear output"
         );
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; independent FFN/QKV projection regression"]
+    fn independent_projections_preserve_transforms_and_use_one_submission() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut linears = Vec::new();
+        for (index, cb) in [Codebook::Default, Codebook::Mcg, Codebook::Mul1]
+            .into_iter()
+            .enumerate()
+        {
+            let (input, output, bits) = (256, 128 * (index + 1), index + 3);
+            let states: Vec<_> = (0..input * output)
+                .map(|i| ((i * 177 + index * 913 + 37) & 65535) as u16)
+                .collect();
+            let bytes: Vec<_> = codec::pack(&states, bits)
+                .unwrap()
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            linears.push(Linear {
+                input: 193,
+                output: output - index * 13,
+                storage: Storage::Exl3 {
+                    buffer: gpu.buffer(&bytes).unwrap(),
+                    input,
+                    output,
+                    bits: bits as u32,
+                    cb: cb as u32,
+                    su: (0..input)
+                        .map(|i| (i % 7 + index + 1) as f32 / 32.)
+                        .collect(),
+                    sv: (0..output)
+                        .map(|i| (i % 5 + index + 1) as f32 / 32.)
+                        .collect(),
+                },
+            });
+        }
+        let x: Vec<_> = (0..193)
+            .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+            .collect();
+        let expected = linears
+            .iter()
+            .map(|l| l.forward(&mut gpu, &x).unwrap())
+            .collect::<Vec<_>>();
+        assert!(expected.iter().all(|y| y.iter().any(|v| v.abs() > 0.0001)));
+        let before = gpu.submission_count();
+        let pair = Linear::forward_many(&mut gpu, [&linears[0], &linears[1]], &x).unwrap();
+        assert_eq!(pair.as_slice(), &expected[..2]);
+        assert_eq!(gpu.submission_count() - before, 1);
+        for dtype in 0..=1 {
+            let bytes: Vec<_> = (0..2 * x.len())
+                .flat_map(|i| {
+                    let v = (i % 13) as f32 / 13.;
+                    if dtype == 0 {
+                        f16::from_f32(v).to_bits().to_le_bytes()
+                    } else {
+                        bf16::from_f32(v).to_bits().to_le_bytes()
+                    }
+                })
+                .collect();
+            let gate = Linear {
+                input: x.len(),
+                output: 2,
+                storage: Storage::Dense {
+                    chunks: vec![(gpu.buffer(&bytes).unwrap(), 2)],
+                    dtype,
+                },
+            };
+            let group = [&linears[0], &linears[1], &linears[2], &gate];
+            let mut expected = expected.clone();
+            expected.push(gate.forward(&mut gpu, &x).unwrap());
+            let before = gpu.submission_count();
+            let actual = Linear::forward_many(&mut gpu, group, &x).unwrap();
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert_eq!(actual.len(), expected.len());
+                assert_eq!(
+                    actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(gpu.submission_count() - before, 1);
+            assert!(Linear::forward_many(&mut gpu, group, &x[..192]).is_err());
+            let mut invalid = x.clone();
+            invalid[3] = f32::NAN;
+            assert!(Linear::forward_many(&mut gpu, group, &invalid).is_err());
+            assert!(Linear::forward_many(&mut gpu, [], &x).is_err());
+            assert!(Linear::forward_many(&mut gpu, [&gate; 5], &x).is_err());
+            assert_eq!(gpu.submission_count() - before, 1);
+            assert_eq!(
+                Linear::forward_many(&mut gpu, group, &x)
+                    .unwrap()
+                    .as_slice(),
+                expected
+            );
+        }
     }
 }

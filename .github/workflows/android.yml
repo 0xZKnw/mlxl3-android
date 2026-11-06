@@ -102,6 +102,7 @@ jobs:
         run: |
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib weights::tests::independent_projections -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
 
       - name: Compare lookup and procedural projections after parity
