@@ -18,4 +18,3 @@ float halfRound(float value) {
     uint rounded = (mag + 0xfffu + ((mag >> 13u) & 1u)) & 0xffffe000u;
     return uintBitsToFloat(sign | rounded);
 }
-

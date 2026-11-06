@@ -732,3 +732,7 @@
   retenu, publication/CI/APK en attente sousautorisationexistante ; **gainS24
   nonmesuré/nonconcluant**, vrai checkpoint4,49bpw/Xclipse nonvalidés ici.
  154soumissions/tokenencoreprésentes ; pas de fusionglobale ni prefillmatriciel.
+- Contrôle finalstaged a détecté une ligneblancheEOF dansle nouveauheaderGLSL
+  (non suivi lorsdu premierdiffcheck), sansimpactnumérique ; supprimée dans
+  lecommit suivant. ClippyARM64 réussit aussi ; compilation/validationSPIR-V
+  relancées aprèscettecorrectiondeformat. Premiercommitcec814c supersédé.
