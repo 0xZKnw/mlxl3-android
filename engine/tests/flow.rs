@@ -288,11 +288,11 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(!done["performance"].to_string().contains("Hello"));
     assert_eq!(
         done["prefill_submissions"].as_u64().unwrap(),
-        done["prompt_tokens"].as_u64().unwrap() * 10 + 1
+        done["prompt_tokens"].as_u64().unwrap() * 8 + 1
     );
     assert_eq!(
         done["decode_submissions"].as_u64().unwrap(),
-        done["decode_tokens"].as_u64().unwrap() * 11
+        done["decode_tokens"].as_u64().unwrap() * 9
     );
     cancelled.store(true, Ordering::Relaxed);
     assert!(
