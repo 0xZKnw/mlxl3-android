@@ -71,3 +71,52 @@ fn dense_gpu_checks_f16_bf16_and_invalid_shapes() {
     assert!(gpu.multiply(&buffer, &[0.; 3], 3, 0, 1).is_err());
     assert!(gpu.multiply(&buffer, &[], 2, 0, 0).is_err());
 }
+
+#[test]
+#[ignore = "requires Vulkan; focused dense-head batch regression"]
+fn dense_chunks_match_sequential_with_one_submission() {
+    let mut gpu = Gpu::new().unwrap();
+    for dtype in 0..=1 {
+        let chunks: Vec<_> = (0..8)
+            .map(|i| {
+                let bytes: Vec<_> = [1. + i as f32, 2., 3., 4., 5., 6.]
+                    .iter()
+                    .flat_map(|v| {
+                        let bits = if dtype == 0 {
+                            f16::from_f32(*v).to_bits()
+                        } else {
+                            half::bf16::from_f32(*v).to_bits()
+                        };
+                        bits.to_le_bytes()
+                    })
+                    .collect();
+                (gpu.buffer(&bytes).unwrap(), 2)
+            })
+            .collect();
+        let x = [2., -1., 3.];
+        let expected: Vec<_> = chunks
+            .iter()
+            .flat_map(|(buffer, rows)| gpu.multiply(buffer, &x, *rows, 0, dtype).unwrap())
+            .collect();
+        let before = gpu.submission_count();
+        let actual = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+        assert_eq!(actual.len(), 16);
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(gpu.submission_count() - before, 1);
+        assert!(gpu.multiply_dense_chunks(&[], &x, dtype).is_err());
+        assert!(
+            gpu.multiply_dense_chunks(&chunks, &[f32::NAN; 3], dtype)
+                .is_err()
+        );
+        assert!(gpu.multiply_dense_chunks(&chunks, &x[..2], dtype).is_err());
+        assert!(gpu.multiply_dense_chunks(&chunks, &x, 2).is_err());
+        assert_eq!(gpu.submission_count() - before, 1);
+        assert_eq!(
+            gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap(),
+            expected
+        );
+    }
+}

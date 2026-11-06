@@ -166,6 +166,9 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                             .background(Panel, RoundedCornerShape(22.dp, 22.dp, 6.dp, 22.dp)).padding(horizontal = 16.dp, vertical = 12.dp)
                                         else Modifier.fillMaxWidth())
                                 }
+                                if (message.role == "assistant" && message.speed != null) {
+                                    Text(message.speed, color = Quiet, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                                }
                             }
                         }
                     }

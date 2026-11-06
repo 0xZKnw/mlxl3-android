@@ -293,11 +293,7 @@ impl Linear {
             }
             Storage::Dense { chunks, dtype } => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();
-                let mut result = Vec::with_capacity(self.output);
-                for (weights, rows) in chunks {
-                    result.extend(gpu.multiply(weights, &x, *rows, 0, *dtype)?);
-                }
-                result
+                gpu.multiply_dense_chunks(chunks, &x, *dtype)?
             }
         };
         // Match the FP16 projection boundary used by EXL3 reference execution.

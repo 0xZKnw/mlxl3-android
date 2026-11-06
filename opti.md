@@ -317,3 +317,37 @@
   performanceglobaleMesa nonconcluante, S24/4,49bpw physique nonmesuré. Aucun
   benchmarklocal durant le profilageDesktop ; ces limites ne sont pas transformées
   en validation de débit/qualitécomplètedu modèle.
+
+### ANDROID-PERF-2026-11-06-06 — issue1, head groupé et débit visible — en cours
+
+- Issue1 lue, aucun commentaire ; baseline544b0c3, moteur identique9ae3b94.
+  Utilisateur demande explicitement implémentation/vérificationrapide/pushAPK,
+  sans grossecampagnedetests, plus tok/s souschaqueréponse. S24/4,49bpw non
+  connectéADB ; profilagephysiqueP0 impossible ici, pas de dominantcoût mesuré
+  ni promesse de gain. Pas de nouveau benchmarkMac pendantprofilageDesktop.
+- Hypothèse ciblée : head dense découpé attend chaqueprojectionindépendante ;
+  conserver chaquechunk/réduction/arrondi mais enregistrer ses dispatches avec
+  des descripteurs/sorties distincts, un uploadinput et une soumission/fence.
+  Cas128000x2048/64Mio :8soumissions→1 calculées, débitS24 nonmesuré.
+- Avantcode : régressionciblée bit-à-bit batch vs séquentiel F16/BF16 sur8chunks,
+  compteur réel des soumissions, entréesinvalides et répétition aprèséchec.
+  Vérifier bornes128chunks/128000sorties, tenter Kani ciblé sur le compteur de
+  sorties, fmt/Clippy/buildARM64 et CIexistante. Pas de balayageperformance.
+- Débit : mesurer séparément les étapesdecode réellement évaluées et leurtemps,
+  exclureprefill ; valeurindéfinie si aucuneétapedecode. UI petitecaption sous
+  assistantuniquement ; conserverstyle, envoyer/annuler et texte inchangés.
+
+- Implémentationciblée : headbatch avec descripteurs/sortiesdistincts, inputcopié
+  unefois et fencecommune ; cas1chunk conservecheminnormal. Compteursubmit réel
+  ajouté, deltaprefill/decode dans done ; débitdecode calculé sur les forwards
+  réellement évalués, pas sur le tempsprefill. Captionassistant après done.
+- Vérificationrapide : fmt/actionlint/diffcheck et Clippystrictalltargets réussis
+  (2,51s) ;12testsCPUlib passent (0,03s),2GPUignorés. TestGPU ciblélogicielMesa :
+  initialassertdriver car128layouts passés au pipeline au lieu d’unlayout,
+  corrigé en séparant allocation128sets/layoutunique ; essairelancé **réussi**
+  (0,15s), F16/BF16bitexact sur8chunks,1submit, erreurs et reprise couvertes.
+  Logs `build/issue1-{clippy,cpu,dense-batch,dense-batch-fixed}.log`.
+- Aucun profilage/S24 ni gain de débit mesuré ; simple contrepoint fonctionnel
+  sur lavapipe. Compteur8→1 observé dans le test, pas une accélération8x.
+  Kani borné4chunksymboliques/unwind6 et contrôlesAndroid délégués à CI ; pas
+  de grossecampagne ajoutée conformément à la demandeexplicite de rapidité.

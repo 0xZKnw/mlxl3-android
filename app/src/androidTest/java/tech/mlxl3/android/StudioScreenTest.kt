@@ -23,7 +23,7 @@ import org.junit.Test
 class StudioScreenTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private val answer = "Oui. LFM3 tourne directement sur ton téléphone, avec le moteur EXL3 de MLXL3."
-    private val conversation get() = listOf(ChatMessage("user", "Salut, tu fonctionnes en local ?"), ChatMessage("assistant", answer))
+    private val conversation get() = listOf(ChatMessage("user", "Salut, tu fonctionnes en local ?"), ChatMessage("assistant", answer, "12,5 tok/s"))
 
     @Before fun prepareWindow() {
         compose.activityRule.scenario.onActivity { it.configureStudioWindow() }
@@ -50,6 +50,8 @@ class StudioScreenTest {
     @Test fun conversationTextHasVisibleContrast() {
         compose.setContent { StudioScreen(conversation, false, true, "Ready", "Test GPU", null, false, {}, {}, {}, {}, {}, {}) }
         compose.onNodeWithText(answer).assertIsDisplayed()
+        val speed = compose.onNodeWithText("12,5 tok/s").assertIsDisplayed().fetchSemanticsNode().boundsInWindow
+        assertTrue("Speed must appear below its answer", speed.top >= compose.onNodeWithText(answer).fetchSemanticsNode().boundsInWindow.bottom)
         val pixels = compose.onNodeWithText(answer).captureToImage().toPixelMap()
         var lightPixels = 0
         for (y in 0 until pixels.height) for (x in 0 until pixels.width) {

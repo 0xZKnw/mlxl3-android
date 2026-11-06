@@ -18,7 +18,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class ChatMessage(val role: String, val text: String)
+data class ChatMessage(val role: String, val text: String, val speed: String? = null)
 
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
     var messages by mutableStateOf<List<ChatMessage>>(emptyList()); private set
@@ -60,7 +60,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     messages = messages.dropLast(1) + ChatMessage("assistant", event.getString("text"))
                     status = "Generating on device…"
                 }
-                "done" -> status = "${event.getInt("tokens")} tokens · %.1f s".format(event.getDouble("decode_seconds") + event.getDouble("prefill_seconds"))
+                "done" -> {
+                    val rate = event.optDouble("decode_tokens_per_second", Double.NaN)
+                    val speed = if (rate.isFinite() && rate >= 0) "%.1f tok/s".format(rate) else "— tok/s"
+                    messages.lastOrNull()?.takeIf { it.role == "assistant" }?.let {
+                        messages = messages.dropLast(1) + it.copy(speed = speed)
+                    }
+                    status = "${event.getInt("tokens")} tokens · %.1f s".format(event.getDouble("decode_seconds") + event.getDouble("prefill_seconds"))
+                }
             }
         }
     }
