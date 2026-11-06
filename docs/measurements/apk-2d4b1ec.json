@@ -1,0 +1,38 @@
+{
+  "source_sha": "2d4b1ecb4bb7d100208a1a10271c730fba64a446",
+  "zip_bytes": 13325562,
+  "zip_sha256": "b9092d3c42d56e18cba8d4291d7309550a910df2571cfdde9afcf37972b060fb",
+  "apk_bytes": 34289948,
+  "apk_sha256": "a57435ce89c0df5a1f5efa348a4a297da5a379c1bcabba415c0764f75ad85fa2",
+  "libraries": [
+    {
+      "name": "lib/arm64-v8a/libandroidx.graphics.path.so",
+      "bytes": 10096,
+      "sha256": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6"
+    },
+    {
+      "name": "lib/arm64-v8a/libmlxl3_android.so",
+      "bytes": 7231760,
+      "sha256": "f403d86b6e51d199d9fd75051557e7b6a029c8d6121a743f2d22e8a44dde7640"
+    }
+  ],
+  "workflow_run": 42303987207,
+  "artifact_id": 13544369936,
+  "ci_jobs": {
+    "apk": "success",
+    "proofs": "success",
+    "vulkan": "success",
+    "ui_phone": "success",
+    "ui_small": "success"
+  },
+  "signature_v2_verified": true,
+  "zipalign_page_bytes": 16384,
+  "all_native_load_alignments": "0x4000",
+  "engine_source_and_feature_markers_verified": true,
+  "verification_limits": [
+    "No full 1.7B checkpoint or physical S24 run",
+    "AMD shader info and required wave32 on Samsung driver await physical validation",
+    "Kani verifies bounded CPU helpers, not GPU code or whole inference",
+    "JVM unit tests restored from unchanged Gradle cache"
+  ]
+}

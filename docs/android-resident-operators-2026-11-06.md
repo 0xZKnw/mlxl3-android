@@ -127,3 +127,38 @@ The meaningful mutation failure is retained alongside the successful rerun.
 QKV+gate fusion, GPU attention/norms, and batched prefill are not implemented in
 this bundle. They require further numeric/state work. No20tok/s claim, phone
 installation or full-checkpoint speed/correctness validation is made here.
+
+## Publication receipt
+
+Executable source **`2d4b1ecb4bb7d100208a1a10271c730fba64a446`**.
+[Run42303987207](https://github.com/0xZKnw/mlxl3-android/actions/runs/42303987207):
+all five jobs completed successfully, individually inspected.21CPU,13Vulkan and
+12UI tests (six per emulator size); the grouped/operator/Engine checks were also
+run under Khronos validation1.3.275 with synchronization validation enabled and
+the layer actually loaded. No validation errors/hazards in its checked log.
+JVM unit test/lint/build tasks succeed; unchanged JVM unit results are FROM-CACHE.
+Kani14-harness full suite:1426 obligations/32covers, three unreachable formatting
+checks; the separate setup harness is not counted twice. Optional benchmark skipped.
+
+[APK artifact13544369936](https://github.com/0xZKnw/mlxl3-android/actions/runs/42303987207/artifacts/13544369936):
+ZIP13,325,562bytes, SHA-256
+`b9092d3c42d56e18cba8d4291d7309550a910df2571cfdde9afcf37972b060fb`.
+Installable **`debug/app-debug.apk`**,34,289,948bytes, SHA-256
+`a57435ce89c0df5a1f5efa348a4a297da5a379c1bcabba415c0764f75ad85fa2`.
+The archive digest and SHA256SUMS manifest match. APK signaturev2, zipalign16K,
+both ARM64 libraries' LOAD alignment0x4000, exact source SHA and new operator,
+wave32, head and diagnostic markers in the native engine were verified.
+Engine7,231,760bytes, SHA-256
+`f403d86b6e51d199d9fd75051557e7b6a029c8d6121a743f2d22e8a44dde7640`.
+[Machine-readable receipt](measurements/apk-2d4b1ec.json).
+
+APK checks used `apksigner verify --verbose`, `zipalign -c -v -P16 4` and NDK
+`llvm-readelf -h -lW`. A display-only parser initially tried to print the last line
+of quiet zipalign's empty log; the actual check succeeded, and the verbose check
+was rerun successfully. No package failure was hidden. Logs are retained at
+`build/perf16-ci-*`, `build/perf16-apksigner.log`, `build/perf16-zipalign.log`;
+local APK and receipt at `build/apk-2d4b1ec/`.
+
+Status: **public CI-built APK**, functional software checks passed within their
+stated domain, **phone performance unmeasured/inconclusive**. No release or phone
+installation. No optimization experiment or physical benchmark left running.

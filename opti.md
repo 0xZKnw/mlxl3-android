@@ -1070,3 +1070,27 @@
   Rechercheterminée ; correctif **validé dansledomaine logiciel décrit**,
   **nonconcluant envitesseS24**. Étatcodelocal, push/APKenattente d'inspection.
   Aucun essai de vitesse lancé ; pasdemesurephysiqueconcurrente niinstallation.
+
+#### Publication et clôture16
+
+- Source `2d4b1ecb4bb7d100208a1a10271c730fba64a446`,
+  [run42303987207](https://github.com/0xZKnw/mlxl3-android/actions/runs/42303987207) :
+  **cinqjobsréussis inspectés**,21CPU/13Vulkan/12UI ; batch/opérateurs/Engine aussi
+  sousKhronos1.3.275/syncvalidation réellementchargée, sansVUID/hazard danslelog
+  contrôlé.14harnaisKani1426obligations32covers,3formatstdinatteignables ; setup
+  memory190 noncomptédeuxfois. JVM depuiscache, benchmarkfacultatif sauté.
+- [Artefact13544369936](https://github.com/0xZKnw/mlxl3-android/actions/runs/42303987207/artifacts/13544369936),
+  `debug/app-debug.apk`,34 289 948octets, SHA-256
+  `a57435ce89c0df5a1f5efa348a4a297da5a379c1bcabba415c0764f75ad85fa2`.
+  ZIPdigest/manifest, signaturev2, zipalign16K, deuxlibsARM64/LOAD0x4000,
+  SHAsource etnouveauxmarqueurs vérifiés. Moteur SHA-256
+  `f403d86b6e51d199d9fd75051557e7b6a029c8d6121a743f2d22e8a44dde7640`.
+  [Reçucomplet](docs/measurements/apk-2d4b1ec.json).
+- Parserd'affichage devalidation initialementenIndexError surlogzipalignsilencieux
+  vide ; lavérification elle-même avaitréussi, relanceverbose réussie. Échec
+  conservé/qualifié, pasdeproblèmeAPK dissimulé. Logs `build/perf16-*` etAPK
+  `build/apk-2d4b1ec/`, reçus/recherche durablesliésci-dessus.
+- État **public/APKCI**, pasderelease/installation. Recherche/implémentation et
+  vérificationlogicielle terminées ; **vitesseS24 nonmesurée/nonconcluante**,
+  pleincheckpoint/driverSamsung àqualifier. QKV+gate/attention/normsGPU etpréfill
+  batch nonimplémentés. Aucune campagne niessai lancé encore en cours.
