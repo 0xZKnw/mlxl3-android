@@ -101,7 +101,8 @@ jobs:
       - name: EXL3 projection and complete reduced-model tests
         run: |
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
-          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::tiled_qmv -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::prepared_projection -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::persistent_scratch -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1

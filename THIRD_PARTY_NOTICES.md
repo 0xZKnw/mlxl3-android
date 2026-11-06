@@ -33,3 +33,13 @@ Copyright 2026 The HuggingFace Team (Apache-2.0), and ExLlamaV3 1.6.6,
 revision `bd1f519172406a9560bd5c90e61000691bb69a07`, `architecture/lfm3.py`.
 The Apache-2.0 license text is supplied in `engine/APACHE-2.0.txt`.
 No model Python file or model weights are included in the APK.
+
+The register-window trellis decoding and lane mapping in
+`engine/shaders/qmv_stream.comp` adapt the algorithm from
+[strix-llama.cpp PR #204](https://github.com/halo-box/strix-llama.cpp/pull/204)
+by [Nathanw1014](https://github.com/Nathanw1014), source
+`bd64c24736eab68a006c1f44f99da3b994ba098c`,
+`ggml/src/ggml-vulkan/vulkan-shaders/exl3_common.glsl`.
+Copyright (c) 2023-2026 The ggml authors. Licensed under MIT, whose full
+permission and warranty terms are reproduced above. No upstream runtime,
+phone performance claim, wave-size requirement or model weights are included.

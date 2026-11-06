@@ -1,7 +1,7 @@
 use crate::{
     codec::{self, Codebook},
     math,
-    vulkan::{Buffer, Gpu},
+    vulkan::{Buffer, Exl3Matrix, Exl3Shape, Gpu},
 };
 use anyhow::{Context, Result, ensure};
 use half::{bf16, f16};
@@ -159,15 +159,7 @@ impl Weights {
 }
 
 enum Storage {
-    Exl3 {
-        buffer: Buffer,
-        input: usize,
-        output: usize,
-        bits: u32,
-        cb: u32,
-        su: Vec<f32>,
-        sv: Vec<f32>,
-    },
+    Exl3(Exl3Matrix),
     Dense {
         chunks: Vec<(Buffer, usize)>,
         dtype: u32,
@@ -234,15 +226,19 @@ impl Linear {
             let su = rounded_scales(scale("suh", "su", rows)?)?;
             let sv = rounded_scales(scale("svh", "sv", cols)?)?;
             let buffer = gpu.buffer(w.bytes(&trellis)?)?;
-            Storage::Exl3 {
+            Storage::Exl3(gpu.prepare_exl3(
                 buffer,
-                input: rows,
-                output: cols,
-                bits: bits as u32,
-                cb: cb as u32,
-                su,
-                sv,
-            }
+                Exl3Shape {
+                    input,
+                    output,
+                    rows,
+                    cols,
+                    bits: bits as u32,
+                    codebook: cb as u32,
+                },
+                &su,
+                &sv,
+            )?)
         } else {
             let key = format!("{name}.weight");
             ensure!(
@@ -278,34 +274,10 @@ impl Linear {
         ensure!(x.len() == self.input, "Linear input shape mismatch");
         let mut cpu_started = std::time::Instant::now();
         let mut result = match &self.storage {
-            Storage::Exl3 {
-                buffer,
-                input,
-                output,
-                bits,
-                cb,
-                su,
-                sv,
-            } => {
-                let mut xhat = vec![0.; *input];
-                for (i, value) in x.iter().enumerate() {
-                    xhat[i] = math::half(math::half(*value) * su[i]);
-                }
-                math::hadamard(&mut xhat)?;
-                gpu.record_profile(|p| {
-                    p.projection_cpu_ns = p
-                        .projection_cpu_ns
-                        .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
-                });
-                let mut y = gpu.multiply(buffer, &xhat, *output, *bits, *cb)?;
+            Storage::Exl3(matrix) => {
+                let result = gpu.project_exl3(matrix, x)?;
                 cpu_started = std::time::Instant::now();
-                y.iter_mut().for_each(|v| *v = math::half(*v));
-                math::hadamard(&mut y)?;
-                for (v, scale) in y.iter_mut().zip(sv) {
-                    *v = math::half(*v * *scale);
-                }
-                y.truncate(self.output);
-                y
+                result
             }
             Storage::Dense { chunks, dtype } => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();

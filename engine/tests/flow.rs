@@ -207,11 +207,17 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert_eq!(done["type"], "done");
     assert_eq!(done["performance"]["gpu"]["automatic_calibration"], false);
     assert_eq!(done["performance"]["gpu"]["scratch_mapping"], "persistent");
+    assert_eq!(done["performance"]["gpu"]["kernel"], "register_window_16");
+    assert_eq!(done["performance"]["gpu"]["prepared_matrices"], 19);
     for phase in ["prefill", "decode"] {
         let p = &done["performance"][phase];
         assert!(p["wait_ns"].as_u64().unwrap() > 0);
         assert!(p["model_ns"].as_u64().unwrap() >= p["wait_ns"].as_u64().unwrap());
         assert!(p["head_ns"].as_u64().unwrap() > 0);
+        if done["performance"]["gpu"]["gpu_timestamps"] == true {
+            assert!(p["device_compute_ns"].as_u64().unwrap() > 0);
+            assert_eq!(p["device_samples"], done[format!("{phase}_submissions")]);
+        }
     }
     assert!(!done["performance"].to_string().contains("Hello"));
     assert_eq!(

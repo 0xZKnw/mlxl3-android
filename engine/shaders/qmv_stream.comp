@@ -1,0 +1,67 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Register-window trellis decoding: see engine/NOTICE for the upstream algorithm.
+// Four logical 32-lane groups split K; no hardware subgroup size is assumed.
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint BITS = 4u;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint codebook; } p;
+shared vec2 partial[128];
+#include "exl3.glsl"
+
+uint stateAt(uvec3 a, uint j) {
+    uint offset = j * BITS;
+    uint q = offset / 32u;
+    uint s = offset % 32u;
+    return (s <= 16u ? a[q] >> (16u - s)
+        : (a[q] << (s - 16u)) | (a[q + 1u] >> (48u - s))) & 65535u;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint lane = tid % 32u;
+    uint split = tid / 32u;
+    const uint WORDS = 8u * BITS;
+    const uint SPAN = 7u * BITS + 16u;
+    const uint ALIGNED = (SPAN + 31u) / 32u;
+    uint bit = ((8u * lane + 1u) * BITS + 256u * BITS - 16u) % (256u * BITS);
+    uint word = bit / 32u;
+    uint shift = bit % 32u;
+    uint loads = (shift + SPAN + 31u) / 32u;
+    uint row = (lane % 4u) * 2u;
+    uint tiles = p.rows / 16u;
+    uint begin = tiles * split / 4u;
+    uint end = tiles * (split + 1u) / 4u;
+    vec2 acc = vec2(0.0);
+    for (uint tile = begin; tile < end; ++tile) {
+        uint base = (tile * (p.cols / 16u) + gl_WorkGroupID.x) * WORDS;
+        uint w0 = packed[base + word];
+        uint w1 = loads > 1u ? packed[base + (word + 1u) % WORDS] : 0u;
+        uint w2 = loads > 2u ? packed[base + (word + 2u) % WORDS] : 0u;
+        uint w3 = loads > 3u ? packed[base + (word + 3u) % WORDS] : 0u;
+        uvec3 a = uvec3((w0 << shift) | ((w1 >> 1u) >> (31u - shift)),
+                       ALIGNED > 1u ? (w1 << shift) | ((w2 >> 1u) >> (31u - shift)) : 0u,
+                       ALIGNED > 2u ? (w2 << shift) | ((w3 >> 1u) >> (31u - shift)) : 0u);
+        vec4 inputValues = vec4(x[tile * 16u + row], x[tile * 16u + row + 1u],
+                               x[tile * 16u + row + 8u], x[tile * 16u + row + 9u]);
+        acc.x = fma(inputValues[0], codeword(stateAt(a, 0u), p.codebook), acc.x);
+        acc.x = fma(inputValues[1], codeword(stateAt(a, 1u), p.codebook), acc.x);
+        acc.x = fma(inputValues[2], codeword(stateAt(a, 2u), p.codebook), acc.x);
+        acc.x = fma(inputValues[3], codeword(stateAt(a, 3u), p.codebook), acc.x);
+        acc.y = fma(inputValues[0], codeword(stateAt(a, 4u), p.codebook), acc.y);
+        acc.y = fma(inputValues[1], codeword(stateAt(a, 5u), p.codebook), acc.y);
+        acc.y = fma(inputValues[2], codeword(stateAt(a, 6u), p.codebook), acc.y);
+        acc.y = fma(inputValues[3], codeword(stateAt(a, 7u), p.codebook), acc.y);
+    }
+    partial[tid] = acc;
+    barrier();
+    if (tid < 16u) {
+        float total = 0.0;
+        for (uint wave = 0u; wave < 4u; ++wave)
+            for (uint quad = 0u; quad < 4u; ++quad)
+                total += partial[wave * 32u + (tid % 8u) * 4u + quad][tid / 8u];
+        y[gl_WorkGroupID.x * 16u + tid] = total;
+    }
+}

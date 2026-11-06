@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Scales { float scale[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint phase; uint logical; } p;
+shared float block[128];
+#include "half_round.glsl"
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint index = gl_WorkGroupID.x * 128u + tid;
+    // Padded activations are +0 even when the padded SU scale is negative.
+    precise float value = p.phase == 0u
+        ? (index < p.logical ? halfRound(halfRound(x[index]) * scale[index]) : 0.0)
+        : halfRound(x[index]);
+    block[tid] = value;
+    barrier();
+    for (uint stride = 1u; stride < 128u; stride *= 2u) {
+        precise float other = block[tid ^ stride];
+        value = (tid & stride) == 0u ? value + other : other - value;
+        barrier();
+        block[tid] = value;
+        barrier();
+    }
+    // Same f32 sqrt(128) and FP16 boundaries as the independent CPU reference.
+    value = halfRound(value / uintBitsToFloat(0x413504f3u));
+    if (p.phase != 0u) value = halfRound(value * scale[p.rows + index]);
+    y[index] = value;
+}

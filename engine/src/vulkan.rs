@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail, ensure};
 use ash::{Entry, vk};
 use std::{
     cell::Cell,
-    collections::BTreeMap,
     ffi::{CStr, CString},
     sync::{
         Arc,
@@ -22,6 +21,8 @@ pub struct Profile {
     pub projection_cpu_ns: u64,
     pub model_ns: u64,
     pub head_ns: u64,
+    pub device_compute_ns: u64,
+    pub device_samples: u64,
 }
 
 pub(crate) fn elapsed_ns(start: Instant) -> u64 {
@@ -67,27 +68,52 @@ fn codebook_table() -> Vec<u8> {
 }
 
 const MAX_DENSE_CHUNKS: usize = 128;
+const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
+const MAX_DESCRIPTOR_SETS: usize = MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES;
 
 fn exl3_groups(outputs: usize) -> Option<u32> {
-    ((16..=32768).contains(&outputs) && outputs.is_multiple_of(16)).then_some((outputs / 4) as u32)
+    ((16..=32768).contains(&outputs) && outputs.is_multiple_of(16)).then_some((outputs / 16) as u32)
 }
 
-fn prefer_tiled(scalar: [f64; 4], tiled: [f64; 4], parity: bool) -> bool {
-    let median = |mut times: [f64; 4]| {
-        if !times.iter().all(|t| t.is_finite() && *t > 0. && *t < 30.) {
-            return None;
-        }
-        times.sort_by(f64::total_cmp);
-        (times[3] <= times[0] * 1.5).then_some((times[1] + times[2]) / 2.)
-    };
-    parity
-        && scalar
-            .iter()
-            .zip(tiled)
-            .filter(|(a, b)| *b < **a * 0.95)
-            .count()
-            >= 3
-        && matches!((median(scalar), median(tiled)), (Some(a), Some(b)) if b < a * 0.95)
+fn timestamp_delta(start: u64, end: u64, bits: u32) -> Option<u64> {
+    match bits {
+        1..=63 => Some(end.wrapping_sub(start) & ((1u64 << bits) - 1)),
+        64 => Some(end.wrapping_sub(start)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Exl3Shape {
+    pub input: usize,
+    pub output: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub bits: u32,
+    pub codebook: u32,
+}
+impl Exl3Shape {
+    fn valid(self) -> bool {
+        self.input > 0
+            && self.output > 0
+            && self.rows <= 32768
+            && self.cols <= 32768
+            && self.input <= self.rows
+            && self.rows - self.input < 128
+            && self.output <= self.cols
+            && self.cols - self.output < 128
+            && self.rows.is_multiple_of(128)
+            && self.cols.is_multiple_of(128)
+            && (1..=8).contains(&self.bits)
+            && self.codebook < 3
+    }
+}
+
+pub struct Exl3Matrix {
+    weights: Buffer,
+    _scales: Buffer,
+    shape: Exl3Shape,
+    command: vk::CommandBuffer,
 }
 
 fn dense_batch_output_count(rows: &[usize]) -> Option<usize> {
@@ -108,11 +134,14 @@ fn dense_batch_output_count(rows: &[usize]) -> Option<usize> {
 }
 
 struct Dispatch<'a> {
+    input: &'a Buffer,
     weights: &'a Buffer,
     output: &'a Buffer,
     params: [u32; 4],
     outputs: usize,
     groups: u32,
+    pipeline: vk::Pipeline,
+    barrier_after: bool,
 }
 
 struct Instance {
@@ -227,10 +256,14 @@ pub struct Gpu {
     descriptors: Vec<vk::DescriptorSet>,
     layout: vk::PipelineLayout,
     qmv: vk::Pipeline,
-    qmv_tiled: [vk::Pipeline; 8],
-    tuned: BTreeMap<(usize, usize, u32, u32), bool>,
+    qmv_stream: [vk::Pipeline; 8],
+    hadamard: vk::Pipeline,
+    prepared: usize,
+    queries: vk::QueryPool,
+    timestamp_bits: u32,
     dense: vk::Pipeline,
     input: Option<Buffer>,
+    rotated: Option<Buffer>,
     output: Option<Buffer>,
     codebooks: Option<Buffer>,
     batch_outputs: Vec<Buffer>,
@@ -282,11 +315,16 @@ impl Gpu {
                 .iter()
                 .position(|f| f.queue_count > 0 && f.queue_flags.contains(vk::QueueFlags::COMPUTE))
             {
-                chosen = Some((physical, family as u32, props));
+                chosen = Some((
+                    physical,
+                    family as u32,
+                    props,
+                    families[family].timestamp_valid_bits,
+                ));
                 break;
             }
         }
-        let (physical, family, props) =
+        let (physical, family, props, timestamp_bits) =
             chosen.context("No compatible Vulkan 1.1 compute device")?;
         let priorities = [1.];
         let queues = [vk::DeviceQueueCreateInfo::default()
@@ -324,10 +362,14 @@ impl Gpu {
             descriptors: vec![],
             layout: vk::PipelineLayout::null(),
             qmv: vk::Pipeline::null(),
-            qmv_tiled: [vk::Pipeline::null(); 8],
-            tuned: BTreeMap::new(),
+            qmv_stream: [vk::Pipeline::null(); 8],
+            hadamard: vk::Pipeline::null(),
+            prepared: 0,
+            queries: vk::QueryPool::null(),
+            timestamp_bits,
             dense: vk::Pipeline::null(),
             input: None,
+            rotated: None,
             output: None,
             codebooks: None,
             batch_outputs: vec![],
@@ -371,11 +413,11 @@ impl Gpu {
             )?;
             let sizes = [vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: (4 * MAX_DENSE_CHUNKS) as u32,
+                descriptor_count: (4 * MAX_DESCRIPTOR_SETS) as u32,
             }];
             gpu.descriptor_pool = d.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(MAX_DENSE_CHUNKS as u32)
+                    .max_sets(MAX_DESCRIPTOR_SETS as u32)
                     .pool_sizes(&sizes),
                 None,
             )?;
@@ -394,10 +436,25 @@ impl Gpu {
                     .push_constant_ranges(&ranges),
                 None,
             )?;
+            if timestamp_delta(0, 0, timestamp_bits).is_some()
+                && props.limits.timestamp_period.is_finite()
+                && props.limits.timestamp_period > 0.
+            {
+                gpu.queries = d
+                    .create_query_pool(
+                        &vk::QueryPoolCreateInfo::default()
+                            .query_type(vk::QueryType::TIMESTAMP)
+                            .query_count(2),
+                        None,
+                    )
+                    .unwrap_or(vk::QueryPool::null());
+            }
         }
         gpu.qmv = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/qmv.spv")))?;
         gpu.dense = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense.spv")))?;
+        gpu.hadamard = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/hadamard.spv")))?;
         gpu.input = Some(gpu.scratch_buffer()?);
+        gpu.rotated = Some(gpu.scratch_buffer()?);
         gpu.output = Some(gpu.scratch_buffer()?);
         gpu.codebooks = Some(gpu.buffer(&codebook_table())?);
         Ok(gpu)
@@ -549,7 +606,10 @@ impl Gpu {
             "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
             "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
             "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
-            "kernel":"scalar_reference","automatic_calibration":false,"scratch_mapping":"persistent"})
+            "kernel":"register_window_16","projection":"gpu_hadamard_prepared_commands",
+            "prepared_matrices":self.prepared,"gpu_timestamps":self.queries != vk::QueryPool::null(),
+            "timestamp_valid_bits":self.timestamp_bits,"timestamp_period_ns":self.properties.limits.timestamp_period,
+            "automatic_calibration":false,"scratch_mapping":"persistent"})
     }
 
     fn validate_projection(
@@ -613,83 +673,136 @@ impl Gpu {
         self.submissions.get()
     }
 
-    fn tiled_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
+    fn stream_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
-        if self.qmv_tiled[index] == vk::Pipeline::null() {
-            self.qmv_tiled[index] = self.specialized_pipeline(
-                include_bytes!(concat!(env!("OUT_DIR"), "/qmv_tiled.spv")),
+        if self.qmv_stream[index] == vk::Pipeline::null() {
+            self.qmv_stream[index] = self.specialized_pipeline(
+                include_bytes!(concat!(env!("OUT_DIR"), "/qmv_stream.spv")),
                 Some(bits),
             )?;
         }
-        Ok(self.qmv_tiled[index])
+        Ok(self.qmv_stream[index])
     }
 
     pub fn prepare_exl3(
         &mut self,
-        weights: &Buffer,
-        inputs: usize,
-        outputs: usize,
-        bits: u32,
-        cb: u32,
-    ) -> Result<()> {
+        weights: Buffer,
+        shape: Exl3Shape,
+        su: &[f32],
+        sv: &[f32],
+    ) -> Result<Exl3Matrix> {
+        ensure!(shape.valid(), "Invalid EXL3 projection shape");
+        ensure!(self.prepared < MAX_EXL3_MATRICES, "Too many EXL3 matrices");
         ensure!(
-            (1..=32768).contains(&inputs) && (1..=8).contains(&bits),
-            "Invalid EXL3 tuning dimensions"
+            Arc::ptr_eq(&weights.device, &self.device),
+            "Weights belong to another GPU"
         );
-        let key = (inputs, outputs, bits, cb);
-        if self.tuned.contains_key(&key) {
-            return Ok(());
-        }
-        let x: Vec<_> = (0..inputs)
-            .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
-            .collect();
-        self.validate_projection(weights, &x, outputs, bits, cb)?;
-        let scalar = self.multiply_kernel(weights, &x, outputs, bits, cb, false)?;
-        let candidate = self.multiply_kernel(weights, &x, outputs, bits, cb, true);
-        let candidate = match candidate {
-            Ok(values) => values,
-            Err(err) if self.device.abandoned.load(Ordering::Relaxed) => return Err(err),
-            Err(_) => {
-                self.tuned.insert(key, false);
-                return Ok(());
-            }
-        };
-        let equal = |a: &[f32], b: &[f32]| {
-            a.len() == outputs
-                && b.len() == outputs
-                && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
-        };
-        if !equal(&scalar, &candidate) {
-            self.tuned.insert(key, false);
-            return Ok(());
-        }
-        let mut times = [[0.; 2]; 4];
-        let mut parity = true;
-        for (pair, samples) in times.iter_mut().enumerate() {
-            for tiled in if pair % 2 == 0 {
-                [false, true]
-            } else {
-                [true, false]
-            } {
-                let start = Instant::now();
-                let values = self.multiply_kernel(weights, &x, outputs, bits, cb, tiled)?;
-                samples[usize::from(tiled)] = start.elapsed().as_secs_f64();
-                parity &= equal(&scalar, &values);
-            }
-        }
-        self.tuned.insert(
-            key,
-            prefer_tiled(times.map(|p| p[0]), times.map(|p| p[1]), parity),
+        ensure!(
+            weights.size == shape.rows / 8 * shape.cols * shape.bits as usize,
+            "Weight buffer does not match EXL3 shape"
         );
-        Ok(())
+        ensure!(
+            su.len() == shape.rows
+                && sv.len() == shape.cols
+                && su
+                    .iter()
+                    .chain(sv)
+                    .all(|v| v.is_finite() && crate::math::half(*v) == *v),
+            "EXL3 scales must be finite FP16 values with the padded shape"
+        );
+        ensure!(
+            shape.rows / 128 <= self.max_groups as usize
+                && shape.cols / 16 <= self.max_groups as usize,
+            "EXL3 dispatch exceeds GPU limit"
+        );
+        let pipeline = self.stream_pipeline(shape.bits)?;
+        let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
+        let scales = self.buffer(&bytes)?;
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let rotated = self
+            .rotated
+            .as_ref()
+            .context("GPU rotation buffer unavailable")?;
+        let output = self.output.as_ref().context("GPU output unavailable")?;
+        let params = [shape.rows as u32, shape.cols as u32, 0, shape.input as u32];
+        let jobs = [
+            Dispatch {
+                input,
+                weights: &scales,
+                output: rotated,
+                params,
+                outputs: shape.rows,
+                groups: (shape.rows / 128) as u32,
+                pipeline: self.hadamard,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: rotated,
+                weights: &weights,
+                output,
+                params: [params[0], params[1], shape.bits, shape.codebook],
+                outputs: shape.cols,
+                groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
+                pipeline,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: output,
+                weights: &scales,
+                output,
+                params: [params[0], params[1], 1, shape.output as u32],
+                outputs: shape.cols,
+                groups: (shape.cols / 128) as u32,
+                pipeline: self.hadamard,
+                barrier_after: false,
+            },
+        ];
+        let command = unsafe {
+            self.device.raw.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?
+        }[0];
+        let sets = unsafe {
+            self.device.raw.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.descriptor_pool)
+                    .set_layouts(&[self.set_layout; 3]),
+            )?
+        };
+        // Recorded once; the serialized engine waits for the fence before any scratch reuse.
+        self.record_jobs(command, &sets, &jobs, vk::CommandBufferUsageFlags::empty())?;
+        self.prepared += 1;
+        Ok(Exl3Matrix {
+            weights,
+            _scales: scales,
+            shape,
+            command,
+        })
     }
 
-    pub fn tuned_shapes(&self) -> (usize, usize) {
-        (
-            self.tuned.values().filter(|v| **v).count(),
-            self.tuned.len(),
-        )
+    pub fn project_exl3(&mut self, matrix: &Exl3Matrix, x: &[f32]) -> Result<Vec<f32>> {
+        ensure!(
+            Arc::ptr_eq(&matrix.weights.device, &self.device),
+            "Matrix belongs to another GPU"
+        );
+        ensure!(
+            x.len() == matrix.shape.input && x.iter().all(|v| v.is_finite()),
+            "Invalid EXL3 input"
+        );
+        self.upload(x)?;
+        self.submit(matrix.command, Instant::now())?;
+        let started = Instant::now();
+        let result = self
+            .output
+            .as_ref()
+            .context("GPU output unavailable")?
+            .read_f32(matrix.shape.output);
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        result
     }
 
     pub fn multiply(
@@ -700,31 +813,13 @@ impl Gpu {
         bits: u32,
         codebook: u32,
     ) -> Result<Vec<f32>> {
-        self.multiply_kernel(weights, x, outputs, bits, codebook, false)
-    }
-
-    fn multiply_kernel(
-        &mut self,
-        weights: &Buffer,
-        x: &[f32],
-        outputs: usize,
-        bits: u32,
-        codebook: u32,
-        tiled: bool,
-    ) -> Result<Vec<f32>> {
         let params = self.validate_projection(weights, x, outputs, bits, codebook)?;
-        if tiled {
-            let groups = exl3_groups(outputs).context("Invalid tiled EXL3 output shape")?;
-            let pipeline = self.tiled_pipeline(bits)?;
-            return self.compute_groups(pipeline, weights, x, params, outputs, groups);
+        if bits == 0 {
+            return self.compute(self.dense, weights, x, params, outputs);
         }
-        self.compute(
-            if bits == 0 { self.dense } else { self.qmv },
-            weights,
-            x,
-            params,
-            outputs,
-        )
+        let groups = exl3_groups(outputs).context("Invalid EXL3 output shape")?;
+        let pipeline = self.stream_pipeline(bits)?;
+        self.compute_groups(pipeline, weights, x, params, outputs, groups)
     }
 
     pub fn multiply_dense_chunks(
@@ -751,14 +846,17 @@ impl Gpu {
             .zip(&params)
             .zip(&self.batch_outputs)
             .map(|(((weights, rows), params), output)| Dispatch {
+                input: self.input.as_ref().expect("initialized GPU input"),
                 weights,
                 output,
                 params: *params,
                 outputs: *rows,
                 groups: *rows as u32,
+                pipeline: self.dense,
+                barrier_after: false,
             })
             .collect();
-        self.execute(self.dense, x, &jobs)?;
+        self.execute(x, &jobs)?;
         let started = Instant::now();
         let mut result = Vec::with_capacity(total);
         for job in jobs {
@@ -790,14 +888,16 @@ impl Gpu {
     ) -> Result<Vec<f32>> {
         let output = self.output.as_ref().context("GPU output unavailable")?;
         self.execute(
-            pipeline,
             x,
             &[Dispatch {
+                input: self.input.as_ref().context("GPU input unavailable")?,
                 weights,
                 output,
                 params,
                 outputs,
                 groups,
+                pipeline,
+                barrier_after: false,
             }],
         )?;
         let started = Instant::now();
@@ -806,61 +906,81 @@ impl Gpu {
         result
     }
 
-    fn execute(&self, pipeline: vk::Pipeline, x: &[f32], jobs: &[Dispatch<'_>]) -> Result<()> {
+    fn upload(&self, x: &[f32]) -> Result<()> {
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
         );
-        ensure!(
-            !x.is_empty()
-                && x.len() <= 32768
-                && !jobs.is_empty()
-                && jobs.len() <= self.descriptors.len()
-                && jobs.iter().all(|job| job.outputs > 0
-                    && job.outputs <= 32768
-                    && job.groups > 0
-                    && job.groups <= self.max_groups),
-            "Invalid compute buffer dimensions"
-        );
         let input = self.input.as_ref().context("GPU input unavailable")?;
-        let codebooks = self
-            .codebooks
-            .as_ref()
-            .context("GPU codebooks unavailable")?;
         let bytes = unsafe {
             std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
         };
         let started = Instant::now();
         input.write(bytes)?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        Ok(())
+    }
+
+    fn execute(&self, x: &[f32], jobs: &[Dispatch<'_>]) -> Result<()> {
+        self.upload(x)?;
         let recording = Instant::now();
         unsafe {
+            self.device
+                .raw
+                .reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
+        }
+        self.record_jobs(
+            self.command,
+            &self.descriptors,
+            jobs,
+            vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+        )?;
+        self.submit(self.command, recording)
+    }
+
+    fn record_jobs(
+        &self,
+        command: vk::CommandBuffer,
+        sets: &[vk::DescriptorSet],
+        jobs: &[Dispatch<'_>],
+        flags: vk::CommandBufferUsageFlags,
+    ) -> Result<()> {
+        ensure!(
+            !self.device.abandoned.load(Ordering::Relaxed),
+            "GPU timed out; restart the app"
+        );
+        ensure!(
+            !jobs.is_empty()
+                && jobs.len() <= sets.len()
+                && jobs.iter().all(|job| job.outputs > 0
+                    && job.outputs <= 32768
+                    && job.groups > 0
+                    && job.groups <= self.max_groups),
+            "Invalid compute buffer dimensions"
+        );
+        let codebooks = self
+            .codebooks
+            .as_ref()
+            .context("GPU codebooks unavailable")?;
+        unsafe {
             let d = &self.device.raw;
-            d.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
-            d.reset_fences(&[self.fence])?;
-            d.begin_command_buffer(
-                self.command,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            d.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::COMPUTE, pipeline);
+            d.begin_command_buffer(command, &vk::CommandBufferBeginInfo::default().flags(flags))?;
+            if self.queries != vk::QueryPool::null() {
+                d.cmd_reset_query_pool(command, self.queries, 0, 2);
+                d.cmd_write_timestamp(
+                    command,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    self.queries,
+                    0,
+                );
+            }
             for (index, job) in jobs.iter().enumerate() {
-                // Each dispatch owns a descriptor set and output until the shared fence completes.
-                let infos = [
+                let infos = [job.input, job.weights, job.output, codebooks].map(|buffer| {
                     [vk::DescriptorBufferInfo::default()
-                        .buffer(input.raw)
-                        .range(input.size as u64)],
-                    [vk::DescriptorBufferInfo::default()
-                        .buffer(job.weights.raw)
-                        .range(job.weights.size as u64)],
-                    [vk::DescriptorBufferInfo::default()
-                        .buffer(job.output.raw)
-                        .range(job.output.size as u64)],
-                    [vk::DescriptorBufferInfo::default()
-                        .buffer(codebooks.raw)
-                        .range(codebooks.size as u64)],
-                ];
-                let descriptor = self.descriptors[index];
+                        .buffer(buffer.raw)
+                        .range(buffer.size as u64)]
+                });
+                let descriptor = sets[index];
                 let writes: Vec<_> = infos
                     .iter()
                     .enumerate()
@@ -873,8 +993,9 @@ impl Gpu {
                     })
                     .collect();
                 d.update_descriptor_sets(&writes, &[]);
+                d.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, job.pipeline);
                 d.cmd_bind_descriptor_sets(
-                    self.command,
+                    command,
                     vk::PipelineBindPoint::COMPUTE,
                     self.layout,
                     0,
@@ -882,20 +1003,30 @@ impl Gpu {
                     &[],
                 );
                 let push = std::slice::from_raw_parts(job.params.as_ptr().cast::<u8>(), 16);
-                d.cmd_push_constants(
-                    self.command,
-                    self.layout,
-                    vk::ShaderStageFlags::COMPUTE,
-                    0,
-                    push,
-                );
-                d.cmd_dispatch(self.command, job.groups, 1, 1);
+                d.cmd_push_constants(command, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
+                d.cmd_dispatch(command, job.groups, 1, 1);
+                if job.barrier_after {
+                    let barriers = [vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(
+                            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                        )];
+                    d.cmd_pipeline_barrier(
+                        command,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &barriers,
+                        &[],
+                        &[],
+                    );
+                }
             }
             let barriers = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ)];
             d.cmd_pipeline_barrier(
-                self.command,
+                command,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::PipelineStageFlags::HOST,
                 vk::DependencyFlags::empty(),
@@ -903,10 +1034,33 @@ impl Gpu {
                 &[],
                 &[],
             );
-            d.end_command_buffer(self.command)?;
-            let commands = [self.command];
+            if self.queries != vk::QueryPool::null() {
+                d.cmd_write_timestamp(
+                    command,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    self.queries,
+                    1,
+                );
+            }
+            d.end_command_buffer(command)?;
+        }
+        Ok(())
+    }
+
+    fn submit(&self, command: vk::CommandBuffer, recording: Instant) -> Result<()> {
+        ensure!(
+            !self.device.abandoned.load(Ordering::Relaxed),
+            "GPU timed out; restart the app"
+        );
+        unsafe {
+            let d = &self.device.raw;
+            d.reset_fences(&[self.fence])?;
+            let commands = [command];
             let submits = [vk::SubmitInfo::default().command_buffers(&commands)];
-            d.queue_submit(self.queue, &submits, self.fence)?;
+            if let Err(err) = d.queue_submit(self.queue, &submits, self.fence) {
+                self.device.abandoned.store(true, Ordering::Relaxed);
+                bail!("Vulkan submit failed ({err:?}); restart the app");
+            }
             self.submissions.set(self.submissions.get().wrapping_add(1));
             self.record_profile(|p| {
                 p.record_submit_ns = p.record_submit_ns.saturating_add(elapsed_ns(recording))
@@ -918,6 +1072,26 @@ impl Gpu {
                 // Pending work may still own buffers; retain resources until process exit.
                 self.device.abandoned.store(true, Ordering::Relaxed);
                 bail!("Vulkan dispatch failed ({err:?}); restart the app");
+            }
+            if self.queries != vk::QueryPool::null() {
+                let mut ticks = [0u64; 2];
+                // Fence is complete; never introduce an unbounded query WAIT on a broken driver.
+                if d.get_query_pool_results(
+                    self.queries,
+                    0,
+                    &mut ticks,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+                .is_ok()
+                    && let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits)
+                {
+                    let ns =
+                        (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
+                    self.record_profile(|p| {
+                        p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
+                        p.device_samples = p.device_samples.saturating_add(1);
+                    });
+                }
             }
         }
         Ok(())
@@ -932,10 +1106,12 @@ impl Drop for Gpu {
         unsafe {
             let d = &self.device.raw;
             d.destroy_pipeline(self.qmv, None);
-            for pipeline in self.qmv_tiled {
+            for pipeline in self.qmv_stream {
                 d.destroy_pipeline(pipeline, None);
             }
             d.destroy_pipeline(self.dense, None);
+            d.destroy_pipeline(self.hadamard, None);
+            d.destroy_query_pool(self.queries, None);
             d.destroy_pipeline_layout(self.layout, None);
             d.destroy_descriptor_pool(self.descriptor_pool, None);
             d.destroy_descriptor_set_layout(self.set_layout, None);
@@ -982,40 +1158,29 @@ mod tests {
     }
 
     #[test]
-    fn tiled_selection_requires_parity_stability_and_a_clear_gain() {
-        let scalar = [0.010, 0.0101, 0.0102, 0.0103];
-        let faster = [0.008, 0.0081, 0.0082, 0.0083];
-        assert!(prefer_tiled(scalar, faster, true));
-        assert!(!prefer_tiled(scalar, faster, false));
-        assert!(!prefer_tiled(scalar, scalar, true));
-        assert!(!prefer_tiled(faster, scalar, true));
-        assert!(!prefer_tiled(scalar, [0.01, 0.01, 0.01, 0.01], true));
-        assert!(!prefer_tiled(
-            [0.01; 4],
-            [0.0075, 0.0075, 0.0105, 0.0105],
-            true
-        ));
-        for bad in [0., -1., f64::NAN, f64::INFINITY, 30., f64::MAX] {
-            let mut invalid = faster;
-            invalid[2] = bad;
-            assert!(!prefer_tiled(scalar, invalid, true));
-            assert!(!prefer_tiled(invalid, faster, true));
+    fn stream_groups_and_timestamp_wrap_are_checked() {
+        for (outputs, groups) in [
+            (0, None),
+            (15, None),
+            (16, Some(1)),
+            (32768, Some(2048)),
+            (32769, None),
+            (usize::MAX, None),
+        ] {
+            assert_eq!(exl3_groups(outputs), groups);
         }
-        assert!(!prefer_tiled(scalar, [0.001, 0.008, 0.008, 0.008], true));
-        assert!(!prefer_tiled([0.001, 0.01, 0.01, 0.01], faster, true));
-        assert_eq!(exl3_groups(0), None);
-        assert_eq!(exl3_groups(15), None);
-        assert_eq!(exl3_groups(16), Some(4));
-        assert_eq!(exl3_groups(32768), Some(8192));
-        assert_eq!(exl3_groups(32769), None);
-        assert_eq!(exl3_groups(usize::MAX), None);
+        assert_eq!(timestamp_delta(254, 2, 8), Some(4));
+        assert_eq!(timestamp_delta(u64::MAX, 2, 64), Some(3));
+        assert_eq!(timestamp_delta(0, u64::MAX, 1), Some(1));
+        assert_eq!(timestamp_delta(0, 0, 0), None);
+        assert_eq!(timestamp_delta(0, 0, 65), None);
     }
 
     #[test]
-    #[ignore = "requires Vulkan; specialized four-output kernel parity and tuning wiring"]
-    fn tiled_qmv_matches_scalar_all_bitrates_and_codebooks() {
+    #[ignore = "requires Vulkan; register-window kernel against independent CPU/f64 reconstruction"]
+    fn stream_qmv_matches_cpu_all_bitrates_and_codebooks() {
         let mut gpu = Gpu::new().unwrap();
-        for (rows, cols) in [(128, 128), (256, 384), (2048, 512)] {
+        for (rows, cols) in [(16, 32), (128, 128), (256, 384), (2048, 512)] {
             let x: Vec<_> = (0..rows)
                 .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
                 .collect();
@@ -1023,49 +1188,183 @@ mod tests {
                 let states: Vec<_> = (0..rows * cols)
                     .map(|i| ((i * 177 + i / 7 * 313 + 512) & 65535) as u16)
                     .collect();
-                let bytes: Vec<_> = codec::pack(&states, bits)
-                    .unwrap()
-                    .iter()
-                    .flat_map(|v| v.to_le_bytes())
-                    .collect();
+                let packed = codec::pack(&states, bits).unwrap();
+                let bytes: Vec<_> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
                 let buffer = gpu.buffer(&bytes).unwrap();
-                for cb in 0..3 {
-                    let expected = gpu
-                        .multiply_kernel(&buffer, &x, cols, bits as u32, cb, false)
-                        .unwrap();
+                for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
+                    let matrix = codec::reconstruct_inner(&packed, bits, cb, rows, cols).unwrap();
                     let actual = gpu
-                        .multiply_kernel(&buffer, &x, cols, bits as u32, cb, true)
+                        .multiply(&buffer, &x, cols, bits as u32, cb as u32)
                         .unwrap();
                     assert_eq!(actual.len(), cols);
                     assert!(actual.iter().any(|v| v.abs() > 0.01));
-                    for (a, b) in actual.iter().zip(&expected) {
-                        assert_eq!(a.to_bits(), b.to_bits(), "{rows}x{cols}, K{bits}, cb{cb}");
-                    }
-                    if (rows, cols, bits, cb) == (128, 128, 4, 0) {
-                        gpu.prepare_exl3(&buffer, rows, cols, bits as u32, cb)
-                            .unwrap();
-                        assert_eq!(gpu.tuned_shapes().1, 1);
-                        let before = gpu.submission_count();
-                        gpu.prepare_exl3(&buffer, rows, cols, bits as u32, cb)
-                            .unwrap();
-                        assert_eq!(gpu.submission_count(), before);
-                        gpu.tuned.insert((rows, cols, bits as u32, cb), true);
-                        assert_eq!(
-                            gpu.multiply(&buffer, &x, cols, bits as u32, cb).unwrap(),
-                            expected
-                        );
+                    for n in 0..cols {
+                        let expected: f64 = (0..rows)
+                            .map(|r| f64::from(x[r]) * matrix[r * cols + n].to_f64())
+                            .sum();
                         assert!(
-                            gpu.prepare_exl3(&buffer, usize::MAX, cols, bits as u32, cb)
-                                .is_err()
+                            (f64::from(actual[n]) - expected).abs() <= 1e-4 + expected.abs() * 2e-5,
+                            "{rows}x{cols}, K{bits}, cb{cb:?}, n{n}: {} != {expected}",
+                            actual[n]
                         );
-                        assert!(
-                            gpu.multiply_kernel(&buffer, &x[..127], cols, bits as u32, cb, true)
-                                .is_err()
-                        );
-                        assert!(gpu.multiply_kernel(&buffer, &x, cols, 0, cb, true).is_err());
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; full GPU Hadamard/scales and prepared-command reuse"]
+    fn prepared_projection_matches_cpu_reference_and_rejects_invalid_inputs() {
+        let mut gpu = Gpu::new().unwrap();
+        for (input, output, rows, cols) in
+            [(1, 1, 128, 128), (127, 129, 128, 256), (256, 384, 256, 384)]
+        {
+            for bits in 1usize..=8 {
+                let packed = codec::pack(
+                    &(0..rows * cols)
+                        .map(|i| (i * 177 + 37) as u16)
+                        .collect::<Vec<_>>(),
+                    bits,
+                )
+                .unwrap();
+                let bytes: Vec<_> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+                for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
+                    let su: Vec<_> = (0..rows)
+                        .map(|i| crate::math::half(if i % 3 == 0 { -0.1234 } else { 0.2503 }))
+                        .collect();
+                    let sv: Vec<_> = (0..cols)
+                        .map(|i| crate::math::half(if i % 5 == 0 { -0.2503 } else { 0.1234 }))
+                        .collect();
+                    let buffer = gpu.buffer(&bytes).unwrap();
+                    let shape = Exl3Shape {
+                        input,
+                        output,
+                        rows,
+                        cols,
+                        bits: bits as u32,
+                        codebook: cb as u32,
+                    };
+                    let reference_buffer = gpu.buffer(&bytes).unwrap();
+                    let matrix = gpu.prepare_exl3(buffer, shape, &su, &sv).unwrap();
+                    for repeat in 0..2 {
+                        let x: Vec<_> = (0..input)
+                            .map(|i| {
+                                ((i * 11 % 19) as f32 - 9.) * 0.031253 + repeat as f32 * 0.062513
+                            })
+                            .collect();
+                        let mut xhat = vec![0.; rows];
+                        for (i, value) in x.iter().enumerate() {
+                            xhat[i] = crate::math::half(crate::math::half(*value) * su[i]);
+                        }
+                        crate::math::hadamard(&mut xhat).unwrap();
+                        let mut expected = gpu
+                            .compute(
+                                gpu.qmv,
+                                &reference_buffer,
+                                &xhat,
+                                [rows as u32, cols as u32, bits as u32, cb as u32],
+                                cols,
+                            )
+                            .unwrap();
+                        expected.iter_mut().for_each(|v| *v = crate::math::half(*v));
+                        crate::math::hadamard(&mut expected).unwrap();
+                        for (v, scale) in expected.iter_mut().zip(&sv) {
+                            *v = crate::math::half(*v * *scale);
+                        }
+                        let before = gpu.submission_count();
+                        let actual = gpu.project_exl3(&matrix, &x).unwrap();
+                        assert_eq!(gpu.submission_count() - before, 1);
+                        assert_eq!(actual.len(), output);
+                        assert!(actual.iter().any(|v| v.abs() > 0.0001));
+                        for (a, b) in actual.iter().zip(&expected) {
+                            assert!(
+                                a.is_finite() && (a - b).abs() <= 2e-4 + b.abs() * 2e-3,
+                                "shape {input}/{rows} x {output}/{cols}, K{bits} cb{cb:?}: {a} != {b}"
+                            );
+                        }
+                    }
+                    let before = gpu.submission_count();
+                    assert!(gpu.project_exl3(&matrix, &vec![0.; input + 1]).is_err());
+                    assert!(gpu.project_exl3(&matrix, &vec![f32::NAN; input]).is_err());
+                    assert_eq!(gpu.submission_count(), before);
+                    assert!(
+                        gpu.project_exl3(&matrix, &vec![0.; input])
+                            .unwrap()
+                            .iter()
+                            .all(|v| *v == 0.)
+                    );
+                    assert!(gpu.project_exl3(&matrix, &vec![f32::MAX; input]).is_err());
+                }
+            }
+        }
+        let shape = Exl3Shape {
+            input: 128,
+            output: 128,
+            rows: 128,
+            cols: 128,
+            bits: 4,
+            codebook: 0,
+        };
+        for (su, sv) in [
+            (vec![1.; 127], vec![1.; 128]),
+            (vec![f32::NAN; 128], vec![1.; 128]),
+            (vec![1.0002; 128], vec![1.; 128]),
+            (vec![1.; 128], vec![1.; 129]),
+        ] {
+            let buffer = gpu.buffer(&[0; 8192]).unwrap();
+            assert!(gpu.prepare_exl3(buffer, shape, &su, &sv).is_err());
+        }
+        for invalid in [
+            Exl3Shape {
+                rows: usize::MAX,
+                ..shape
+            },
+            Exl3Shape { input: 0, ..shape },
+            Exl3Shape {
+                output: 129,
+                ..shape
+            },
+            Exl3Shape { cols: 129, ..shape },
+            Exl3Shape { bits: 9, ..shape },
+            Exl3Shape {
+                codebook: 3,
+                ..shape
+            },
+        ] {
+            let buffer = gpu.buffer(&[0; 8192]).unwrap();
+            assert!(
+                gpu.prepare_exl3(buffer, invalid, &[1.; 128], &[1.; 128])
+                    .is_err()
+            );
+        }
+        let buffer = gpu.buffer(&[0; 4]).unwrap();
+        assert!(
+            gpu.prepare_exl3(buffer, shape, &[1.; 128], &[1.; 128])
+                .is_err()
+        );
+        let mut other_gpu = Gpu::new().unwrap();
+        let buffer = other_gpu.buffer(&[0; 8192]).unwrap();
+        assert!(
+            gpu.prepare_exl3(buffer, shape, &[1.; 128], &[1.; 128])
+                .is_err()
+        );
+        let buffer = other_gpu.buffer(&[0; 8192]).unwrap();
+        let matrix = other_gpu
+            .prepare_exl3(buffer, shape, &[1.; 128], &[1.; 128])
+            .unwrap();
+        assert!(gpu.project_exl3(&matrix, &[0.; 128]).is_err());
+        gpu.prepared = MAX_EXL3_MATRICES;
+        let buffer = gpu.buffer(&[0; 8192]).unwrap();
+        assert!(
+            gpu.prepare_exl3(buffer, shape, &[1.; 128], &[1.; 128])
+                .is_err()
+        );
+        assert!(gpu.submission_count() > 0);
+        let profile = gpu.take_profile();
+        if gpu.queries != vk::QueryPool::null() {
+            assert_eq!(profile.device_samples, gpu.submission_count());
+            assert!(profile.device_compute_ns > 0);
         }
     }
 
@@ -1204,10 +1503,10 @@ mod tests {
                     }
                 };
                 // Correctness precedes timing; both paths use the same packed resident buffer.
-                check(&gpu.multiply(&buffer, &x, cols, 4, cb).unwrap());
+                check(&gpu.compute(gpu.qmv, &buffer, &x, params, cols).unwrap());
                 for _ in 0..2 {
                     check(&gpu.compute(reference, &buffer, &x, params, cols).unwrap());
-                    check(&gpu.multiply(&buffer, &x, cols, 4, cb).unwrap());
+                    check(&gpu.compute(gpu.qmv, &buffer, &x, params, cols).unwrap());
                 }
                 let mut times = [vec![], vec![]];
                 for pair in 0..7 {
@@ -1218,7 +1517,7 @@ mod tests {
                     } {
                         let start = Instant::now();
                         let values = if lookup {
-                            gpu.multiply(&buffer, &x, cols, 4, cb).unwrap()
+                            gpu.compute(gpu.qmv, &buffer, &x, params, cols).unwrap()
                         } else {
                             gpu.compute(reference, &buffer, &x, params, cols).unwrap()
                         };
@@ -1249,6 +1548,54 @@ mod tests {
 mod proofs {
     use super::*;
     #[kani::proof]
+    fn timestamp_wrapping_is_bounded_for_all_counter_widths() {
+        let start: u64 = kani::any();
+        let end: u64 = kani::any();
+        let bits: u32 = kani::any();
+        let delta = timestamp_delta(start, end, bits);
+        assert_eq!(delta.is_some(), bits >= 1 && bits <= 64);
+        if let Some(delta) = delta {
+            if bits < 64 {
+                assert!(delta < (1u64 << bits));
+            } else {
+                assert!(delta == end.wrapping_sub(start));
+            }
+            if end == start {
+                assert!(delta == 0);
+            }
+        }
+        kani::cover!(start == 255 && end == 1 && bits == 8 && delta == Some(2));
+        kani::cover!(start == u64::MAX && end == 0 && bits == 64 && delta == Some(1));
+        kani::cover!(bits > 64 && delta.is_none());
+    }
+
+    #[kani::proof]
+    fn prepared_shapes_bound_all_buffer_and_dispatch_ranges() {
+        let shape = Exl3Shape {
+            input: kani::any(),
+            output: kani::any(),
+            rows: kani::any(),
+            cols: kani::any(),
+            bits: kani::any(),
+            codebook: kani::any(),
+        };
+        if shape.valid() {
+            assert!(shape.input > 0 && shape.input <= shape.rows && shape.rows <= 32768);
+            assert!(shape.output > 0 && shape.output <= shape.cols && shape.cols <= 32768);
+            assert!(shape.rows / 128 >= 1 && shape.cols / 128 >= 1);
+            assert!(shape.rows % 128 == 0 && shape.cols % 128 == 0);
+            assert!(shape.rows / 8 * shape.cols * shape.bits as usize <= 1024 * 1024 * 1024);
+            assert!((shape.rows + shape.cols) * 4 <= 262144);
+            assert!(shape.codebook <= 2);
+        }
+        kani::cover!(
+            shape.valid() && shape.rows == 32768 && shape.cols == 32768 && shape.bits == 8
+        );
+        kani::cover!(shape.valid() && shape.input == 1 && shape.output == 1);
+        kani::cover!(!shape.valid() && shape.input == usize::MAX);
+    }
+
+    #[kani::proof]
     #[kani::unwind(7)]
     fn memory_selection_checks_flags_and_prefers_local_for_four_types() {
         let flags: [u32; 4] = kani::any();
@@ -1273,17 +1620,17 @@ mod proofs {
     }
 
     #[kani::proof]
-    fn tiled_groups_cover_exactly_valid_outputs() {
+    fn stream_groups_cover_exactly_valid_outputs() {
         let outputs: usize = kani::any();
         let groups = exl3_groups(outputs);
         let valid = outputs >= 16 && outputs <= 32768 && outputs % 16 == 0;
         assert_eq!(groups.is_some(), valid);
         if let Some(groups) = groups {
-            assert!(groups >= 4 && groups <= 8192);
-            assert_eq!(groups as usize * 4, outputs);
+            assert!(groups >= 1 && groups <= 2048);
+            assert_eq!(groups as usize * 16, outputs);
         }
-        kani::cover!(outputs == 16 && groups == Some(4));
-        kani::cover!(outputs == 32768 && groups == Some(8192));
+        kani::cover!(outputs == 16 && groups == Some(1));
+        kani::cover!(outputs == 32768 && groups == Some(2048));
     }
 
     #[kani::proof]

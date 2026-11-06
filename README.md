@@ -16,14 +16,17 @@ memory usage, speed and thermal behavior on the S24 have **not been validated**.
 This is not a performance release. The APK contains no model weights and
 requests no Internet permission.
 
-The engine implements the LFM3 text path: cached EXL3 codebooks and tiled
-matrix-vector multiplication, Hadamard/scales, gated width-7 convolution,
+The engine implements the LFM3 text path: cached EXL3 codebooks, register-window
+matrix-vector multiplication and GPU Hadamard/scales, gated width-7 convolution,
 full/sliding grouped attention, zero-tail partial RoPE, per-head sigmoid gates,
 sandwich RMSNorm, SwiGLU and greedy generation. Projections run on Vulkan;
 small operators and attention/cache control currently run on CPU. The codebook
-lookup uses an extra 768 KiB per loaded GPU; weights remain compressed. Prompts
-are processed token by token. This conservative baseline will need profiling
-on real hardware before speed work.
+lookup uses an extra 384 KiB per loaded GPU; weights remain compressed. EXL3
+commands are recorded at load time and reused. Prompts are processed token by
+token. The S24 report and the unmeasured performance limits of the current
+rework are recorded in [the EXL3 investigation](docs/android-exl3-rework-2026-11-06.md).
+After generation, the menu can copy timing/device diagnostics. Optional GPU
+timestamps are reported separately from host fence waits.
 
 One model, one conversation, context capped at 2048 tokens, up to 256 generated
 tokens per UI request. Thinking is disabled through the official text-only
@@ -76,6 +79,9 @@ cargo clippy --manifest-path engine/Cargo.toml --locked --all-targets -- -D warn
 cargo test --manifest-path engine/Cargo.toml --locked
 # Explicit device tests (Mesa lavapipe in CI):
 cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::codebooks -- --ignored --test-threads=1
+cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
+cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::prepared_projection -- --ignored --test-threads=1
+cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::persistent_scratch -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --test vulkan -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --test flow -- --ignored --test-threads=1
 cargo kani --manifest-path engine/Cargo.toml --lib
@@ -85,10 +91,11 @@ cargo kani --manifest-path engine/Cargo.toml --lib
 The Vulkan tests check all 196,608 codebook values bit-for-bit and compare
 nonempty finite projection outputs with CPU
 reconstruction, for all 1–8-bit EXL3 layouts and all three codebooks. These
-tests do not prove complete-model equivalence. Five emulator UI tests cover
-contrast, import, sending, cancellation and the composer above the real keyboard.
-The five UI cases run on two screen sizes and check real keyboard reopening
-and cursor anchoring. See [the current verification record](docs/verification-2026-11-06.md)
+tests do not prove complete-model equivalence. Six emulator UI tests cover
+contrast, import, sending, cancellation, diagnostic copying and the composer above the real keyboard.
+The six UI cases run on two screen sizes and check real keyboard reopening
+and cursor anchoring. See [the current engine verification record](docs/android-exl3-rework-2026-11-06.md),
+[the previous record](docs/verification-2026-11-06.md)
 and [the initial record](docs/verification-2026-11-05.md). Kani properties and limits,
 failures and actual verification results are recorded in [opti.md](opti.md).
 See [the S24 validation protocol](docs/s24-validation.md) before reporting results.
@@ -97,6 +104,7 @@ See [the S24 validation protocol](docs/s24-validation.md) before reporting resul
 
 - [MLXL3](https://github.com/0xZKnw/mlxl3): Rust EXL3 codec and Desktop design.
 - [ExLlamaV3](https://github.com/turboderp-org/exllamav3): EXL3 format and reference algorithms.
+- [Nathanw1014 and the ggml authors](https://github.com/halo-box/strix-llama.cpp/pull/204): Vulkan register-window trellis decoding algorithm.
 - [Liquid AI](https://huggingface.co/LiquidAI/LFM3-1.7B): LFM3 model architecture and weights.
 - [Hugging Face Tokenizers](https://github.com/huggingface/tokenizers): tokenization.
 - [ash](https://github.com/ash-rs/ash): Vulkan bindings.

@@ -1,0 +1,76 @@
+{
+  "engine": {
+    "decode_seconds": 5.915635742,
+    "decode_submissions": 2002,
+    "decode_tokens": 13,
+    "decode_tokens_per_second": 2.197566004225417,
+    "finish_reason": "stop",
+    "performance": {
+      "decode": {
+        "head_ns": 256898517,
+        "model_ns": 5899325860,
+        "projection_cpu_ns": 423978323,
+        "readback_ns": 27194891,
+        "record_submit_ns": 210289924,
+        "upload_ns": 2109405,
+        "wait_ns": 5027086456
+      },
+      "gpu": {
+        "api_version": 4206896,
+        "automatic_calibration": false,
+        "codebook_bytes": 393216,
+        "device": "Samsung Xclipse 940",
+        "device_id": 39846400,
+        "device_type": 1,
+        "driver_version": 104869891,
+        "kernel": "scalar_reference",
+        "logical_buffer_bytes": 1349320704,
+        "memory_types": [
+          {
+            "flags": 7,
+            "heap": 0,
+            "index": 0
+          }
+        ],
+        "scratch_mapping": "persistent",
+        "vendor_id": 5197
+      },
+      "prefill": {
+        "head_ns": 26319765,
+        "model_ns": 5105840193,
+        "projection_cpu_ns": 345331412,
+        "readback_ns": 20751737,
+        "record_submit_ns": 178282201,
+        "upload_ns": 1890180,
+        "wait_ns": 4410450223
+      },
+      "source_sha": "4c07189b1676b6407a0db06f6038166b1b8f7985",
+      "timing_scope": "host synchronous latency; head overlaps model/GPU; not GPU timestamps"
+    },
+    "prefill_seconds": 5.106255195,
+    "prefill_submissions": 1990,
+    "prompt_tokens": 13,
+    "tokens": 13,
+    "type": "done"
+  },
+  "environment_before": {
+    "device": "samsung SM-S921B",
+    "android_sdk": 37,
+    "available_ram_bytes": 1456504832,
+    "total_ram_bytes": 7574827008,
+    "low_memory": false,
+    "app_pss_kib": 1966830,
+    "power_save": false,
+    "thermal_status": 1
+  },
+  "environment_after": {
+    "device": "samsung SM-S921B",
+    "android_sdk": 37,
+    "available_ram_bytes": 1599991808,
+    "total_ram_bytes": 7574827008,
+    "low_memory": false,
+    "app_pss_kib": 1820720,
+    "power_save": false,
+    "thermal_status": 1
+  }
+}

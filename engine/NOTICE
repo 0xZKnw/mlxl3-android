@@ -3,6 +3,14 @@ MLXL3 native/src/codec.rs (1ac910d0a40efcad049c6e5a8cf081d770723465),
 now engine/src/codec.rs; see THIRD_PARTY_NOTICES.md for ExLlamaV3
 and EXL3 format attribution. The Vulkan shader re-expresses that codec.
 
+The register-window trellis decoding and lane mapping in qmv_stream.comp
+adapt the algorithm in halo-box/strix-llama.cpp PR #204 by Nathanw1014,
+revision bd64c24736eab68a006c1f44f99da3b994ba098c,
+ggml/src/ggml-vulkan/vulkan-shaders/exl3_common.glsl (MIT),
+Copyright (c) 2023-2026 The ggml authors. See THIRD_PARTY_NOTICES.md.
+Our shader uses core 32-bit arithmetic and shared-memory reductions rather
+than requiring the upstream wave32/FP16/coopmat paths.
+
 The LFM3 computation order follows LiquidAI/LFM3-1.7B, source revision
 0dc4268b561499c648c7ba7c9466bf3d8d01517a, modeling_lfm3.py (Apache-2.0,
 Copyright 2026 The HuggingFace Team) and ExLlamaV3 1.6.6 architecture/lfm3.py

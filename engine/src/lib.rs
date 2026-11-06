@@ -188,7 +188,7 @@ impl Engine {
                 "decode_tokens_per_second":decode_rate(decode_steps, decode_seconds),
                 "performance":{"source_sha":option_env!("GITHUB_SHA").unwrap_or("local_unknown"),
                 "gpu":self.model.gpu.diagnostics(),"prefill":prefill_profile,"decode":decode_profile,
-                "timing_scope":"host synchronous latency; head overlaps model/GPU; not GPU timestamps"},
+                "timing_scope":"host synchronous latency; head overlaps model/GPU; device_compute_ns is GPU timestamps when device_samples > 0"},
                 "prompt_tokens":prompt.len(),"prefill_submissions":prefill_submissions,
                 "decode_submissions":self.model.gpu.submission_count().wrapping_sub(decode_submissions),"finish_reason":if generated.len() == max_tokens {"length"} else {"stop"}}),
             )?;

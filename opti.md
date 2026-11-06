@@ -633,3 +633,102 @@
   Recherche09 terminée sursources, diagnostic disponible ; aucun essai lancé
   encore en cours. Logs temporaires `build/perf10-ci-{apk,proofs,vulkan}.log`,
   APK `build/apk-4c07189/debug/app-debug.apk`, tests et rapports conservés.
+
+#### Retour utilisateur sur le lot10
+
+- APK4c07189 : **2,1tok/s** rapportés après1,7 ; pas de protocole thermique,
+  répétitions ou diagnostic joint. Amélioration utilisateur partielle, mais
+  débit toujours insuffisant ; aucun gain causal ou objectif20tok/s validé.
+
+### ANDROID-PERF-2026-11-06-11 — recherche EXL3 portable et refonte du calcul — préenregistré
+
+- Demande : chercher des essais réels EXL3 surVulkan/Android et reprendre le
+  calcul. Baseline75e87bd/code4c07189. Historique05..10 et rapports relus ; ne
+  pas refaire tuilage4/sélection ou LUT déjàdocumentés comme nouvelle découverte.
+- Recherche prévue : dépôts/PR/issues amontEXLlama, moteurs portables EXL3,
+  Vulkan/Metal/WebGPU/Android, papiers/rapports avec hardware et protocole.
+  Identifier benchmarks véritables, prototypes et simples discussions ; ne pas
+  attribuer des débitsGGUF àEXL3. Demander le diagnostic S24 en parallèle.
+- Hypothèse à confronter : accès non coopératifs aux poids, deux lectures par
+  poids logique, LUT dispersée et réduction128 ; calculHadamard/échellesCPU et
+  154attentesGPU/token empêchent une implémentation orientéeGPU. Rechercher un
+  algorithme qui décode des tuiles coopérativement et conserve les activations.
+- Avant chaque prototype retenu : préciser configuration, ordre numérique et
+  oracles, allocations/bornes, contexte/caches, provenance sources ; vérifier
+  correction avant mesure, aucune campagneGPU Mac concurrente. Comparer le
+  chemin production et référence indépendante, pas seulement deux clones.
+  Tests ciblés/Kani applicables et CI exacte si code publié ; gain physique
+  S24 inconnu tant que non mesuré. Statut : recherche en cours, pas de prototype.
+
+#### Diagnostic physique reçu et recherche11
+
+- Données utilisateur conservées dans `docs/measurements/s24-4c07189-user.json` :
+  13étapesdecode/2002soumissions, 2,197566tok/s ; attente5,027s surmodèle5,899s
+  (85,21%), CPUprojections0,424s, enregistrement/soumission0,210s, head0,257s
+  imbriqué (4,35%). Mémoirelocale flags7, vraiXclipse940, pasd'économieénergie,
+  statutthermique1 et low_memoryfalse. Pas de timestampGPUisolé : attente ne
+  distingue pas exécution/pilote/réveilCPU. 154attentes/token confirmé.
+- Recherche réelle : Strix-llama.cpp PR204/headbd64c24736eab68a006c1f44f99da3b994ba098c,
+  portEXL3 Vulkan et benchmarksStrixHalo publiés (pas téléphone), shaders lus,
+  licenceMIT ; PR201formatparent. vllm.cpp backendVulkanEXL3 est une référence
+  validée surlavapipe sanschiffreGPUmatériel. infr issue6 fermée mais commentaires
+  restent des plans, pas un benchmarkEXL3achevé. trellis-serve CUDA/XPU est
+  horsVulkan/Android. Aucun benchmark EXL3surS24/Android public vérifiable trouvé
+  danscesrecherches ; ce n'est pas une preuve d'absence.
+
+### ANDROID-PERF-2026-11-06-12 — projection EXL3 GPU complète, fenêtres trellis et commandes préparées — préenregistré
+
+- Refonte motivéeparle diagnostic, baseline4c07189/75e87bd. Le tuilage4 de08
+  conservait2lecturesglobales/poids ; cettefois un thread décode8codes adjacents
+  depuis une petitefenêtre deregistres, 16sorties/groupe128 et réductionquad/
+  quatre partitionsK. Aucun requiswave32/FP16/coopmat, repliportable parmémoire
+  partagée. Pas de matrice dense globale. Ordre FP32différent, pas promisbitexact.
+- SU/Hadamard et Hadamard/SV passentdansdes kernelsGPU, mêmesfrontièresFP16 et
+  Hadamard128, paddinglogiqueexplicite. Troisdispatchesavecbarrières dansune
+  seulesoumission ; descripteurs et commandespréparés au chargement parmatrice,
+  buffersrésidents. Gardercodec/scalar/HadamardCPUcommeoraclesindépendants.
+- Ajouter timestampsGPU seulementsi file/périodeannoncéescompatibles, masque
+  desbitsvalides et erreursnonfatales de lecture ; conserverlatenceshost et
+  différencier tempsGPUmesuré des attentes. Aucuneautocalibration ni microbench
+  destinéàchoisirle nouveaukernel depuisMesa.
+- Protocole avantcode : forme/quantification/offsets validés, tests1..8bits et
+  3codebooks contre reconstructionCPU/f64 (tolérance QMV1e-4+2e-5relative déjà
+  utilisée), grandesformesrectangulaires/petitesfrontières et valeursfinies ;
+  projectionsGPUcomplètes vsanciencheminCPU/scalaire avec toléranceFP16 explicite
+  initiale2e-4+2e-3relative, oraclemodele128logits inchangé, caches/annulation.
+  Tester barrières/réutilisation/erreurs et limitesmatrices/dispatches ; Kani
+  contratsRust, pas prétendreprouverGLSL avecune réécritureRust. Vérifier CIexacte
+  etAPK avant livraison. Pas de mesureGPUmatérielleMac, gainS24àmesurer ensuite.
+
+#### Vérification12 en cours (avant publication)
+
+- Nouveauchemin chargé et exercé : registre16, HadamardGPU, commandespréparées,
+  timestampsoptionnels. Première parité96casQMV vsCPU/f64 réussie surMesa,
+  projectioncomplète puis casétendus72matrices×réutilisation/zeros/overflow
+  réussis ; fixture128logits/caches/annulation réussie sansmodifiertolérance.
+- TestsCPU19/19 etClippystrict réussis ; Kanishapes83obligations/3covers réussi,
+  suitecomplète lancée. SPIR-Vvalide ; Hadamard conserve OpFDiv/f32sqrt128 et
+  NoContraction. Aucun résultat de débitS24 : toutceci est fonctionnel/logiciel.
+- Avantcontrôlede sensibilité : mutationtemporaire du signe de la sortieQMV,
+  lancer uniquement l'oracle stream_qmv (doitéchouer), restaurer même surerreur,
+  reconstruire et relancerle contrôleaffecté. Pas de mesure de vitesse.
+
+#### Résultats12 et décision locale
+
+- **Validé fonctionnellement localement** :19testsCPU et8testsVulkan exécutés
+  explicitement surMesa logiciel. QMV96cas, projectioncomplète72matrices et
+  fixture128logits/caches/annulation ; tolérancesprévues inchangées. Mutation
+  inversiondesigne détectée dès16×32/K1/codebookDefault (exit101), shader
+  restauré enfinally, reconstruction et8contrôlesVulkan finaux tousréussis.
+- Kani0.68/CBMC6.11 :11harnais,1005obligations,23covers réussis ; trois
+  obligationsformatstd inatteignables. Domaines/bornes etlimites dansle
+  [rapport détaillé](docs/android-exl3-rework-2026-11-06.md), dontlesdeux
+  nouveauxcontrats timestamp/shape (46+83obligations/6covers). Pas de preuve
+  GLSL/Vulkan/FFI ; harnaisflottantancien incompatibletoujoursnonvérifié.
+- Clippystrict host, fmt, actionlint, diffcheck, compilation/validationSPIR-V
+  réussis. Logs temporaires `build/perf12-{cpu,gpu-final,clippy-final,kani-all,
+  kani-shapes,mutation,restored-build}.log` conservés ; pas de benchmarkmatériel.
+- Recherche11 **terminée**, rapport etsources archivés. Essai12 : code local
+  retenu, publication/CI/APK en attente sousautorisationexistante ; **gainS24
+  nonmesuré/nonconcluant**, vrai checkpoint4,49bpw/Xclipse nonvalidés ici.
+ 154soumissions/tokenencoreprésentes ; pas de fusionglobale ni prefillmatriciel.
