@@ -2365,7 +2365,12 @@ mod tests {
             let bytes: Vec<u8> = (0..128 * 16)
                 .flat_map(|i| {
                     let value = (i as f32 % 37. - 18.) / 64.;
-                    (if dtype == 0 { half::f16::from_f32(value).to_bits() } else { half::bf16::from_f32(value).to_bits() }).to_le_bytes()
+                    (if dtype == 0 {
+                        half::f16::from_f32(value).to_bits()
+                    } else {
+                        half::bf16::from_f32(value).to_bits()
+                    })
+                    .to_le_bytes()
                 })
                 .collect();
             let weights = gpu.buffer(&bytes).unwrap();
