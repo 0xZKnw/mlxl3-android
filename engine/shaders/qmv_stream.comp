@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-#ifdef EXL3_COOPERATIVE_K4
+#if defined(EXL3_COOPERATIVE_K4) || defined(EXL3_COOPERATIVE_K5)
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 #endif
@@ -65,6 +65,24 @@ void main() {
         uint w0 = subgroupShuffle(owned, word);
         uint w1 = subgroupShuffle(owned, (word + 1u) % WORDS);
         uint w2 = 0u;
+        uint w3 = 0u;
+#elif defined(EXL3_COOPERATIVE_K5)
+        // A K5 tile has 40 words. The first eight lanes own a second word.
+        // All lanes perform every shuffle, even when a window wraps or is short.
+        uint owned0 = packed[base + gl_SubgroupInvocationID];
+        uint owned1 = gl_SubgroupInvocationID < 8u ? packed[base + 32u + gl_SubgroupInvocationID] : 0u;
+        uint i0 = word;
+        uint i1 = (word + 1u) % WORDS;
+        uint i2 = (word + 2u) % WORDS;
+        uint lo0 = subgroupShuffle(owned0, i0 & 31u);
+        uint hi0 = subgroupShuffle(owned1, i0 & 31u);
+        uint lo1 = subgroupShuffle(owned0, i1 & 31u);
+        uint hi1 = subgroupShuffle(owned1, i1 & 31u);
+        uint lo2 = subgroupShuffle(owned0, i2 & 31u);
+        uint hi2 = subgroupShuffle(owned1, i2 & 31u);
+        uint w0 = i0 < 32u ? lo0 : hi0;
+        uint w1 = i1 < 32u ? lo1 : hi1;
+        uint w2 = loads > 2u ? (i2 < 32u ? lo2 : hi2) : 0u;
         uint w3 = 0u;
 #else
         uint w0 = packed[base + word];
