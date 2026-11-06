@@ -1,0 +1,85 @@
+{
+  "engine": {
+    "decode_seconds": 5.896863789,
+    "decode_submissions": 2926,
+    "decode_tokens": 19,
+    "decode_tokens_per_second": 3.2220517006756317,
+    "finish_reason": "stop",
+    "performance": {
+      "decode": {
+        "device_compute_ns": 4215661936,
+        "device_samples": 2926,
+        "head_ns": 332417147,
+        "model_ns": 5863229256,
+        "projection_cpu_ns": 143990684,
+        "readback_ns": 45704767,
+        "record_submit_ns": 258549121,
+        "upload_ns": 3417542,
+        "wait_ns": 4998772585
+      },
+      "gpu": {
+        "api_version": 4206896,
+        "automatic_calibration": false,
+        "codebook_bytes": 393216,
+        "device": "Samsung Xclipse 940",
+        "device_id": 39846400,
+        "device_type": 1,
+        "driver_version": 104869891,
+        "gpu_timestamps": true,
+        "kernel": "register_window_16",
+        "logical_buffer_bytes": 1353478144,
+        "memory_types": [
+          {
+            "flags": 7,
+            "heap": 0,
+            "index": 0
+          }
+        ],
+        "prepared_matrices": 142,
+        "projection": "gpu_hadamard_prepared_commands",
+        "scratch_mapping": "persistent",
+        "timestamp_period_ns": 39.0625,
+        "timestamp_valid_bits": 64,
+        "vendor_id": 5197
+      },
+      "prefill": {
+        "device_compute_ns": 3485938553,
+        "device_samples": 2449,
+        "head_ns": 21828750,
+        "model_ns": 4732378361,
+        "projection_cpu_ns": 93676964,
+        "readback_ns": 31697164,
+        "record_submit_ns": 210328925,
+        "upload_ns": 3552802,
+        "wait_ns": 4100610410
+      },
+      "source_sha": "bd9671479d01f3e251c10d106a08856c4191ea6e",
+      "timing_scope": "host synchronous latency; head overlaps model/GPU; device_compute_ns is GPU timestamps when device_samples > 0"
+    },
+    "prefill_seconds": 4.733066367,
+    "prefill_submissions": 2449,
+    "prompt_tokens": 16,
+    "tokens": 19,
+    "type": "done"
+  },
+  "environment_before": {
+    "device": "samsung SM-S921B",
+    "android_sdk": 37,
+    "available_ram_bytes": 1117204480,
+    "total_ram_bytes": 7574827008,
+    "low_memory": false,
+    "app_pss_kib": 1571420,
+    "power_save": false,
+    "thermal_status": 0
+  },
+  "environment_after": {
+    "device": "samsung SM-S921B",
+    "android_sdk": 37,
+    "available_ram_bytes": 1229692928,
+    "total_ram_bytes": 7574827008,
+    "low_memory": false,
+    "app_pss_kib": 1619836,
+    "power_save": false,
+    "thermal_status": 0
+  }
+}

@@ -171,6 +171,27 @@ pub struct Linear {
     output: usize,
 }
 impl Linear {
+    pub fn forward_group<const N: usize>(
+        linears: [&Self; N],
+        gpu: &mut Gpu,
+        x: &[f32],
+    ) -> Result<[Vec<f32>; N]> {
+        ensure!(
+            linears.iter().all(|l| l.input == x.len()),
+            "Grouped linear input shape mismatch"
+        );
+        let matrices = linears
+            .iter()
+            .map(|l| match &l.storage {
+                Storage::Exl3(matrix) => Ok(matrix),
+                Storage::Dense { .. } => anyhow::bail!("Grouped projections require EXL3 weights"),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        gpu.project_exl3_batch(&matrices, x)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Grouped linear output count mismatch"))
+    }
+
     pub fn load(
         w: &Weights,
         gpu: &mut Gpu,
@@ -274,11 +295,8 @@ impl Linear {
         ensure!(x.len() == self.input, "Linear input shape mismatch");
         let mut cpu_started = std::time::Instant::now();
         let mut result = match &self.storage {
-            Storage::Exl3(matrix) => {
-                let result = gpu.project_exl3(matrix, x)?;
-                cpu_started = std::time::Instant::now();
-                result
-            }
+            // GPU post-Hadamard already enforces the FP16 boundary and finite output.
+            Storage::Exl3(matrix) => return gpu.project_exl3(matrix, x),
             Storage::Dense { chunks, dtype } => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();
                 gpu.record_profile(|p| {

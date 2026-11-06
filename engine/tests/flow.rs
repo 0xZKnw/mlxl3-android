@@ -169,7 +169,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
-        assert_eq!(engine.model.gpu.submission_count() - before, 22);
+        assert_eq!(engine.model.gpu.submission_count() - before, 15);
         assert_eq!(reference[index].len(), last.len());
         for (actual, bits) in last.iter().zip(&reference[index]) {
             let expected = f32::from_bits(*bits);
@@ -216,17 +216,38 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         assert!(p["head_ns"].as_u64().unwrap() > 0);
         if done["performance"]["gpu"]["gpu_timestamps"] == true {
             assert!(p["device_compute_ns"].as_u64().unwrap() > 0);
-            assert_eq!(p["device_samples"], done[format!("{phase}_submissions")]);
+            let steps = if phase == "prefill" {
+                done["prompt_tokens"].as_u64().unwrap()
+            } else {
+                done["decode_tokens"].as_u64().unwrap()
+            };
+            assert_eq!(p["device_exl3_samples"].as_u64().unwrap(), steps * 19);
+            let samples = if phase == "prefill" {
+                steps * 21 + 1
+            } else {
+                steps * 22
+            };
+            assert_eq!(p["device_samples"].as_u64().unwrap(), samples);
+            let phases: u64 = [
+                "device_exl3_input_ns",
+                "device_exl3_matvec_ns",
+                "device_exl3_output_ns",
+                "device_other_ns",
+            ]
+            .iter()
+            .map(|key| p[key].as_u64().unwrap())
+            .sum();
+            assert_eq!(p["device_compute_ns"].as_u64().unwrap(), phases);
         }
     }
     assert!(!done["performance"].to_string().contains("Hello"));
     assert_eq!(
         done["prefill_submissions"].as_u64().unwrap(),
-        done["prompt_tokens"].as_u64().unwrap() * 21 + 1
+        done["prompt_tokens"].as_u64().unwrap() * 14 + 1
     );
     assert_eq!(
         done["decode_submissions"].as_u64().unwrap(),
-        done["decode_tokens"].as_u64().unwrap() * 22
+        done["decode_tokens"].as_u64().unwrap() * 15
     );
     cancelled.store(true, Ordering::Relaxed);
     assert!(

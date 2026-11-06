@@ -22,11 +22,14 @@ full/sliding grouped attention, zero-tail partial RoPE, per-head sigmoid gates,
 sandwich RMSNorm, SwiGLU and greedy generation. Projections run on Vulkan;
 small operators and attention/cache control currently run on CPU. The codebook
 lookup uses an extra 384 KiB per loaded GPU; weights remain compressed. EXL3
-commands are recorded at load time and reused. Prompts are processed token by
-token. The S24 report and the unmeasured performance limits of the current
-rework are recorded in [the EXL3 investigation](docs/android-exl3-rework-2026-11-06.md).
+commands are recorded at load time and reused; Q/K/V and FFN gate/up projections
+share submissions. Prompts are processed token by token. The S24 reports and
+the unmeasured performance limits of the current rework are recorded in
+[the grouped-projection investigation](docs/android-grouped-projections-2026-11-06.md)
+and [the previous EXL3 investigation](docs/android-exl3-rework-2026-11-06.md).
 After generation, the menu can copy timing/device diagnostics. Optional GPU
-timestamps are reported separately from host fence waits.
+timestamps separate input Hadamard, EXL3 matvec and output Hadamard from host
+fence waits. Samples count measured commands; submissions count shared fences.
 
 One model, one conversation, context capped at 2048 tokens, up to 256 generated
 tokens per UI request. Thinking is disabled through the official text-only
@@ -81,6 +84,7 @@ cargo test --manifest-path engine/Cargo.toml --locked
 cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::codebooks -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::prepared_projection -- --ignored --test-threads=1
+cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --lib vulkan::tests::persistent_scratch -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --test vulkan -- --ignored --test-threads=1
 cargo test --manifest-path engine/Cargo.toml --test flow -- --ignored --test-threads=1
@@ -94,7 +98,7 @@ reconstruction, for all 1–8-bit EXL3 layouts and all three codebooks. These
 tests do not prove complete-model equivalence. Six emulator UI tests cover
 contrast, import, sending, cancellation, diagnostic copying and the composer above the real keyboard.
 The six UI cases run on two screen sizes and check real keyboard reopening
-and cursor anchoring. See [the current engine verification record](docs/android-exl3-rework-2026-11-06.md),
+and cursor anchoring. See [the current engine verification record](docs/android-grouped-projections-2026-11-06.md),
 [the previous record](docs/verification-2026-11-06.md)
 and [the initial record](docs/verification-2026-11-05.md). Kani properties and limits,
 failures and actual verification results are recorded in [opti.md](opti.md).

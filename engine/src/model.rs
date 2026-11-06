@@ -350,8 +350,8 @@ impl Model {
                 *h += value;
             }
             let normalized = math::rms_norm(&hidden, &layer.ffn_norm, self.config.norm_eps)?;
-            let gate = layer.w1.forward(&mut self.gpu, &normalized)?;
-            let up = layer.w3.forward(&mut self.gpu, &normalized)?;
+            let [gate, up] =
+                Linear::forward_group([&layer.w1, &layer.w3], &mut self.gpu, &normalized)?;
             let activated: Vec<_> = gate
                 .iter()
                 .zip(up)
@@ -441,9 +441,7 @@ impl Attention {
         c: &Config,
         position: usize,
     ) -> Result<Vec<f32>> {
-        let mut q = self.q.forward(gpu, x)?;
-        let mut k = self.k.forward(gpu, x)?;
-        let v = self.v.forward(gpu, x)?;
+        let [mut q, mut k, v] = Linear::forward_group([&self.q, &self.k, &self.v], gpu, x)?;
         for head in q.chunks_exact_mut(c.head_dim) {
             head.copy_from_slice(&math::rms_norm(head, &self.q_norm, c.norm_eps)?);
         }

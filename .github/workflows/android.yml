@@ -97,15 +97,37 @@ jobs:
       - name: Software Vulkan and shader compiler
         run: |
           sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update -qq
-          sudo apt-get install -y --no-upgrade --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers
+          sudo apt-get install -y --no-upgrade --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
       - name: EXL3 projection and complete reduced-model tests
         run: |
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::prepared_projection -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::persistent_scratch -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
+
+      - name: Validate grouped command, memory and query synchronization
+        env:
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+          VK_LOADER_DEBUG: layer
+        run: |
+          dpkg-query -W vulkan-validationlayers
+          {
+            cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
+            cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
+          } 2>&1 | tee synchronization-validation.log
+          if grep -E 'Validation Error|VUID-|SYNC-HAZARD' synchronization-validation.log; then exit 1; fi
+          grep -E 'Insert instance layer.*VK_LAYER_KHRONOS_validation' synchronization-validation.log > /dev/null
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vulkan-synchronization-checks
+          path: synchronization-validation.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Compare lookup and procedural projections after parity
         if: github.event_name == 'workflow_dispatch'

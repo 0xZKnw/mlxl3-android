@@ -23,6 +23,12 @@ pub struct Profile {
     pub head_ns: u64,
     pub device_compute_ns: u64,
     pub device_samples: u64,
+    pub device_exl3_samples: u64,
+    pub device_exl3_input_ns: u64,
+    pub device_exl3_matvec_ns: u64,
+    pub device_exl3_output_ns: u64,
+    pub device_other_ns: u64,
+    pub query_read_ns: u64,
 }
 
 pub(crate) fn elapsed_ns(start: Instant) -> u64 {
@@ -70,6 +76,15 @@ fn codebook_table() -> Vec<u8> {
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
 const MAX_DESCRIPTOR_SETS: usize = MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES;
+const QUERY_COUNT: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
+
+fn projection_queries(index: usize) -> Option<u32> {
+    (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
+}
+
+fn valid_group_size(count: usize) -> bool {
+    (1..=3).contains(&count)
+}
 
 fn exl3_groups(outputs: usize) -> Option<u32> {
     ((16..=32768).contains(&outputs) && outputs.is_multiple_of(16)).then_some((outputs / 16) as u32)
@@ -112,8 +127,10 @@ impl Exl3Shape {
 pub struct Exl3Matrix {
     weights: Buffer,
     _scales: Buffer,
+    output: Buffer,
     shape: Exl3Shape,
     command: vk::CommandBuffer,
+    query_first: u32,
 }
 
 fn dense_batch_output_count(rows: &[usize]) -> Option<usize> {
@@ -247,9 +264,11 @@ impl Drop for Buffer {
 pub struct Gpu {
     device: Arc<Device>,
     properties: vk::PhysicalDeviceProperties,
+    capabilities: serde_json::Value,
     queue: vk::Queue,
     pool: vk::CommandPool,
     command: vk::CommandBuffer,
+    host_readback: vk::CommandBuffer,
     fence: vk::Fence,
     set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -335,6 +354,49 @@ impl Gpu {
                 .raw
                 .enumerate_device_extension_properties(physical)?
         };
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+        unsafe {
+            instance
+                .raw
+                .get_physical_device_properties2(physical, &mut properties2)
+        };
+        let supported_extensions: Vec<_> = device_extensions
+            .iter()
+            .map(|e| {
+                unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|n| {
+                matches!(
+                    n.as_str(),
+                    "VK_KHR_shader_float16_int8"
+                        | "VK_KHR_cooperative_matrix"
+                        | "VK_NV_cooperative_matrix"
+                        | "VK_EXT_subgroup_size_control"
+                        | "VK_KHR_shader_subgroup_extended_types"
+                )
+            })
+            .collect();
+        let mut float16 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+        if props.api_version >= vk::API_VERSION_1_2
+            || supported_extensions
+                .iter()
+                .any(|s| s == "VK_KHR_shader_float16_int8")
+        {
+            let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut float16);
+            unsafe {
+                instance
+                    .raw
+                    .get_physical_device_features2(physical, &mut features2)
+            };
+        }
+        let capabilities = serde_json::json!({"subgroup_size":subgroup.subgroup_size,
+            "subgroup_operations":subgroup.supported_operations.as_raw(),
+            "subgroup_stages":subgroup.supported_stages.as_raw(),
+            "shader_float16_supported":float16.shader_float16 == vk::TRUE,
+            "optional_extensions":supported_extensions});
         let portability = device_extensions.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == ash::khr::portability_subset::NAME);
         let extension_names = [ash::khr::portability_subset::NAME.as_ptr()];
         let mut device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queues);
@@ -353,9 +415,11 @@ impl Gpu {
         let mut gpu = Self {
             device,
             properties: props,
+            capabilities,
             queue,
             pool: vk::CommandPool::null(),
             command: vk::CommandBuffer::null(),
+            host_readback: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
             set_layout: vk::DescriptorSetLayout::null(),
             descriptor_pool: vk::DescriptorPool::null(),
@@ -391,12 +455,28 @@ impl Gpu {
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
                 None,
             )?;
-            gpu.command = d.allocate_command_buffers(
+            let commands = d.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(gpu.pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?[0];
+                    .command_buffer_count(2),
+            )?;
+            gpu.command = commands[0];
+            gpu.host_readback = commands[1];
+            d.begin_command_buffer(gpu.host_readback, &vk::CommandBufferBeginInfo::default())?;
+            let barriers = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ)];
+            d.cmd_pipeline_barrier(
+                gpu.host_readback,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &barriers,
+                &[],
+                &[],
+            );
+            d.end_command_buffer(gpu.host_readback)?;
             gpu.fence = d.create_fence(&vk::FenceCreateInfo::default(), None)?;
             let bindings: Vec<_> = (0..4)
                 .map(|i| {
@@ -444,7 +524,7 @@ impl Gpu {
                     .create_query_pool(
                         &vk::QueryPoolCreateInfo::default()
                             .query_type(vk::QueryType::TIMESTAMP)
-                            .query_count(2),
+                            .query_count(QUERY_COUNT),
                         None,
                     )
                     .unwrap_or(vk::QueryPool::null());
@@ -572,7 +652,11 @@ impl Gpu {
     }
 
     fn scratch_buffer(&mut self) -> Result<Buffer> {
-        let mut buffer = self.buffer(&vec![0; 32768 * 4])?;
+        self.mapped_buffer(32768 * 4)
+    }
+
+    fn mapped_buffer(&mut self, size: usize) -> Result<Buffer> {
+        let mut buffer = self.buffer(&vec![0; size])?;
         buffer.mapped = Some(unsafe {
             self.device.raw.map_memory(
                 buffer.memory,
@@ -606,7 +690,9 @@ impl Gpu {
             "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
             "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
             "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
-            "kernel":"register_window_16","projection":"gpu_hadamard_prepared_commands",
+            "kernel":"register_window_16","projection":"gpu_hadamard_prepared_grouped",
+            "capabilities":self.capabilities,
+            "host_visibility":"once_per_group","device_timing_scope":"matrix intervals exclude final batch HOST_READ barrier",
             "prepared_matrices":self.prepared,"gpu_timestamps":self.queries != vk::QueryPool::null(),
             "timestamp_valid_bits":self.timestamp_bits,"timestamp_period_ns":self.properties.limits.timestamp_period,
             "automatic_calibration":false,"scratch_mapping":"persistent"})
@@ -719,6 +805,9 @@ impl Gpu {
         let pipeline = self.stream_pipeline(shape.bits)?;
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
+        let result = self.mapped_buffer(shape.cols * 4)?;
+        let query_first =
+            projection_queries(self.prepared).context("EXL3 query range exhausted")?;
         let input = self.input.as_ref().context("GPU input unavailable")?;
         let rotated = self
             .rotated
@@ -750,7 +839,7 @@ impl Gpu {
             Dispatch {
                 input: output,
                 weights: &scales,
-                output,
+                output: &result,
                 params: [params[0], params[1], 1, shape.output as u32],
                 outputs: shape.cols,
                 groups: (shape.cols / 128) as u32,
@@ -774,33 +863,69 @@ impl Gpu {
             )?
         };
         // Recorded once; the serialized engine waits for the fence before any scratch reuse.
-        self.record_jobs(command, &sets, &jobs, vk::CommandBufferUsageFlags::empty())?;
+        self.record_jobs(
+            command,
+            &sets,
+            &jobs,
+            vk::CommandBufferUsageFlags::empty(),
+            Some(query_first),
+        )?;
         self.prepared += 1;
         Ok(Exl3Matrix {
             weights,
             _scales: scales,
+            output: result,
             shape,
             command,
+            query_first,
         })
     }
 
     pub fn project_exl3(&mut self, matrix: &Exl3Matrix, x: &[f32]) -> Result<Vec<f32>> {
+        self.project_exl3_batch(&[matrix], x)?
+            .pop()
+            .context("Missing EXL3 output")
+    }
+
+    pub fn project_exl3_batch(
+        &mut self,
+        matrices: &[&Exl3Matrix],
+        x: &[f32],
+    ) -> Result<Vec<Vec<f32>>> {
         ensure!(
-            Arc::ptr_eq(&matrix.weights.device, &self.device),
-            "Matrix belongs to another GPU"
+            valid_group_size(matrices.len()),
+            "EXL3 group requires 1–3 matrices"
         );
         ensure!(
-            x.len() == matrix.shape.input && x.iter().all(|v| v.is_finite()),
+            matrices
+                .iter()
+                .all(|m| Arc::ptr_eq(&m.weights.device, &self.device)),
+            "Matrix belongs to another GPU",
+        );
+        ensure!(
+            matrices.iter().all(|m| x.len() == m.shape.input) && x.iter().all(|v| v.is_finite()),
             "Invalid EXL3 input"
         );
+        ensure!(
+            matrices
+                .iter()
+                .enumerate()
+                .all(|(i, m)| matrices[..i].iter().all(|other| other.command != m.command)),
+            "Duplicate matrix in EXL3 group"
+        );
         self.upload(x)?;
-        self.submit(matrix.command, Instant::now())?;
+        let recording = Instant::now();
+        let mut commands: Vec<_> = matrices.iter().map(|m| m.command).collect();
+        commands.push(self.host_readback);
+        self.submit(&commands, recording)?;
+        for matrix in matrices {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
         let started = Instant::now();
-        let result = self
-            .output
-            .as_ref()
-            .context("GPU output unavailable")?
-            .read_f32(matrix.shape.output);
+        let result = matrices
+            .iter()
+            .map(|m| m.output.read_f32(m.shape.output))
+            .collect();
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
         result
     }
@@ -934,8 +1059,11 @@ impl Gpu {
             &self.descriptors,
             jobs,
             vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            None,
         )?;
-        self.submit(self.command, recording)
+        self.submit(&[self.command], recording)?;
+        self.collect_timestamps(None);
+        Ok(())
     }
 
     fn record_jobs(
@@ -944,6 +1072,7 @@ impl Gpu {
         sets: &[vk::DescriptorSet],
         jobs: &[Dispatch<'_>],
         flags: vk::CommandBufferUsageFlags,
+        phase_queries: Option<u32>,
     ) -> Result<()> {
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
@@ -962,16 +1091,39 @@ impl Gpu {
             .codebooks
             .as_ref()
             .context("GPU codebooks unavailable")?;
+        ensure!(
+            phase_queries.is_none() || jobs.len() == 3,
+            "Invalid EXL3 phase queries"
+        );
+        let query_first = phase_queries.unwrap_or(0);
+        let query_count = if phase_queries.is_some() { 4 } else { 2 };
+        ensure!(
+            query_first <= QUERY_COUNT - query_count,
+            "Invalid GPU query range"
+        );
         unsafe {
             let d = &self.device.raw;
             d.begin_command_buffer(command, &vk::CommandBufferBeginInfo::default().flags(flags))?;
+            // Scratch is shared between prepared command buffers in the same submission.
+            let scratch = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
+            d.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &scratch,
+                &[],
+                &[],
+            );
             if self.queries != vk::QueryPool::null() {
-                d.cmd_reset_query_pool(command, self.queries, 0, 2);
+                d.cmd_reset_query_pool(command, self.queries, query_first, query_count);
                 d.cmd_write_timestamp(
                     command,
                     vk::PipelineStageFlags::TOP_OF_PIPE,
                     self.queries,
-                    0,
+                    query_first,
                 );
             }
             for (index, job) in jobs.iter().enumerate() {
@@ -1021,25 +1173,35 @@ impl Gpu {
                         &[],
                     );
                 }
+                if phase_queries.is_some() && index < 2 && self.queries != vk::QueryPool::null() {
+                    d.cmd_write_timestamp(
+                        command,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        self.queries,
+                        query_first + index as u32 + 1,
+                    );
+                }
             }
-            let barriers = [vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::HOST_READ)];
-            d.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::HOST,
-                vk::DependencyFlags::empty(),
-                &barriers,
-                &[],
-                &[],
-            );
+            if phase_queries.is_none() {
+                let barriers = [vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::HOST_READ)];
+                d.cmd_pipeline_barrier(
+                    command,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &barriers,
+                    &[],
+                    &[],
+                );
+            }
             if self.queries != vk::QueryPool::null() {
                 d.cmd_write_timestamp(
                     command,
                     vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                     self.queries,
-                    1,
+                    query_first + query_count - 1,
                 );
             }
             d.end_command_buffer(command)?;
@@ -1047,7 +1209,7 @@ impl Gpu {
         Ok(())
     }
 
-    fn submit(&self, command: vk::CommandBuffer, recording: Instant) -> Result<()> {
+    fn submit(&self, commands: &[vk::CommandBuffer], recording: Instant) -> Result<()> {
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
@@ -1055,8 +1217,7 @@ impl Gpu {
         unsafe {
             let d = &self.device.raw;
             d.reset_fences(&[self.fence])?;
-            let commands = [command];
-            let submits = [vk::SubmitInfo::default().command_buffers(&commands)];
+            let submits = [vk::SubmitInfo::default().command_buffers(commands)];
             if let Err(err) = d.queue_submit(self.queue, &submits, self.fence) {
                 self.device.abandoned.store(true, Ordering::Relaxed);
                 bail!("Vulkan submit failed ({err:?}); restart the app");
@@ -1073,28 +1234,52 @@ impl Gpu {
                 self.device.abandoned.store(true, Ordering::Relaxed);
                 bail!("Vulkan dispatch failed ({err:?}); restart the app");
             }
-            if self.queries != vk::QueryPool::null() {
-                let mut ticks = [0u64; 2];
-                // Fence is complete; never introduce an unbounded query WAIT on a broken driver.
-                if d.get_query_pool_results(
-                    self.queries,
-                    0,
-                    &mut ticks,
-                    vk::QueryResultFlags::TYPE_64,
-                )
-                .is_ok()
-                    && let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits)
-                {
-                    let ns =
-                        (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
-                    self.record_profile(|p| {
-                        p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
-                        p.device_samples = p.device_samples.saturating_add(1);
-                    });
-                }
-            }
         }
         Ok(())
+    }
+    fn collect_timestamps(&self, phase_queries: Option<u32>) {
+        if self.queries == vk::QueryPool::null() {
+            return;
+        }
+        let mut ticks = [0u64; 4];
+        let count = if phase_queries.is_some() { 4 } else { 2 };
+        let started = Instant::now();
+        // Fence is complete; never introduce an unbounded query WAIT on a broken driver.
+        let result = unsafe {
+            self.device.raw.get_query_pool_results(
+                self.queries,
+                phase_queries.unwrap_or(0),
+                &mut ticks[..count],
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        self.record_profile(|p| {
+            p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started))
+        });
+        if result.is_err() {
+            return;
+        }
+        let mut durations = [0u64; 3];
+        for i in 0..count - 1 {
+            let Some(delta) = timestamp_delta(ticks[i], ticks[i + 1], self.timestamp_bits) else {
+                return;
+            };
+            durations[i] =
+                (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
+        }
+        self.record_profile(|p| {
+            let total = durations.iter().fold(0u64, |sum, v| sum.saturating_add(*v));
+            p.device_compute_ns = p.device_compute_ns.saturating_add(total);
+            p.device_samples = p.device_samples.saturating_add(1);
+            if phase_queries.is_some() {
+                p.device_exl3_input_ns = p.device_exl3_input_ns.saturating_add(durations[0]);
+                p.device_exl3_matvec_ns = p.device_exl3_matvec_ns.saturating_add(durations[1]);
+                p.device_exl3_output_ns = p.device_exl3_output_ns.saturating_add(durations[2]);
+                p.device_exl3_samples = p.device_exl3_samples.saturating_add(1);
+            } else {
+                p.device_other_ns = p.device_other_ns.saturating_add(total);
+            }
+        });
     }
 }
 
@@ -1174,6 +1359,147 @@ mod tests {
         assert_eq!(timestamp_delta(0, u64::MAX, 1), Some(1));
         assert_eq!(timestamp_delta(0, 0, 0), None);
         assert_eq!(timestamp_delta(0, 0, 65), None);
+        assert_eq!(projection_queries(0), Some(4));
+        assert_eq!(
+            projection_queries(MAX_EXL3_MATRICES - 1),
+            Some(QUERY_COUNT - 4)
+        );
+        assert_eq!(projection_queries(MAX_EXL3_MATRICES), None);
+        assert_eq!(projection_queries(usize::MAX), None);
+        for count in 0..=4 {
+            assert_eq!(valid_group_size(count), count > 0 && count < 4);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; independent projections share a submission without aliasing outputs or queries"]
+    fn grouped_projections_match_sequential_bit_exact_and_validate_before_submit() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut matrices = vec![];
+        for (i, (output, cols, bits)) in [(128, 128, 4usize), (256, 256, 5), (383, 384, 8)]
+            .into_iter()
+            .enumerate()
+        {
+            let packed = codec::pack(
+                &(0..256 * cols)
+                    .map(|n| (n * 137 + 31 + i * 47) as u16)
+                    .collect::<Vec<_>>(),
+                bits,
+            )
+            .unwrap();
+            let bytes: Vec<_> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let weights = gpu.buffer(&bytes).unwrap();
+            let shape = Exl3Shape {
+                input: 129,
+                output,
+                rows: 256,
+                cols,
+                bits: bits as u32,
+                codebook: i as u32,
+            };
+            matrices.push(
+                gpu.prepare_exl3(weights, shape, &[0.125; 256], &vec![-0.25; cols])
+                    .unwrap(),
+            );
+        }
+        assert!(
+            matrices
+                .windows(2)
+                .all(|w| w[0].query_first + 4 == w[1].query_first)
+        );
+        for repeat in 0..3 {
+            let x: Vec<_> = (0..129)
+                .map(|i| ((i * 7 % 31) as f32 - 15.) / 64. + repeat as f32 / 16.)
+                .collect();
+            let expected: Vec<_> = matrices
+                .iter()
+                .map(|m| gpu.project_exl3(m, &x).unwrap())
+                .collect();
+            assert!(expected.iter().all(|v| v.iter().any(|f| f.abs() > 0.001)));
+            for count in 1..=3 {
+                let group: Vec<_> = matrices[..count].iter().collect();
+                gpu.take_profile();
+                let before = gpu.submission_count();
+                let actual = gpu.project_exl3_batch(&group, &x).unwrap();
+                assert_eq!(gpu.submission_count() - before, 1);
+                assert_eq!(actual.len(), count);
+                for (a, b) in actual.iter().zip(&expected) {
+                    assert_eq!(
+                        a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                    );
+                }
+                let p = gpu.take_profile();
+                if gpu.queries != vk::QueryPool::null() {
+                    assert_eq!(p.device_samples, count as u64);
+                    assert_eq!(p.device_exl3_samples, count as u64);
+                    assert_eq!(
+                        p.device_compute_ns,
+                        p.device_exl3_input_ns + p.device_exl3_matvec_ns + p.device_exl3_output_ns
+                    );
+                    assert!(
+                        p.device_exl3_input_ns > 0
+                            && p.device_exl3_matvec_ns > 0
+                            && p.device_exl3_output_ns > 0
+                    );
+                    assert_eq!(p.device_other_ns, 0);
+                }
+            }
+            assert_eq!(
+                gpu.project_exl3_batch(&[&matrices[2], &matrices[0]], &x)
+                    .unwrap(),
+                [expected[2].clone(), expected[0].clone()]
+            );
+        }
+        let before = gpu.submission_count();
+        for group in [
+            vec![],
+            vec![&matrices[0], &matrices[0]],
+            vec![&matrices[0]; 4],
+        ] {
+            assert!(gpu.project_exl3_batch(&group, &[0.; 129]).is_err());
+        }
+        assert!(
+            gpu.project_exl3_batch(&[&matrices[0], &matrices[1]], &[0.; 128])
+                .is_err()
+        );
+        assert!(
+            gpu.project_exl3_batch(&[&matrices[0], &matrices[1]], &[f32::NAN; 129])
+                .is_err()
+        );
+        let weights = gpu.buffer(&[0; 8192]).unwrap();
+        let shape = Exl3Shape {
+            input: 128,
+            output: 128,
+            rows: 128,
+            cols: 128,
+            bits: 4,
+            codebook: 0,
+        };
+        let other_shape = gpu
+            .prepare_exl3(weights, shape, &[1.; 128], &[1.; 128])
+            .unwrap();
+        assert!(
+            gpu.project_exl3_batch(&[&matrices[0], &other_shape], &[0.; 129])
+                .is_err()
+        );
+        let mut other_gpu = Gpu::new().unwrap();
+        let weights = other_gpu.buffer(&[0; 8192]).unwrap();
+        let foreign = other_gpu
+            .prepare_exl3(weights, shape, &[1.; 128], &[1.; 128])
+            .unwrap();
+        assert!(
+            gpu.project_exl3_batch(&[&matrices[0], &foreign], &[0.; 129])
+                .is_err()
+        );
+        assert_eq!(gpu.submission_count(), before);
+        assert!(
+            gpu.project_exl3_batch(&[&matrices[0], &matrices[1]], &[0.; 129])
+                .unwrap()
+                .iter()
+                .flatten()
+                .all(|v| *v == 0.)
+        );
     }
 
     #[test]
@@ -1547,6 +1873,22 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::*;
+    #[kani::proof]
+    fn query_ranges_and_group_counts_are_bounded() {
+        let index: usize = kani::any();
+        let count: usize = kani::any();
+        let first = projection_queries(index);
+        assert_eq!(first.is_some(), index < MAX_EXL3_MATRICES);
+        if let Some(first) = first {
+            assert!(first >= 4 && first % 4 == 0 && first + 3 < QUERY_COUNT);
+            assert_eq!(first as usize / 4 - 1, index);
+        }
+        assert_eq!(valid_group_size(count), count >= 1 && count <= 3);
+        kani::cover!(index == MAX_EXL3_MATRICES - 1 && first == Some(QUERY_COUNT - 4));
+        kani::cover!(index == usize::MAX && first.is_none());
+        kani::cover!(count == 3 && valid_group_size(count));
+    }
+
     #[kani::proof]
     fn timestamp_wrapping_is_bounded_for_all_counter_widths() {
         let start: u64 = kani::any();

@@ -760,3 +760,81 @@
   pour la vitesse** faute de mesureS24. Aucun essai lancé encore encours.
   Fusiongraphe/prefillmatriciel, vrai checkpoint etnumériqueXclipse restent
   nonvérifiés/nonimplémentés ; aucun chiffre20tok/s ni gainpromis.
+
+#### Retour S24 sur12
+
+- Rapport sourcebd96714 conservé dans `docs/measurements/s24-bd96714-user.json` :
+  3,222052tok/s,19tokensdecode,16prompt (ancien13/13), thermique0 contre1,
+  154soumissions/token. Environ308,59msmodèle/token dont221,88msintervalleGPU
+  (71,90%),263,09msattentehost,7,58msCPUprojection et13,61msrecord/submit.
+  Attentehost etGPU se recouvrent : ne pas lesadditionner. L'amélioration
+  utilisateur2,198→3,222 est descriptive (+46,6%), sans campagnecomparable/
+  répétitions ; ne pas l'attribuer intégralement àun changement précis.
+
+### ANDROID-PERF-2026-11-06-13 — projections indépendantes groupées et ventilation GPU — préenregistré
+
+- Baseline sourcebd96714, arbre documentaire2e41efa ; rapports05..12 relus.
+  Nouveau motif : timestamps physiques prouvent un coûtGPU dominant, mais ne
+  distinguent pas Hadamard/matvec. Ne pas promettre qu'une réduction des fences
+  suffira à20tok/s. Pas de nouveau kernel numérique ni autotuning aveugle.
+- Changement prévu : grouper W1/W3 (24couches) et Q/K/V (11attentions) avec
+  une entrée commune, une soumission/fence pargroupe, mêmes commandes/kernels
+  et ordre numérique. Sortie dédiée persistante parmatrice ; barrières entre
+  commandes pour le scratch partagé. Cible mécanique154→108soumissions/token
+  du vrai modèle (22→15 pour fixture3couches), pas une promesse de débit.
+- Quatre timestamps distincts parmatrice préparée : entréeHadamard, dotEXL3,
+  sortieHadamard. Ranges distincts bornés pour éviter écrasement enbatch ;
+  barrières empêchant chevauchement d'intervalles comptés. Samples=commandes
+  mesurées, soumissions=fences : documenter la distinction. Échec de lecture
+  nonfatal, zéro valide seulement avecsamples. Ajouter capacités disponibles
+  subgroup/float16/coopmat enlecture seule, sans activer de nouveau backend.
+- Protocole avant prototype : batch1/2/3 contre appels séquentiels bitexact,
+  groupes mixtes/formesinvalides/propriétaires/NaN/overflow/réutilisation et
+  erreurs sans soumission. FixtureEngine128logits/caches/stop/contextetolérance
+  inchangée, compteurs réduits. Kani sur vraiscontrats bornes de groupes et
+  plagesquery, fmt/Clippyhost+ARM/SPIR-V/CIexact/APK. Contrôles ciblés puis
+  suite pertinente ; pas de GPU matérielMac ni vrai modèle local concurrent.
+- Budget sortie borné193×32768×4octets (<25,3Mo logiques au maximum), taille
+  effective selon sortiespaddées ; conserverbudgetGPU3Gio. Aucune mesureS24
+  avant nouvelAPK ; statut en cours, code nonmodifié lorsdu préenregistrement.
+
+#### Vérification13 en cours
+
+- Groupes1/2/3 à sortiesdistinctes et queriesdistinctes implémentés ; entrées
+  identiques et commandesuniques validées avant upload/soumission. Barrière
+  ALL_COMMANDS entrebuffers pour scratch et intervallesGPU. Suppression de
+  l'arrondiCPU redondant des sortiesEXL3 (postshaderdéjàFP16), headDenseconservé.
+- Les premiers testsbatch etfixtureEngine passent surMesa logiciel : batch
+  bitexact auxcommandes séquentielles,15soumissions au lieu22parétapefixture,
+  mêmes128logits àtoléranceinchangée. Aucune vitesseS24mesurée.
+- Avant contrôle de sensibilité : muter temporairement le compteur pour
+  compter lescommandes au lieu des soumissions ; le testbatch doit détecter
+  la confusion dèsgroupe2, puisrestaurationfinally et contrôlesaffectés.
+- Extension avantprototype : une seule barrière de visibilitéHOST_READ à la
+  fin du groupe (petitcommandbufferpréparé), plutôt qu'une parmatrice. Les
+  barrièresGPU descratch restent entre matrices. Phasesquery desmatrices
+  excluront cettebarrièrefinale ; attentehost l'inclut. Documenter ce périmètre
+  avant comparaisonfuture et vérifieroutputs aprèsfence, sansnouveaukernel.
+- Vérification de frontière supplémentaire prévue enCI : coucheKhronos et
+  sync-validation sur les deuxparcours batch/Engine existants, sans benchmark.
+  Vérifier chargementeffectifdelacouche et faireéchouer surVUID/SYNC-HAZARD.
+  Installationdansle joblogiciel existant, pasde dépendanceAPK/runtime.
+
+#### Résultats13 locaux avant publication
+
+- **Validé fonctionnellement localement** :19CPU/9Vulkan explicites surMesa,
+  mêmesoracles/tolérances ; nouveau batchbitexact1/2/3, sortiesdistinctes,
+  paramètres mixtes, réutilisation/erreurs ; fixture128logits22→15soumissions.
+  Mutationcompteur2au lieu1 détectée et restaurée enfinally,9testsfinauxpassent.
+- Kani cibléquery114obligations/3covers ; suiteCPU12harnais1119obligations/
+  26covers (troisformatstdinatteignables), propriétés/bornes dansle
+  [rapport](docs/android-grouped-projections-2026-11-06.md). Tentativeglobale
+  locale lancée pendantlamutation d'un compteurhorsslicedepreuve ; réception
+  deprovenance exacte attendue enCI surcommitfinal nonmuté. Pas de preuveGPU.
+- Clippystrict host/ARM64, fmt, actionlint etdiffcheck réussis ; code ettests
+  revus, shadernumérique inchangé. ValidationlayerCI/groupes+Engine ajoutée.
+  Logs `build/perf13-*` conservés, aucun benchmarkmatérielMac/S24 exécuté.
+- État : code local retenu prêtàpublier sousautorisationexistante, CI/APK
+  encoreàinspecter. **GainS24 nonmesuré/nonconcluant** ; pas de fusiongraphe
+  complète, prefillmatriciel ou backendFP16/coopmat livré. Aucun gainprévu
+  chiffré, hormisréductionmécanique descompteurs à108/token pourconfigcible.
