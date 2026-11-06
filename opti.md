@@ -736,3 +736,27 @@
   (non suivi lorsdu premierdiffcheck), sansimpactnumérique ; supprimée dans
   lecommit suivant. ClippyARM64 réussit aussi ; compilation/validationSPIR-V
   relancées aprèscettecorrectiondeformat. Premiercommitcec814c supersédé.
+
+#### Publication et clôture11/12
+
+- Source `bd9671479d01f3e251c10d106a08856c4191ea6e`,
+  [run42259603754](https://github.com/0xZKnw/mlxl3-android/actions/runs/42259603754) :
+  **cinqjobs réussis** inspectés,19CPU/8Vulkan/12UI,11Kani/1005obligations/
+  23covers (troisformatstdinatteignables). TestsJVM inchangésdepuiscache,
+  Clippyhost/ARM64, fmt, SPIR-V, lint, builds et signatureAPKvalidés. Ancien
+  runcec814c42259538294 annulé comme supersédé, pascompté commevalidé.
+- [Artefact13525355179](https://github.com/0xZKnw/mlxl3-android/actions/runs/42259603754/artifacts/13525355179) :
+  `debug/app-debug.apk`,33 965 868octets, SHA-256
+  `eb42fe3caf056f73cd6aa4ffe168e12196b09bbe1fe65cbdfe9fdcadf211b56e`.
+  DigestZIP/manifesteAPK, signaturev2, zipalign16K, deuxlibsARM64 etLOAD
+  moteur0x4000 vérifiés. MoteurSHA-256
+  `23cdb597886becdabae4fcb3030cb1d807effbc6629cb18f9422f3ae76d42fec`,
+  SHA source/marqueursnouveauchemin retrouvés dansle binaire. Assertionlocale
+  initialelibunique tropstricte corrigée pourAndroidX, pasunbugAPK.
+- [Rapport final](docs/android-exl3-rework-2026-11-06.md), donnéesutilisateur et
+  sourcesconservées ; logsCI `build/perf12-ci-*`, APK `build/apk-bd96714/`.
+  État **public/APKCI**, pas de release/installation. Recherche11 terminée ;
+  essai12 **validé fonctionnellement** danslesdomainesdécrits, **nonconcluant
+  pour la vitesse** faute de mesureS24. Aucun essai lancé encore encours.
+  Fusiongraphe/prefillmatriciel, vrai checkpoint etnumériqueXclipse restent
+  nonvérifiés/nonimplémentés ; aucun chiffre20tok/s ni gainpromis.

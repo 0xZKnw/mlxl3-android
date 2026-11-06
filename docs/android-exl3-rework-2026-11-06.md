@@ -136,3 +136,37 @@ Tous les contrôles Vulkan locaux utilisent Mesa logiciel, sans benchmark GPU
 matériel ni chargement du vrai checkpoint en concurrence avec l'autre chat.
 Le débit, la correction numérique du modèle complet4,49bpw et la stabilité
 Xclipse940 restent à mesurer sur le S24 après installation de l'APK.
+
+## Réception CI et APK
+
+Source livrée : `bd9671479d01f3e251c10d106a08856c4191ea6e`.
+[Run42259603754](https://github.com/0xZKnw/mlxl3-android/actions/runs/42259603754) :
+les cinqjobs terminés avec succès, résultats et logs inspectés. 19testsCPU,
+huitcontrôlesVulkan explicites, onzeharnaisKani/1 005obligations/23covers et
+douzetestsUI exécutés (six par écran). TestsJVM inchangés restaurés du cache
+Gradle, lint et buildsARM64/APK réussis. BenchmarkLUT facultatif sauté.
+Le premier runcec814c/42259538294 est **annulé**, supersédé par la correction
+de la ligneblancheEOF ; ce n'est pas une validation supplémentaire.
+
+[Artefact13525355179](https://github.com/0xZKnw/mlxl3-android/actions/runs/42259603754/artifacts/13525355179)
+:
+
+- ZIP :13 243 993octets, digestGitHub vérifié
+  `e1e859bdee96849fb2dd69997dc55f14214198274662b1dd648cee0b77c47a01`.
+- `debug/app-debug.apk` :33 965 868octets, SHA-256 vérifié contre
+  `SHA256SUMS` : `eb42fe3caf056f73cd6aa4ffe168e12196b09bbe1fe65cbdfe9fdcadf211b56e`.
+- SignatureAPK v2 vérifiée avecapksigner36.0.0 ; zipalign16K réussi.
+  Les deuxbibliothèques sontARM64 : moteur et AndroidXgraphicspath.
+  Première vérification decontenu tropstricte attendait une seulebibliothèque
+  et a rejeté AndroidX ; assertioncorrigée, contrôlerefait réussi. Aucun
+  défaut de l'APK. `llvm-readelf` confirme touslessegmentsLOAD moteur à0x4000.
+- Moteur embarqué SHA-256 :
+  `23cdb597886becdabae4fcb3030cb1d807effbc6629cb18f9422f3ae76d42fec` ;
+  SHA source et marqueurs `register_window_16` /
+  `gpu_hadamard_prepared_commands` retrouvés dans le binaire.
+
+APK local : `build/apk-bd96714/debug/app-debug.apk`. Logs CI conservés dans
+`build/perf12-ci-{apk,proofs,vulkan,ui-small,ui-phone}.log` ; fichiers temporaires
+nonversionnés. État : code public et APKCI, aucune release ni installation
+téléphone. Recherche terminée ; correction fonctionnelle validée danslesdomaines
+ci-dessus, performanceS24 **nonmesurée/nonconcluante**.
