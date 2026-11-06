@@ -535,7 +535,7 @@
   synchronisations et mémoire à établir, aucune cause exclusive affirmée.
   Décision : **rejeté comme accélération livrée**, pas de gain revendiqué.
 
-### ANDROID-PERF-2026-11-06-09 — diagnostic de bout en bout avant nouvelle optimisation — préenregistré
+### ANDROID-PERF-2026-11-06-09 — diagnostic de bout en bout — recherche terminée, attribution S24 non vérifiée
 
 - Reprise : utilisateur rapporte1,7tok/s surS24/EXL3 4,49bpw, compare à34tok/s
   sous llama.cpp/Termux surS25Ultra. Modèle/GGUF/backend de la comparaison à
@@ -558,7 +558,7 @@
   prompt ; source-level Rust/Kani pertinent, checks CI/APK exact. Recherche
   et instrumentation ne constituent pas une validation de20tok/s.
 
-### ANDROID-PERF-2026-11-06-10 — lot coûts CPU/driver et diagnostic — préenregistré
+### ANDROID-PERF-2026-11-06-10 — lot coûts CPU/driver et diagnostic — validé fonctionnellement en CI, gain S24 non mesuré
 
 - Demande explicite : plusieurs défauts dans un lot, vérification rapide puis
   pushAPK. Baseline18bd2b2/85e9db1, retour1,7tok/s. Essai09 recherche en cours,
@@ -610,3 +610,26 @@
   ces domaines**, codeprêtàpublier sousautorisationexistante, CI/APK à inspecter.
   **Aucun gain S24 mesuré**, causephysique de1,7tok/s nonconfirmée ; pas de
   preuve complète GPU/FFI/Android. Pas de benchmark matériel concurrent.
+
+#### Publication et réception du lot10
+
+- Source `4c07189b1676b6407a0db06f6038166b1b8f7985`,
+  [run42251895779](https://github.com/0xZKnw/mlxl3-android/actions/runs/42251895779) :
+  **cinq jobs réussis** inspectés. 19testsCPU, sept contrôlesVulkan explicites,
+  douze testsUI (sixparécran, dont copieclipboard) ; neuf harnaisKani réussis,
+  876obligations/17covers, trois obligationsformatinternes inatteignables.
+  Le ciblé190 est aussi exécuté seul, pas une dixième preuve. Benchmark
+  historique facultatif sauté ; aucune nouvelle vitesse de modèle mesurée.
+- [Artefact13520937307](https://github.com/0xZKnw/mlxl3-android/actions/runs/42251895779/artifacts/13520937307),
+  `debug/app-debug.apk`, **33 970 884 octets**, SHA-256
+  `7ea37b96552d97cd221339af182944a40ecf76c5e8ed41d02c6e8ea258eb07d9`.
+  ZIP et APK conformes auxdigests/manifeste, signaturedebug, zipalign16K et
+  bibliothèquesARM64 vérifiés. SHA source du diagnostic retrouvé dans le moteur
+  embarqué ; natif SHA-256
+  `f39633fa909eae1e94373e61a97d0550441df3a86f988d024a56fa1d33cccda8`.
+- État final : **code public/APK CI**, pas de release ni installation téléphone.
+  Lot validé fonctionnellement dans ces domaines ; débit réel, mémoire GPU
+  physique, impact thermique et causalitéS24 restent nonmesurés/nonconcluants.
+  Recherche09 terminée sursources, diagnostic disponible ; aucun essai lancé
+  encore en cours. Logs temporaires `build/perf10-ci-{apk,proofs,vulkan}.log`,
+  APK `build/apk-4c07189/debug/app-debug.apk`, tests et rapports conservés.

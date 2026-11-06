@@ -101,3 +101,15 @@ Temporary local evidence: ignored `build/perf10-*`. Source tests, regression
 oracle and reports are tracked. S24 throughput, hardware mapping/memory effects,
 full-checkpoint numerical parity and thermal causality remain unverified.
 Exact source/CI/APK receipt is recorded in `opti.md`.
+
+Published source: `4c07189b1676b6407a0db06f6038166b1b8f7985`.
+[Run 42251895779](https://github.com/0xZKnw/mlxl3-android/actions/runs/42251895779)
+passes all five jobs: 19 CPU tests, seven Vulkan checks, twelve UI journeys and
+nine Kani harnesses (876 obligations, 17 covers; three unreachable formatting
+checks). Optional historical benchmark skipped. No S24 speed result implied.
+
+[APK artifact](https://github.com/0xZKnw/mlxl3-android/actions/runs/42251895779/artifacts/13520937307):
+`debug/app-debug.apk`, 33,970,884 bytes, SHA-256
+`7ea37b96552d97cd221339af182944a40ecf76c5e8ed41d02c6e8ea258eb07d9`.
+Downloaded ZIP/APK hashes, signature, 16 KiB zip alignment, ARM64 packaging and
+the embedded diagnostic source SHA were checked. No phone installation/release.
