@@ -2355,6 +2355,31 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Vulkan; independent prepared gate plans share scratch"]
+    fn resident_gate_plans_preserve_weights_across_reuse() {
+        let mut gpu = Gpu::new().unwrap();
+        let x: Vec<f32> = (0..128).map(|i| (i as f32 - 64.) / 128.).collect();
+        let mut plans = Vec::new();
+        let mut expected = Vec::new();
+        for dtype in 0..=1 {
+            let bytes: Vec<u8> = (0..128 * 16)
+                .flat_map(|i| {
+                    let value = (i as f32 % 37. - 18.) / 64.;
+                    (if dtype == 0 { half::f16::from_f32(value).to_bits() } else { half::bf16::from_f32(value).to_bits() }).to_le_bytes()
+                })
+                .collect();
+            let weights = gpu.buffer(&bytes).unwrap();
+            expected.push(gpu.multiply(&weights, &x, 16, 0, dtype).unwrap());
+            plans.push(gpu.prepare_dense_gate(weights, 128, 16, dtype).unwrap());
+        }
+        for _ in 0..3 {
+            for (plan, expected) in plans.iter().zip(&expected) {
+                assert_eq!(&gpu.forward_dense_gate(plan, &x).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
     fn cooperative_k4_load_windows_cover_every_lane_and_wrap() {
         let mut requested = [0u32; 32];
         for lane in 0..32u32 {
