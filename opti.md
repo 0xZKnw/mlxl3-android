@@ -362,7 +362,7 @@
   Code intégré/public, correction vérifiée dans ces domaines ; gain S24 **non
   mesuré**, performance réelle **non concluante**. Logs `build/issue1-ci38f.log`.
 
-### ANDROID-PERF-2026-11-06-07 — recherche et projections indépendantes groupées — validé localement, CI à inspecter
+### ANDROID-PERF-2026-11-06-07 — recherche et projections indépendantes groupées — validé fonctionnellement, gain S24 non mesuré
 
 - Reprise demandée : utilisateur rapporte2,7tok/s sur S24/4,49bpw et veut des
   pistesplusfortes, rechercheInternet autorisée. APKexact de la mesure non
@@ -407,3 +407,32 @@
 - État : correction **validée localement**, code local prêt à publier sous
   autorisation existante ; gain S24 **non mesuré/non concluant**. Aucun essai
   physique ni campagne GPU concurrente. CI exacte/APK à inspecter après push.
+
+#### Publication et réception de l'essai 07
+
+- Source `d7116bdc584e29fc8a2c0bafb90f5e4a4d2aa6ec` poussée sur main ;
+  [run 42239998740](https://github.com/0xZKnw/mlxl3-android/actions/runs/42239998740)
+  terminé **avec cinq jobs réussis** : APK, Vulkan, preuves et UI deux tailles.
+  15 tests CPU passent ; six tests fonctionnels Vulkan passent explicitement ;
+  cinq tests UI passent sur chacune des deux tailles d'émulateur (dix au total).
+  Benchmark facultatif volontairement sauté, aucun chiffre de vitesse ajouté.
+  Sept harnais Kani passent : 581 obligations, 13 covers, deux obligations
+  internes format inatteignables. Le harnais ciblé131 est exécuté séparément
+  puis dans cette suite ; ne pas le compter comme une huitième preuve.
+- Job APK **2min43**, conditions de cache/réseau propres à ce run ; aucune
+  accélération de CI reproductible inférée. Artefact
+  [13513837166](https://github.com/0xZKnw/mlxl3-android/actions/runs/42239998740/artifacts/13513837166),
+  fichier `debug/app-debug.apk`, **34 012 388 octets**, SHA-256
+  `dd8d5e23741470eece78896e66814012f1768d2723e10730c5ca4d51f75e5df4`
+  conforme au manifeste CI. Signature APK et alignement16K vérifiés ; moteur
+  ARM64 embarqué SHA-256
+  `a1b7207bb570ae08d04fbabd3dfd276036ce1186781b59ed13bb77a036260235`.
+  Premier contrôle d'archive trop strict rejetant aussi la bibliothèque
+  AndroidX de Compose ; corrigé vers la présence du moteur et l'ABI ARM64 de
+  toutes les bibliothèques. Contrôles relancés avec succès, aucun défaut APK.
+- État final : **code public/APK CI**, vérification fonctionnelle validée dans
+  les domaines ci-dessus ; gain de débit **non mesuré/non concluant** sur S24.
+  Pas de release, installation téléphone ni essai encore en cours. Sources et
+  priorités suivantes dans [le rapport](docs/android-speed-2026-11-06.md).
+  Logs temporaires `build/independent-ci-{apk,proofs,vulkan}.log`, APK local
+  `build/apk-d7116bd/debug/app-debug.apk` ; oracle permanent conservé.

@@ -3,6 +3,9 @@
 The user reports **2.7 tokens/s on a Galaxy S24 Exynos with EXL3 4.49 bpw**.
 The exact APK, prompt, context, driver, temperature and power conditions of that
 measurement are unknown. There is no controlled on-device before/after result.
+Samsung identifies the [Exynos 2400 GPU](https://semiconductor.samsung.com/processor/mobile-processor/exynos-2400/)
+as Xclipse 940, based on AMD RDNA 3. Desktop RDNA guidance is a useful starting
+point, but does not establish mobile-driver capabilities or performance.
 
 ## Findings and implementation
 
@@ -75,6 +78,18 @@ Local raw logs are in ignored `build/independent-*`; they are temporary evidence
 not guaranteed permanent downloads. The regression oracle and tests are tracked.
 No S24 throughput, thermal behaviour, peak RAM or full-checkpoint numerical
 parity has been measured for this change. CI receipt is recorded in `opti.md`.
+
+Published source: `d7116bdc584e29fc8a2c0bafb90f5e4a4d2aa6ec`.
+[GitHub run 42239998740](https://github.com/0xZKnw/mlxl3-android/actions/runs/42239998740)
+completed successfully in all five jobs: APK, Vulkan, proofs and two UI sizes.
+The seven CPU proof harnesses passed (581 obligations, 13 covers; two unreachable
+standard-library formatting obligations); ten UI tests passed. APK build job:
+2m43s, without claiming a reproducible CI speedup.
+[APK artifact](https://github.com/0xZKnw/mlxl3-android/actions/runs/42239998740/artifacts/13513837166):
+`debug/app-debug.apk`, 34,012,388 bytes, SHA-256
+`dd8d5e23741470eece78896e66814012f1768d2723e10730c5ca4d51f75e5df4`.
+Downloaded bytes match the CI manifest; APK signature, 16 KiB zip alignment and
+ARM64 native-library packaging were checked. No phone installation or release.
 
 ## Next candidates, not implemented or measured here
 
