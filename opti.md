@@ -838,3 +838,27 @@
   encoreàinspecter. **GainS24 nonmesuré/nonconcluant** ; pas de fusiongraphe
   complète, prefillmatriciel ou backendFP16/coopmat livré. Aucun gainprévu
   chiffré, hormisréductionmécanique descompteurs à108/token pourconfigcible.
+
+#### Publication et clôture13
+
+- Source `e554439c975f31f556ab86677252173140e10cf2`,
+  [run42287156602](https://github.com/0xZKnw/mlxl3-android/actions/runs/42287156602) :
+  **cinqjobs réussis** inspectés.19CPU/9Vulkan/12UI ; deuxparcoursbatch+Engine
+  répétés sousKhronosVVL1.3.275.0-1 avecsyncvalidation, chargement effectif et
+  absenceVUID/SYNC-HAZARD vérifiés. Kani surcommitexactnonmuté :12harnais,
+  1119obligations/26covers, troisformatstdinatteignables. Ciblémémoire190
+  préalable pas comptédeuxfois. JVM inchangésdepuiscache, Clippyhost/ARM64,
+  fmt/SPIR-V/lint/builds réussis ; benchmark historique facultatif sauté.
+- [Artefact13538461133](https://github.com/0xZKnw/mlxl3-android/actions/runs/42287156602/artifacts/13538461133),
+  `debug/app-debug.apk`,33 998 148octets, SHA-256
+  `70b19b8122140d02a21ceddbbdaa8fcfa3f3eed88da24f9a6988152c66ffd2b5`.
+  ZIPdigest/manifest, signaturev2, zipalign16K etlibsARM64 vérifiés ; moteur
+  SHA-256 `945e18648c78f6bbab546b1a1b6d0634f5f2bd77bcc703ce4d1e5e00e4b9e2c8`,
+  LOAD0x4000, sourceSHA etmarqueurs nouveauchemin retrouvés dansle binaire.
+- [Rapportfinal](docs/android-grouped-projections-2026-11-06.md), JSONphysique
+  bd96714 etpreuves conservés. Logs `build/perf13-*`, APK `build/apk-e554439/` ;
+  [logsynchronisation](https://github.com/0xZKnw/mlxl3-android/actions/runs/42287156602/artifacts/13538735512).
+  État **public/APKCI**, pas de release/installation. Essai13 **validé
+  fonctionnellement** danslesdomainesdécrits, **nonconcluant pourvitesseS24**.
+  Aucun essai lancé encore en cours. Pleincheckpoint, driverXclipse, effet
+  physique desgroupes ettempsphases restent àmesurer ; pas de promesse20tok/s.

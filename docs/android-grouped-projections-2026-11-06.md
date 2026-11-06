@@ -116,3 +116,40 @@ leurs résultats exacts sont à consigner après le run.
 DébitS24 de cetteversion, pleincheckpoint/logits/états1.7B, stabilitéXclipse,
 RAM physique/thermique nonmesurés ici. Aucune promesse20tok/s ; le calculGPU
 reste le poste principal à qualifier avec le prochain diagnostic de phases.
+
+## Réception CI et APK
+
+Source `e554439c975f31f556ab86677252173140e10cf2`,
+[run42287156602](https://github.com/0xZKnw/mlxl3-android/actions/runs/42287156602)
+terminé : **cinqjobs réussis**, résultats et logs inspectés.19CPU, neufcontrôles
+Vulkan usuels, batch+Engine répétés souscoucheKhronos, douzetestsUI (six par
+écran). SuiteKani du commit exact :12harnais,1119obligations/26covers,
+troisformatstdinatteignables ; ciblémémoire190 exécuté aussi en préalable,
+pas compté comme un treizièmeharnais. TestsJVM inchangés restaurés du cache
+Gradle, lint et compilationshost/ARM64/APK réussis. Benchmark facultatif sauté.
+
+KhronosValidationLayers1.3.275.0-1 installé ; couche effectivement chargée
+(marqueurloader contrôlé), validation de synchronisation activée par
+`VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`.
+AucunVUID niSYNC-HAZARD dans les deuxparcours contrôlés. Log dédié dans
+[l'artefact13538735512](https://github.com/0xZKnw/mlxl3-android/actions/runs/42287156602/artifacts/13538735512).
+Ces tests dynamiques logiciels ne prouvent pas la synchronisation du piloteS24.
+
+[APK artefact13538461133](https://github.com/0xZKnw/mlxl3-android/actions/runs/42287156602/artifacts/13538461133) :
+
+- ZIP :13 256 586octets, digestGitHub vérifié
+  `995381b0c059b212aabbbdcd7bfc603d0fa7d02a851db465085997ce375f04ea`.
+- `debug/app-debug.apk` :33 998 148octets, SHA-256 contreSHA256SUMS
+  `70b19b8122140d02a21ceddbbdaa8fcfa3f3eed88da24f9a6988152c66ffd2b5`.
+- Signaturev2 vérifiée avecapksigner36.0.0, zipalign16K réussi, deuxlibsARM64
+  (moteur/AndroidXgraphicspath), segmentsLOAD moteur alignés0x4000.
+- MoteurSHA-256 :
+  `945e18648c78f6bbab546b1a1b6d0634f5f2bd77bcc703ce4d1e5e00e4b9e2c8`.
+  SHA source, marqueur `gpu_hadamard_prepared_grouped` et nouvellesphases
+  retrouvés dans le binaire embarqué.
+
+APK local `build/apk-e554439/debug/app-debug.apk`, logsCI
+`build/perf13-ci-{apk,proofs,vulkan,ui-small,ui-phone}.log`, nonversionnés.
+État **public/APKCI**, aucune release ni installationtéléphone. Essai clos
+fonctionnellement dans les domaines décrits ; vitesseS24 **nonmesurée et
+nonconcluante** jusqu'au prochain essai physique. Aucun essai local encore en cours.
