@@ -110,6 +110,14 @@ pub(crate) struct DenseHeadPlan {
     command: vk::CommandBuffer,
 }
 
+pub(crate) struct DenseGatePlan {
+    device: Arc<Device>,
+    _weights: Buffer,
+    input_len: usize,
+    outputs: usize,
+    command: vk::CommandBuffer,
+}
+
 fn timestamp_delta(start: u64, end: u64, bits: u32) -> Option<u64> {
     match bits {
         1..=63 => Some(end.wrapping_sub(start) & ((1u64 << bits) - 1)),
@@ -1362,14 +1370,51 @@ impl Gpu {
         result
     }
 
+    pub(crate) fn prepare_dense_gate(
+        &mut self,
+        weights: Buffer,
+        input_len: usize,
+        outputs: usize,
+        dtype: u32,
+    ) -> Result<DenseGatePlan> {
+        let params = self.validate_projection(&weights, &vec![0.; input_len], outputs, 0, dtype)?;
+        if self.gate_input.is_none() {
+            let input = self.scratch_buffer()?;
+            let output = self.scratch_buffer()?;
+            self.gate_input = Some(input);
+            self.gate_output = Some(output);
+        }
+        let command = self.prepare_operator(Dispatch {
+            input: self.gate_input.as_ref().context("Gate input unavailable")?,
+            weights: &weights,
+            output: self.gate_output.as_ref().context("Gate output unavailable")?,
+            params,
+            outputs,
+            groups: dense_groups(outputs).context("Invalid gate groups")?,
+            groups_y: 1,
+            pipeline: self.dense,
+            barrier_after: false,
+        })?;
+        Ok(DenseGatePlan { device: self.device.clone(), _weights: weights, input_len, outputs, command })
+    }
+
+    pub(crate) fn forward_dense_gate(&self, gate: &DenseGatePlan, x: &[f32]) -> Result<Vec<f32>> {
+        ensure!(Arc::ptr_eq(&gate.device, &self.device) && x.len() == gate.input_len && x.iter().all(|v| v.is_finite()), "Invalid gate input");
+        let input = self.gate_input.as_ref().context("Gate input unavailable")?;
+        let output = self.gate_output.as_ref().context("Gate output unavailable")?;
+        let bytes = unsafe { std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x)) };
+        input.write(bytes)?;
+        self.submit_graph(&[gate.command], Instant::now())?;
+        self.collect_gate_interval();
+        output.read_f32(gate.outputs)
+    }
+
     /// Submit independent Q/K/V projections and a dense attention gate together.
     /// The gate has its own FP16-rounded input buffer; EXL3 still receives x unchanged.
     pub(crate) fn project_exl3_with_dense_gate(
         &mut self,
         matrices: &[&Exl3Matrix],
-        gate_weights: &Buffer,
-        gate_outputs: usize,
-        gate_dtype: u32,
+        gate: &DenseGatePlan,
         x: &[f32],
     ) -> Result<(Vec<Vec<f32>>, Vec<f32>)> {
         ensure!(valid_group_size(matrices.len()), "Invalid QKV group size");
@@ -1377,7 +1422,8 @@ impl Gpu {
             matrices
                 .iter()
                 .all(|m| Arc::ptr_eq(&m.weights.device, &self.device) && x.len() == m.shape.input)
-                && Arc::ptr_eq(&gate_weights.device, &self.device)
+                && Arc::ptr_eq(&gate.device, &self.device)
+                && x.len() == gate.input_len
                 && x.iter().all(|v| v.is_finite()),
             "Invalid grouped attention input or device"
         );
@@ -1389,14 +1435,7 @@ impl Gpu {
             "Duplicate matrix in QKV group"
         );
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
-        let params =
-            self.validate_projection(gate_weights, &rounded, gate_outputs, 0, gate_dtype)?;
-        if self.gate_input.is_none() {
-            let input = self.scratch_buffer()?;
-            let output = self.scratch_buffer()?;
-            self.gate_input = Some(input);
-            self.gate_output = Some(output);
-        }
+        ensure!(rounded.iter().all(|v| v.is_finite()), "Invalid rounded gate input");
         self.upload(x)?;
         let input = self.gate_input.as_ref().context("Gate input unavailable")?;
         let output = self
@@ -1411,30 +1450,8 @@ impl Gpu {
         };
         input.write(bytes)?;
         let recording = Instant::now();
-        unsafe {
-            self.device
-                .raw
-                .reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
-        }
-        self.record_jobs(
-            self.command,
-            &self.descriptors,
-            &[Dispatch {
-                input,
-                weights: gate_weights,
-                output,
-                params,
-                outputs: gate_outputs,
-                groups: dense_groups(gate_outputs).context("Invalid gate groups")?,
-                groups_y: 1,
-                pipeline: self.dense,
-                barrier_after: false,
-            }],
-            vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-            Some(2),
-        )?;
         let mut commands: Vec<_> = matrices.iter().map(|m| m.command).collect();
-        commands.push(self.command);
+        commands.push(gate.command);
         self.submit_graph(&commands, recording)?;
         for matrix in matrices {
             self.collect_timestamps(Some(matrix.query_first));
@@ -1445,7 +1462,7 @@ impl Gpu {
             .iter()
             .map(|m| m.output.read_f32(m.shape.output))
             .collect::<Result<Vec<_>>>()?;
-        let gate = output.read_f32(gate_outputs)?;
+        let gate = output.read_f32(gate.outputs)?;
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
         Ok((qkv, gate))
     }
@@ -2305,9 +2322,10 @@ mod tests {
         let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
         let expected_qkv = gpu.project_exl3_batch(&[&q, &k, &v], &x).unwrap();
         let expected_gate = gpu.multiply(&weights, &rounded, 16, 0, 0).unwrap();
+        let plan = gpu.prepare_dense_gate(weights, 128, 16, 0).unwrap();
         let before = gpu.submission_count();
         let (actual_qkv, actual_gate) = gpu
-            .project_exl3_with_dense_gate(&[&q, &k, &v], &weights, 16, 0, &x)
+            .project_exl3_with_dense_gate(&[&q, &k, &v], &plan, &x)
             .unwrap();
         assert_eq!(gpu.submission_count() - before, 1);
         assert_eq!(actual_qkv, expected_qkv);

@@ -1,7 +1,7 @@
 use crate::{
     codec::{self, Codebook},
     math,
-    vulkan::{Buffer, DenseHeadPlan, Exl3Matrix, Exl3Shape, Gpu},
+    vulkan::{Buffer, DenseGatePlan, DenseHeadPlan, Exl3Matrix, Exl3Shape, Gpu},
 };
 use anyhow::{Context, Result, ensure};
 use half::{bf16, f16};
@@ -161,6 +161,7 @@ impl Weights {
 enum Storage {
     Exl3(Exl3Matrix),
     Head(DenseHeadPlan),
+    Gate(DenseGatePlan),
     Dense {
         chunks: Vec<(Buffer, usize)>,
         dtype: u32,
@@ -176,7 +177,7 @@ impl Linear {
     pub(crate) fn into_exl3(self) -> Result<Exl3Matrix> {
         match self.storage {
             Storage::Exl3(matrix) => Ok(matrix),
-            Storage::Dense { .. } | Storage::Head(_) => {
+            Storage::Dense { .. } | Storage::Head(_) | Storage::Gate(_) => {
                 anyhow::bail!("GPU resident operator requires EXL3 projections")
             }
         }
@@ -195,7 +196,7 @@ impl Linear {
             .iter()
             .map(|l| match &l.storage {
                 Storage::Exl3(matrix) => Ok(matrix),
-                Storage::Dense { .. } | Storage::Head(_) => {
+                Storage::Dense { .. } | Storage::Head(_) | Storage::Gate(_) => {
                     anyhow::bail!("Grouped projections require EXL3 weights")
                 }
             })
@@ -212,20 +213,18 @@ impl Linear {
         x: &[f32],
     ) -> Result<([Vec<f32>; 3], Vec<f32>)> {
         ensure!(gate.input == x.len(), "Gate input shape mismatch");
-        if let Storage::Dense { chunks, dtype } = &gate.storage
-            && let [(weights, rows)] = chunks.as_slice()
-        {
+        if let Storage::Gate(plan) = &gate.storage {
             let matrices = qkv
                 .iter()
                 .map(|l| match &l.storage {
                     Storage::Exl3(matrix) => Ok(matrix),
-                    Storage::Dense { .. } | Storage::Head(_) => {
+                    Storage::Dense { .. } | Storage::Head(_) | Storage::Gate(_) => {
                         anyhow::bail!("Grouped projections require EXL3 weights")
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
             let (values, mut gate_values) =
-                gpu.project_exl3_with_dense_gate(&matrices, weights, *rows, *dtype, x)?;
+                gpu.project_exl3_with_dense_gate(&matrices, plan, x)?;
             gate_values.iter_mut().for_each(|v| *v = math::half(*v));
             ensure!(
                 gate_values.len() == gate.output && gate_values.iter().all(|v| v.is_finite()),
@@ -329,6 +328,9 @@ impl Linear {
             }
             if name == "lm_head" {
                 Storage::Head(gpu.prepare_dense_head(chunks, input, dtype)?)
+            } else if name.ends_with(".self_attn.gate_proj") && chunks.len() == 1 {
+                let (weights, rows) = chunks.pop().expect("one gate chunk");
+                Storage::Gate(gpu.prepare_dense_gate(weights, input, rows, dtype)?)
             } else {
                 Storage::Dense { chunks, dtype }
             }
@@ -351,6 +353,10 @@ impl Linear {
         let mut result = match &self.storage {
             // GPU post-Hadamard already enforces the FP16 boundary and finite output.
             Storage::Exl3(matrix) => return gpu.project_exl3(matrix, x),
+            Storage::Gate(plan) => {
+                let x: Vec<_> = x.iter().copied().map(math::half).collect();
+                gpu.forward_dense_gate(plan, &x)?
+            }
             Storage::Head(plan) => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();
                 gpu.record_profile(|p| {
