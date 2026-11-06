@@ -45,7 +45,7 @@ jobs:
           cargo fmt --manifest-path engine/Cargo.toml --check
           cargo clippy --manifest-path engine/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path engine/Cargo.toml --locked
-          find engine/target/debug/build -path '*/out/*.spv' -exec "$ANDROID_NDK_HOME/shader-tools/linux-x86_64/spirv-val" --target-env vulkan1.1 {} \;
+          find engine/target/debug/build -path '*/out/*.spv' -print0 | xargs -0 -r -n1 "$ANDROID_NDK_HOME/shader-tools/linux-x86_64/spirv-val" --target-env vulkan1.1
       - name: Build ARM64 engine
         run: |
           cargo clippy --manifest-path engine/Cargo.toml --locked --lib --target aarch64-linux-android -- -D warnings
@@ -105,6 +105,7 @@ jobs:
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::prepared_projection -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::resident_ -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::persistent_scratch -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
@@ -118,6 +119,7 @@ jobs:
           dpkg-query -W vulkan-validationlayers
           {
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
+            cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::resident_ -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
           } 2>&1 | tee synchronization-validation.log
           if grep -E 'Validation Error|VUID-|SYNC-HAZARD' synchronization-validation.log; then exit 1; fi

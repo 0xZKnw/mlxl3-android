@@ -1,0 +1,106 @@
+{
+  "provenance": "Selected exact fields transcribed from user S24 report; not the full original JSON and not a controlled A/B benchmark.",
+  "source_sha": "45cc54a9e1cebabb585c205b9ed5ad86a2f2ec37",
+  "model": "LFM3-1.7B EXL3, user nominal 4.49 bpw",
+  "device": "Samsung SM-S921B / Xclipse 940 / SPAL 25.3.3 git 9d9e5e5dc2",
+  "decode_seconds": 3.328133945,
+  "decode_tokens": 13,
+  "decode_tokens_per_second": 3.9060927879812244,
+  "decode_submissions": 1404,
+  "prompt_tokens": 13,
+  "prefill_seconds": 3.021822852,
+  "prefill_submissions": 1392,
+  "decode": {
+    "model_ns": 3303843946,
+    "wait_ns": 2829821369,
+    "device_compute_ns": 1881853115,
+    "device_exl3_input_ns": 36199976,
+    "device_exl3_matvec_ns": 1328623002,
+    "device_exl3_output_ns": 17788922,
+    "device_other_ns": 499241215,
+    "head_ns": 543173987,
+    "record_submit_ns": 143146022,
+    "readback_ns": 35411986,
+    "normalization_ns": 68973087,
+    "activation_ns": 64767064,
+    "attention_cpu_ns": 44266407,
+    "convolution_cpu_ns": 43548987,
+    "query_read_failures": 0
+  },
+  "subgroup_size": 64,
+  "subgroup_size_control": {
+    "min": 32,
+    "max": 64,
+    "supported": true,
+    "required_stages": 32
+  },
+  "native_codebook_self_test": {
+    "status": "verified_bit_exact",
+    "checked_values": 393216,
+    "lanes_tested": 2
+  },
+  "environment_before": {
+    "available_ram_bytes": 1278246912,
+    "total_ram_bytes": 7574827008,
+    "app_pss_kib": 1985283,
+    "thermal_status": 0,
+    "power_save": false
+  },
+  "environment_after": {
+    "available_ram_bytes": 1284644864,
+    "app_pss_kib": 1906544,
+    "thermal_status": 0
+  },
+  "decode_projection_groups": [
+    {
+      "matrices": 22,
+      "input": 2048,
+      "output": 512,
+      "bits": 6,
+      "codebook": 1,
+      "packed_bytes_per_matrix": 786432,
+      "samples": 286,
+      "matvec_ns": 38141739
+    },
+    {
+      "matrices": 35,
+      "input": 2048,
+      "output": 2048,
+      "bits": 6,
+      "codebook": 1,
+      "packed_bytes_per_matrix": 3145728,
+      "samples": 455,
+      "matvec_ns": 157750645
+    },
+    {
+      "matrices": 13,
+      "input": 2048,
+      "output": 6144,
+      "bits": 4,
+      "codebook": 1,
+      "packed_bytes_per_matrix": 6291456,
+      "samples": 169,
+      "matvec_ns": 130286799
+    },
+    {
+      "matrices": 48,
+      "input": 2048,
+      "output": 7680,
+      "bits": 4,
+      "codebook": 1,
+      "packed_bytes_per_matrix": 7864320,
+      "samples": 624,
+      "matvec_ns": 605162283
+    },
+    {
+      "matrices": 24,
+      "input": 7680,
+      "output": 2048,
+      "bits": 5,
+      "codebook": 1,
+      "packed_bytes_per_matrix": 9830400,
+      "samples": 312,
+      "matvec_ns": 397281536
+    }
+  ]
+}

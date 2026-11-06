@@ -1,6 +1,6 @@
 use crate::{
     math,
-    vulkan::Gpu,
+    vulkan::{ConvPlan, Gpu, MlpPlan},
     weights::{Linear, Weights},
 };
 use anyhow::{Context, Result, ensure};
@@ -147,10 +147,7 @@ impl Config {
 }
 
 struct Conv {
-    input: Linear,
-    output: Linear,
-    weight: Vec<f32>,
-    history: VecDeque<Vec<f32>>,
+    plan: ConvPlan,
 }
 struct Attention {
     q: Linear,
@@ -175,9 +172,7 @@ struct Layer {
     post_operator_norm: Vec<f32>,
     ffn_norm: Vec<f32>,
     post_ffn_norm: Vec<f32>,
-    w1: Linear,
-    w2: Linear,
-    w3: Linear,
+    mlp: MlpPlan,
 }
 pub struct Model {
     pub config: Config,
@@ -206,7 +201,7 @@ impl Model {
         let mut cache_bytes = 0usize;
         for layer in &self.layers {
             cache_bytes += match &layer.operator {
-                Operator::Conv(c) => c.history.iter().map(|v| v.len() * 4).sum::<usize>(),
+                Operator::Conv(_) => 0,
                 Operator::Attention(a) => a
                     .keys
                     .iter()
@@ -220,6 +215,7 @@ impl Model {
             "layer_types":self.config.layer_types,"attention_heads":self.config.num_attention_heads,
             "kv_heads":self.config.num_key_value_heads,"vocabulary":self.config.vocab_size,
             "context_limit":self.context_limit,"position":self.position,"cpu_cache_logical_bytes":cache_bytes,
+            "gpu_convolution_cache_logical_bytes":self.config.layer_types.iter().filter(|k| *k == "conv").count()*self.config.hidden_size*7*4,
             "prefill_batch_size":1,"sampling":"greedy"})
     }
     pub fn load(
@@ -252,20 +248,17 @@ impl Model {
             let p = format!("model.layers.{i}");
             let norm = |name: &str, n| weights.floats(&format!("{p}.{name}.weight"), &[n]);
             let operator = if kind == "conv" {
+                let input =
+                    Linear::load(&weights, &mut gpu, &format!("{p}.conv.in_proj"), h, h * 3)?
+                        .into_exl3()?;
+                let output = Linear::load(&weights, &mut gpu, &format!("{p}.conv.out_proj"), h, h)?
+                    .into_exl3()?;
+                let weight = weights.floats(
+                    &format!("{p}.conv.conv.weight"),
+                    &[h, 1, config.conv_length],
+                )?;
                 Operator::Conv(Box::new(Conv {
-                    input: Linear::load(
-                        &weights,
-                        &mut gpu,
-                        &format!("{p}.conv.in_proj"),
-                        h,
-                        h * 3,
-                    )?,
-                    output: Linear::load(&weights, &mut gpu, &format!("{p}.conv.out_proj"), h, h)?,
-                    weight: weights.floats(
-                        &format!("{p}.conv.conv.weight"),
-                        &[h, 1, config.conv_length],
-                    )?,
-                    history: VecDeque::new(),
+                    plan: gpu.prepare_conv(input, output, &weight)?,
                 }))
             } else {
                 let kv = config.num_key_value_heads * config.head_dim;
@@ -299,33 +292,37 @@ impl Model {
                     rope: config.rope_parameters[kind].clone(),
                 }))
             };
+            let w1 = Linear::load(
+                &weights,
+                &mut gpu,
+                &format!("{p}.feed_forward.w1"),
+                h,
+                config.intermediate_size,
+            )?
+            .into_exl3()?;
+            let w2 = Linear::load(
+                &weights,
+                &mut gpu,
+                &format!("{p}.feed_forward.w2"),
+                config.intermediate_size,
+                h,
+            )?
+            .into_exl3()?;
+            let w3 = Linear::load(
+                &weights,
+                &mut gpu,
+                &format!("{p}.feed_forward.w3"),
+                h,
+                config.intermediate_size,
+            )?
+            .into_exl3()?;
             layers.push(Layer {
                 operator,
                 operator_norm: norm("operator_norm", h)?,
                 post_operator_norm: norm("post_operator_norm", h)?,
                 ffn_norm: norm("ffn_norm", h)?,
                 post_ffn_norm: norm("post_ffn_norm", h)?,
-                w1: Linear::load(
-                    &weights,
-                    &mut gpu,
-                    &format!("{p}.feed_forward.w1"),
-                    h,
-                    config.intermediate_size,
-                )?,
-                w2: Linear::load(
-                    &weights,
-                    &mut gpu,
-                    &format!("{p}.feed_forward.w2"),
-                    config.intermediate_size,
-                    h,
-                )?,
-                w3: Linear::load(
-                    &weights,
-                    &mut gpu,
-                    &format!("{p}.feed_forward.w3"),
-                    h,
-                    config.intermediate_size,
-                )?,
+                mlp: gpu.prepare_mlp(w1, w3, w2)?,
             });
         }
         ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
@@ -348,7 +345,7 @@ impl Model {
         self.position = 0;
         for layer in &mut self.layers {
             match &mut layer.operator {
-                Operator::Conv(conv) => conv.history.clear(),
+                Operator::Conv(_) => {}
                 Operator::Attention(attn) => {
                     attn.keys.clear();
                     attn.values.clear();
@@ -382,7 +379,10 @@ impl Model {
                 self.config.norm_eps,
             )?;
             let output = match &mut layer.operator {
-                Operator::Conv(conv) => conv.forward(&mut self.gpu, &normalized, &self.config)?,
+                Operator::Conv(conv) => {
+                    self.gpu
+                        .forward_conv(&conv.plan, &normalized, self.position)?
+                }
                 Operator::Attention(attn) => {
                     attn.forward(&mut self.gpu, &normalized, &self.config, self.position)?
                 }
@@ -403,20 +403,7 @@ impl Model {
                     .saturating_add(crate::vulkan::elapsed_ns(started))
             });
             let normalized = normalize(&self.gpu, &hidden, &layer.ffn_norm, self.config.norm_eps)?;
-            let [gate, up] =
-                Linear::forward_group([&layer.w1, &layer.w3], &mut self.gpu, &normalized)?;
-            let started = std::time::Instant::now();
-            let activated: Vec<_> = gate
-                .iter()
-                .zip(up)
-                .map(|(g, u)| math::half(g / (1. + (-g).exp()) * u))
-                .collect();
-            self.gpu.record_profile(|p| {
-                p.activation_ns = p
-                    .activation_ns
-                    .saturating_add(crate::vulkan::elapsed_ns(started))
-            });
-            let down = layer.w2.forward(&mut self.gpu, &activated)?;
+            let down = self.gpu.forward_mlp(&layer.mlp, &normalized)?;
             let down = normalize(&self.gpu, &down, &layer.post_ffn_norm, self.config.norm_eps)?;
             let started = std::time::Instant::now();
             for (h, value) in hidden.iter_mut().zip(down) {
@@ -447,36 +434,7 @@ impl Model {
     }
 }
 
-impl Conv {
-    fn forward(&mut self, gpu: &mut Gpu, x: &[f32], c: &Config) -> Result<Vec<f32>> {
-        let projected = self.input.forward(gpu, x)?;
-        let started = std::time::Instant::now();
-        let h = c.hidden_size;
-        let bx = projected[..h]
-            .iter()
-            .zip(&projected[2 * h..])
-            .map(|(b, x)| math::half(b * x))
-            .collect();
-        self.history.push_back(bx);
-        if self.history.len() > c.conv_length {
-            self.history.pop_front();
-        }
-        let y = convolution(
-            &self.history,
-            &self.weight,
-            &projected[h..2 * h],
-            h,
-            c.conv_length,
-        )?;
-        gpu.record_profile(|p| {
-            p.convolution_cpu_ns = p
-                .convolution_cpu_ns
-                .saturating_add(crate::vulkan::elapsed_ns(started))
-        });
-        self.output.forward(gpu, &y)
-    }
-}
-
+#[cfg(test)]
 fn convolution(
     history: &VecDeque<Vec<f32>>,
     weight: &[f32],

@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 128) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float x[]; };
+layout(set=0,binding=2,std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint codebook; } p;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= p.cols) return;
+    precise float sum = 0.0;
+    for (uint part=0u; part<4u; ++part)
+        for (uint quad=0u; quad<4u; ++quad)
+            sum += x[(part*p.cols+index)*4u+quad];
+    y[index] = sum;
+}

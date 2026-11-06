@@ -171,6 +171,15 @@ pub struct Linear {
     output: usize,
 }
 impl Linear {
+    pub(crate) fn into_exl3(self) -> Result<Exl3Matrix> {
+        match self.storage {
+            Storage::Exl3(matrix) => Ok(matrix),
+            Storage::Dense { .. } => {
+                anyhow::bail!("GPU resident operator requires EXL3 projections")
+            }
+        }
+    }
+
     pub fn forward_group<const N: usize>(
         linears: [&Self; N],
         gpu: &mut Gpu,

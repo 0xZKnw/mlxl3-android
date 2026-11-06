@@ -8,8 +8,10 @@ adapt the algorithm in halo-box/strix-llama.cpp PR #204 by Nathanw1014,
 revision bd64c24736eab68a006c1f44f99da3b994ba098c,
 ggml/src/ggml-vulkan/vulkan-shaders/exl3_common.glsl (MIT),
 Copyright (c) 2023-2026 The ggml authors. See THIRD_PARTY_NOTICES.md.
-Our shader uses core 32-bit arithmetic and shared-memory reductions rather
-than requiring the upstream wave32/FP16/coopmat paths.
+The portable shader retains core 32-bit arithmetic and shared-memory reductions.
+The optional split-K shader uses independent 32-thread workgroups, requesting
+wave32 only when advertised; ordered reduction is fused into post-Hadamard.
+No cooperative-matrix feature is required.
 The optional native codebook shader also adapts the paired FP16 addition
 algorithm from exl3_common.glsl at the same revision; FP32 accumulation and
 the portable LUT fallback remain available.

@@ -187,10 +187,10 @@ impl Engine {
                 serde_json::json!({"type":"done","tokens":generated.len(),"prefill_seconds":prefill_seconds,
                 "decode_seconds":decode_seconds,"decode_tokens":decode_steps,
                 "decode_tokens_per_second":decode_rate(decode_steps, decode_seconds),
-                "performance":{"schema_version":2,"source_sha":option_env!("GITHUB_SHA").unwrap_or("local_unknown"),
+                "performance":{"schema_version":3,"source_sha":option_env!("GITHUB_SHA").unwrap_or("local_unknown"),
                 "model":self.model.diagnostics(),"generation":{"max_new_tokens":max_tokens},
                 "gpu":self.model.gpu.diagnostics(),"prefill":prefill_profile.report(self.model.gpu.projection_metadata()),"decode":decode_profile.report(self.model.gpu.projection_metadata()),
-                "timing_scope":"host latency; head overlaps model/GPU; device phases are GPU timestamps when device_samples > 0; samples count commands, submissions count fences"},
+                "timing_scope":"host latency; head overlaps model/GPU; device phases are GPU timestamps when device_samples > 0; device_queue_ns overlaps matrix and operator intervals and includes final visibility; samples count measured commands, submissions count fences"},
                 "prompt_tokens":prompt.len(),"prefill_submissions":prefill_submissions,
                 "decode_submissions":self.model.gpu.submission_count().wrapping_sub(decode_submissions),"finish_reason":if generated.len() == max_tokens {"length"} else {"stop"}}),
             )?;

@@ -991,3 +991,82 @@
   diagnostic etvariante15 **validés fonctionnellement** danslesdomainesdécrits,
   **nonconcluants pourvitesseS24**. Aucun essai lancé encore en cours. Plein
   checkpoint/driverXclipse etgainréel àmesurer ; aucune promesse20tok/s.
+
+### ANDROID-PERF-2026-11-06-16 — recherche et lot GPU MLP/conv/waves/head — préenregistré
+
+- Baseline45cc54a/arbredocumentaireb265a1b, rapports05..15 relus. RetourS24 :
+  3,906093tok/s,13/13tokens ; matvec102,20ms/token contre198,21précédemment,
+  headhost41,78ms/token, fileGPUmesurée144,76ms/token, attentehost217,68ms.
+  L'écart n'est pas une preuve de réveilsCPU seuls : les timestampsmatrices
+  excluent barrières de groupe etlatenceavantpremiertimestamp. Thermique0,
+  pasdecampagneintercalée : comparaison descriptive, pasgaincausalreproductible.
+- Rapport confirme sousgroupes32 imposables (min32/max64/stagesCompute),
+  FP16qualifié, driverSPAL25.3.3, extensionsAMDshaderinfo etpipeline-executable.
+  Rechercheprimaireprévue : scopes Vulkan, sizecontrol/fullsubgroups,
+  kernelsdense/EXL3, GPUrésidentMLP/conv et statistiquescompilateur.
+- Lotprévu avant prototypes : (a)EXL3groupes32/splitK4 sansshared/barrière,
+  sortiespartielles parquad puis somme danspostHad dansl'ordreancien exact ;
+  wave32imposée seulementsi annoncée, repli128 ; (b)dense4sorties/groupe,
+  mêmeordreFMA/réduction ; (c)MLP W1/W3→SwiGLU→W2 résidentsGPU enune
+  soumission, matrices possédées parplan ; (d)conventrée→historique7→sortie
+  résidentsGPU, paramètrespositionparbuffer etresetlogique àposition0 ;
+  (e)Q/K/V+gatedense enunesoumission si intégrationpraticable.
+- Diagnostic : timestamps de soumissionGPUentière incluantbarrièreHOST,
+  distincts des intervallesmatrice ; nepas appeler leurécart «latenceCPU»
+  commeunfait. TempsopérateursGPU, compteurssoumissions et caches explicites.
+  InterrogerAMDshaderinfo si disponible pour registres/LDS/scratch, sinon
+  statutindisponible. Pasde dumpISAimmense, pasde benchmarkautotunebruité.
+- Validation avantvitesse : rawQMV bitexact à45cc54a etCPU/f64 1..8bits,
+  troiscodebooks/quatreformes, formesMLP2048×7680/K4 et7680×2048/K5 ; dense
+  F16/BF16, queues/tails, référencesnumériquesindépendantes. SwiGLU/conv contre
+  CPU, fixtureEngine128logits etétatsreset/cancel/contexte àtoléranceinchangée.
+  Sommes/timestamps etmémoire/ownership/bornes testés ; Kani vraishelpersRust,
+  fmt/Clippyhost+ARM/SPIR-V/CIcoucheKhronos/GPUAPKinspectés. Les vérifications
+  bornées ettestslogiciels ne prouvent niXclipse ni pleincheckpoint1.7B.
+- Pasde GPUmatérielMac/benchmarkconcurrent. Aucun débitS24 promis pourlot ;
+  code nonmodifié lorsdu préenregistrement, statutrecherche/implémentationencours.
+
+#### Avancement16 — code local et premiers contrôles
+
+- Implémenté : EXL3local32/splitK4 avec réductionordonnée fusionnée postHad,
+  contrôlewave32 conditionnel et repli128 ; dense4sorties ; MLP W1/W3/SwiGLU/W2
+  et convolutionhistorique7 enune soumission chacun. Réemploi descommandes et
+  buffers existants, sansclone deBuffer/Sync artificiel. Sur24couches13conv,
+  soumissionsdécode attendues108→71 ; fixture3couches15→11 confirmée. Il s'agit
+  de compteurs déterministes, pas d'un gainS24 mesuré.
+- Diagnosticv3 : tempsGPUde soumissionentière (barrièreHOST incluse), temps
+  SwiGLU/conv, cachesCPU/GPU distincts, statistiquesAMD registres/LDS/scratch
+  si extensionprésente. SommesGPU etnombresd'échantillons contrôlés.
+- Premiers résultats : 9testsVulkanlib réussis (dont3nouveaux), paritéraw96cas
+  1..8bits×3codebooks×4formes et2formesMLP réelles bitàbit ; dense30cas
+  bitàbitancienkernel ; MLP3entrées tolérance0,0005+0,002relative ; conv15pas
+  avecwrap/reset bitàbitfrontièreCPU, erreurs avant soumission. Fixture128logits
+  conserve l'oracle historique et sa tolérance. Aucunbenchmark lancé.
+- Échecs intermédiaires conservés : compilation champgroups_y dupliqué corrigé ;
+  premièreassertionfixtureattendait15soumissions et constate11, attendusmisàjour
+  sans changerleslogitsde référence. Logs `build/perf16-*`. Clippystrict réussit.
+- QKV+gate nonfusionné : pisteconditionnelle reportée ; attentionCPU etpréfill
+  tokenparToken subsistent. Pasdecompmat sanssupport ; pasd'autotune/tiled4
+  déjàrégressifs, ni de promesse20tok/s. Vérification/CI/publicationencours.
+
+- Contre-épreuve : mutation temporaire convolution `count=1` au lieu de
+  `min(position+1,7)` détectée àposition1 paroracleindépendant ; shader restauré,
+  test concerné reréussi. Logs `perf16-mutation.log`, `perf16-restored.log`.
+- Vérification cibléeKani0.68/CBMC6.11 réussie :170obligations,4covers ;
+  helpersRust réels denseceil4, capacitéwave32 etallocationétatconv≤152909f32.
+  Cela ne prouve pasles shaders/concurrence/pilote. SuiteCPU21passes et
+  Vulkan13passes (9lib+3intégration+1Engine), sansbenchmark.
+
+#### Vérification finale16 avant publication
+
+- Lot complet retenu, parité préalable réussie. Avecfallbacknatif désactivé aussi,
+  MLP/conv restent corrects ; testsrégressions/fixture etformeschaudes réussis.
+  Kani complet14harnais/1426obligations/32covers ;3formatstdinatteignables,
+  ancienharnaisfloat toujoursnonexécuté. Clippyhost/ARMstrict, fmt, SPIR-V et
+  actionlint réussis. SourceGLSLnonprouvée ; contrôles numériques/synchronisation
+  nevalent paspreuvecomplète. CIinclut maintenantlesnouveauxchemins.
+- [Rapport recherche/implémentation etcommandes](docs/android-resident-operators-2026-11-06.md),
+  [extrait exactprofilutilisateur](docs/measurements/s24-45cc54a-summary.json).
+  Rechercheterminée ; correctif **validé dansledomaine logiciel décrit**,
+  **nonconcluant envitesseS24**. Étatcodelocal, push/APKenattente d'inspection.
+  Aucun essai de vitesse lancé ; pasdemesurephysiqueconcurrente niinstallation.

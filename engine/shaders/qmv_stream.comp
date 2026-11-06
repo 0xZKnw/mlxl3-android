@@ -4,8 +4,12 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #endif
 // Register-window trellis decoding: see engine/NOTICE for the upstream algorithm.
-// Four logical 32-lane groups split K; no hardware subgroup size is assumed.
+// Split K into four logical 32-lane partitions; the partials variant dispatches them independently.
+#ifdef EXL3_PARTIALS
+layout(local_size_x = 32) in;
+#else
 layout(local_size_x = 128) in;
+#endif
 #ifdef EXL3_BITS
 const uint BITS = EXL3_BITS;
 #else
@@ -15,7 +19,9 @@ layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
 layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
 layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
 layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint codebook; } p;
+#ifndef EXL3_PARTIALS
 shared vec2 partial[128];
+#endif
 #include "exl3.glsl"
 
 uint stateAt(uvec3 a, uint j) {
@@ -29,7 +35,11 @@ uint stateAt(uvec3 a, uint j) {
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint lane = tid % 32u;
+#ifdef EXL3_PARTIALS
+    uint split = gl_WorkGroupID.y;
+#else
     uint split = tid / 32u;
+#endif
     const uint WORDS = 8u * BITS;
     const uint SPAN = 7u * BITS + 16u;
     const uint ALIGNED = (SPAN + 31u) / 32u;
@@ -69,6 +79,11 @@ void main() {
         acc.y = fma(inputValues[3], codeword(stateAt(a, 7u), p.codebook), acc.y);
 #endif
     }
+#ifdef EXL3_PARTIALS
+    uint col = gl_WorkGroupID.x * 16u + lane / 4u;
+    y[(split * p.cols + col) * 4u + lane % 4u] = acc.x;
+    y[(split * p.cols + col + 8u) * 4u + lane % 4u] = acc.y;
+#else
     partial[tid] = acc;
     barrier();
     if (tid < 16u) {
@@ -78,4 +93,5 @@ void main() {
                 total += partial[wave * 32u + (tid % 8u) * 4u + quad][tid / 8u];
         y[gl_WorkGroupID.x * 16u + tid] = total;
     }
+#endif
 }

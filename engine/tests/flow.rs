@@ -169,7 +169,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
-        assert_eq!(engine.model.gpu.submission_count() - before, 15);
+        assert_eq!(engine.model.gpu.submission_count() - before, 11);
         assert_eq!(reference[index].len(), last.len());
         for (actual, bits) in last.iter().zip(&reference[index]) {
             let expected = f32::from_bits(*bits);
@@ -214,7 +214,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .starts_with("register_window_16")
     );
     assert_eq!(done["performance"]["gpu"]["prepared_matrices"], 19);
-    assert_eq!(done["performance"]["schema_version"], 2);
+    assert_eq!(done["performance"]["schema_version"], 3);
     assert_eq!(done["performance"]["model"]["architecture"], "lfm3");
     for phase in ["prefill", "decode"] {
         let p = &done["performance"][phase];
@@ -230,9 +230,9 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             };
             assert_eq!(p["device_exl3_samples"].as_u64().unwrap(), steps * 19);
             let samples = if phase == "prefill" {
-                steps * 21 + 1
+                steps * 25 + 1
             } else {
-                steps * 22
+                steps * 26
             };
             assert_eq!(p["device_samples"].as_u64().unwrap(), samples);
             let phases: u64 = [
@@ -240,6 +240,8 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
                 "device_exl3_matvec_ns",
                 "device_exl3_output_ns",
                 "device_other_ns",
+                "device_swiglu_ns",
+                "device_convolution_ns",
             ]
             .iter()
             .map(|key| p[key].as_u64().unwrap())
@@ -265,11 +267,16 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
                     .starts_with("model.layers.")
             );
             assert_eq!(p["query_read_failures"], 0);
+            let submissions = done[format!("{phase}_submissions")].as_u64().unwrap();
+            assert_eq!(p["device_queue_samples"].as_u64(), Some(submissions));
+            assert!(p["device_queue_ns"].as_u64().unwrap() > 0);
+            assert!(p["device_swiglu_ns"].as_u64().unwrap() > 0);
+            assert!(p["device_convolution_ns"].as_u64().unwrap() > 0);
+            assert_eq!(p["convolution_cpu_ns"], 0);
         }
         for field in [
             "normalization_ns",
             "embedding_ns",
-            "convolution_cpu_ns",
             "attention_cpu_ns",
             "rope_ns",
             "activation_ns",
@@ -280,11 +287,11 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(!done["performance"].to_string().contains("Hello"));
     assert_eq!(
         done["prefill_submissions"].as_u64().unwrap(),
-        done["prompt_tokens"].as_u64().unwrap() * 14 + 1
+        done["prompt_tokens"].as_u64().unwrap() * 10 + 1
     );
     assert_eq!(
         done["decode_submissions"].as_u64().unwrap(),
-        done["decode_tokens"].as_u64().unwrap() * 15
+        done["decode_tokens"].as_u64().unwrap() * 11
     );
     cancelled.store(true, Ordering::Relaxed);
     assert!(

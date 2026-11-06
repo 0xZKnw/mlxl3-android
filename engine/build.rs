@@ -9,6 +9,10 @@ fn main() {
         "qmv_stream",
         "hadamard",
         "dense",
+        "reduce",
+        "swiglu",
+        "convolution",
+        "dense_reference",
         "codebook",
         "qmv_reference",
         "codebook_reference",
@@ -18,7 +22,11 @@ fn main() {
             .args(["--target-env=vulkan1.1", "-O", "-fshader-stage=compute"])
             .arg(format!(
                 "shaders/{}.comp",
-                name.trim_end_matches("_reference")
+                if name == "dense_reference" {
+                    name
+                } else {
+                    name.trim_end_matches("_reference")
+                }
             ))
             .arg("-o")
             .arg(out.join(format!("{name}.spv")));
@@ -54,5 +62,22 @@ fn main() {
             compiler.status().expect("glslc").success(),
             "{name} shader compilation failed"
         );
+    }
+    for bits in 1..=8 {
+        let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+                "-DEXL3_PARTIALS=1",
+            ])
+            .arg(format!("-DEXL3_BITS={bits}"))
+            .arg("shaders/qmv_stream.comp")
+            .arg("-o")
+            .arg(out.join(format!("qmv_wave_{bits}.spv")))
+            .status()
+            .expect("glslc");
+        assert!(status.success(), "wave32 shader compilation failed");
     }
 }

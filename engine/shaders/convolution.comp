@@ -1,0 +1,23 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=128) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float x[]; };
+layout(set=0,binding=1,std430) buffer State { float state[]; };
+layout(set=0,binding=2,std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint hidden; uint unused1; uint unused2; uint unused3; } p;
+#include "half_round.glsl"
+void main() {
+    uint c=gl_GlobalInvocationID.x;
+    if (c >= p.hidden) return;
+    uint pos=floatBitsToUint(state[0]);
+    uint count=min(pos+1u, 7u);
+    uint start=1u+7u*p.hidden;
+    state[start+(pos%7u)*p.hidden+c]=halfRound(x[c]*x[2u*p.hidden+c]);
+    precise float acc=0.0;
+    for (uint t=0u; t<count; ++t) {
+        uint slot=(pos+1u-count+t)%7u;
+        precise float product=state[start+slot*p.hidden+c]*state[1u+c*7u+7u-count+t];
+        acc=acc+product;
+    }
+    y[c]=halfRound(halfRound(acc)*x[p.hidden+c]);
+}
