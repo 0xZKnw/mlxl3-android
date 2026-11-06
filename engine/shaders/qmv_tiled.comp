@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Four adjacent outputs reuse the same input and packed EXL3 tile.
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint BITS = 4u;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint codebook; } p;
+shared vec4 partial[128];
+#include "exl3.glsl"
+
+void main() {
+    uint n = gl_WorkGroupID.x * 4u;
+    uint tid = gl_LocalInvocationID.x;
+    uvec4 col = uvec4(n) + uvec4(0u, 1u, 2u, 3u);
+    uvec4 lane = uvec4((tid % 8u) / 2u) + (col % 8u) * 4u;
+    uvec4 item = ((col % 16u) / 8u) * 4u + uvec4(((tid % 16u) / 8u) * 2u + tid % 2u);
+    uvec4 end = (lane * 8u + item + 257u) * BITS;
+    uvec4 first = ((end - 16u) / 32u) % (8u * BITS);
+    uvec4 last = ((end - 1u) / 32u) % (8u * BITS);
+    uvec4 shift = (32u - end % 32u) % 32u;
+    uint base = ((tid / 16u) * (p.cols / 16u) + n / 16u) * 8u * BITS;
+    uint step = (p.cols / 16u) * 64u * BITS;
+    vec4 acc = vec4(0.0);
+    for (uint row = tid; row < p.rows; row += 128u) {
+        uvec4 a = uvec4(packed[base + first.x], packed[base + first.y], packed[base + first.z], packed[base + first.w]);
+        uvec4 b = uvec4(packed[base + last.x], packed[base + last.y], packed[base + last.z], packed[base + last.w]);
+        uvec4 state = mix(b, (b >> shift) | (a << ((32u - shift) % 32u)), notEqual(shift, uvec4(0u))) & 65535u;
+        vec4 weight = vec4(codeword(state.x, p.codebook), codeword(state.y, p.codebook), codeword(state.z, p.codebook), codeword(state.w, p.codebook));
+        acc = fma(vec4(x[row]), weight, acc);
+        base += step;
+    }
+    partial[tid] = acc;
+    barrier();
+    // Preserve the scalar kernel's FP32 accumulation and reduction order.
+    for (uint stride = 64u; stride > 0u; stride /= 2u) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) {
+        y[n] = partial[0].x;
+        y[n + 1u] = partial[0].y;
+        y[n + 2u] = partial[0].z;
+        y[n + 3u] = partial[0].w;
+    }
+}

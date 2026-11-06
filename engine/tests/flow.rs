@@ -169,7 +169,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
-        assert_eq!(engine.model.gpu.submission_count() - before, 13);
+        assert_eq!(engine.model.gpu.submission_count() - before, 22);
         assert_eq!(reference[index].len(), last.len());
         for (actual, bits) in last.iter().zip(&reference[index]) {
             let expected = f32::from_bits(*bits);
@@ -205,13 +205,16 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     );
     let done = events.last().unwrap();
     assert_eq!(done["type"], "done");
+    let tuned = done["vulkan_tuned_shapes"].as_u64().unwrap();
+    assert!(tuned > 0);
+    assert!(done["vulkan_tiled_shapes"].as_u64().unwrap() <= tuned);
     assert_eq!(
         done["prefill_submissions"].as_u64().unwrap(),
-        done["prompt_tokens"].as_u64().unwrap() * 12 + 1
+        done["prompt_tokens"].as_u64().unwrap() * 21 + 1
     );
     assert_eq!(
         done["decode_submissions"].as_u64().unwrap(),
-        done["decode_tokens"].as_u64().unwrap() * 13
+        done["decode_tokens"].as_u64().unwrap() * 22
     );
     cancelled.store(true, Ordering::Relaxed);
     assert!(

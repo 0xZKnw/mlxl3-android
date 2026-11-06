@@ -6,6 +6,7 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     for name in [
         "qmv",
+        "qmv_tiled",
         "dense",
         "codebook",
         "qmv_reference",

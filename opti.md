@@ -436,3 +436,69 @@
   priorités suivantes dans [le rapport](docs/android-speed-2026-11-06.md).
   Logs temporaires `build/independent-ci-{apk,proofs,vulkan}.log`, APK local
   `build/apk-d7116bd/debug/app-debug.apk` ; oracle permanent conservé.
+
+#### Révision utilisateur de l'essai 07 — résultat négatif
+
+- Retour : **1,9 tok/s** avec le nouvel APK `d7116bd`, même prompt et même
+  checkpoint4,49bpw que les **2,7 tok/s** précédents. Thermique, contexte exact,
+  alimentation et répétitions non relevés ; comparaison utilisateur négative,
+  causalité exclusive du regroupement non démontrée. La réduction des attentes
+  n'a pas validé une accélération. Décision : **rejeté comme optimisation par
+  défaut**, revenir aux projections indépendantes séquentielles de `38f2d17`.
+  Les anciennes preuves fonctionnelles restent valides dans leur domaine.
+
+### ANDROID-PERF-2026-11-06-08 — EXL3 spécialisé/tuilé et sélection sur l'appareil — validé localement, gain S24 non mesuré
+
+- Baseline source `7939437`/moteur `d7116bd` ; chemin séquentiel qualifié
+  `38f2d17` à restaurer (head groupé conservé). Historique05..07 et rapports
+  relus. Pas de répétition LUT/procédural ni de campagne GPU Mac concurrente.
+- Hypothèse : QMV une sortie/groupe disperse les lectures et répète le calcul
+  des adresses ; bits dynamiques et une réduction par sortie coûtent cher.
+  Prototype prévu : quatre sorties voisines/groupe128, accumulateurs vec4,
+  même ordre FMA/réduction128 pour chaque sortie, adresses invariantes hors
+  boucle, bits spécialisés1..8. Aucune déquantification dense globale, aucune
+  modification du fichier modèle, des arrondis, du contexte ou des caches.
+- Éviter de choisir un nouveau kernel seulement depuis Mesa : comparer ancien
+  scalaire et nouveau kernel sur les vrais poids, au chargement, une fois par
+  forme/bits/codebook. Même validation/upload/readback pour les deux ; warmup,
+  ordre alterné, quatre paires. Parité bit à bit avant sélection ; choisir le
+  nouveau seulement avec marge et échantillons stables, sinon ancien kernel.
+  Chronométrage host synchrone, pas timestamp GPU isolé ni débit modèle. Ne pas
+  inclure cette qualification dans le débit decode ; coût de chargement séparé.
+- Vérification prévue : CPU reconstruction indépendante, tous bits/codebooks,
+  formes non carrées et réutilisation/erreurs ; baseline scalaire conservée
+  comme oracle, parité non vide/finie. Fixture Engine avec oracle128logits,
+  retour aux compteurs22/forward. Tests déterministes de la décision de tuning
+  (bruit, absence de gain, parité invalide), Kani bornesgroupes ciblé ; fmt,
+  Clippy, SPIR-V, CI APK/CPU/Vulkan/Kani/UI. Pas de benchmark physique local.
+- Recherche : guides AMD mémoire/occupation et kernels amontEXL3/llama.cpp ;
+  idées uniquement, aucun chiffre de leur matériel extrapolé au S24. Statut
+  **préenregistré**, prototype/mesures non démarrés, APK non publié.
+
+#### Résultats locaux de l'essai 08
+
+- Chemin séquentiel `38f2d17` restauré, regroupement07 supprimé du chemin et
+  buffers/API devenus inutiles retirés. Nouveau QMV quatre sorties/groupe avec
+  bits spécialisés, sélection scalaire/tuilé sur poids réels au chargement.
+  Médianes quatre paires alternées après warmup, parité bit à bit obligatoire,
+  marge5% et max/min<=1,5 sinon ancien kernel. Coût de chargement supplémentaire
+  assumé et non mesuré sur le téléphone ; aucun débit decode prédit.
+- **16 tests CPU**, six contrôles fonctionnels Vulkan explicites réussis sur
+  Mesa logiciel ; 72 comparaisons tuilé/scalaire bit à bit (8bits×3codebooks×
+  3formes128×128/256×384/2048×512), oracle reconstructionCPU indépendant existant,
+  196608codes, headdense et fixtureEngine128logits. Compteurs22/forward et
+  champs de diagnostic de sélection vérifiés. Benchmark historique05 non lancé.
+- Mutation stride erroné détectée (256×384/K1/cb0), shader restauré et contrôles
+  affectés relancés avec succès. InitialwarningClippy range-loop corrigé ;
+  fmt/Clippystrict/actionlint/diffcheck/SPIR-V réussis. Kanihelper réel :
+  105 obligations/0échec/2covers, usize arbitraire, couvertureexacte des sorties
+  multiples16 de16à32768 ; pas de preuve de shader/driver ni des tempsflottants.
+- Commandes, décisions de repli et sources dans
+  [le rapport](docs/android-kernels-2026-11-06.md). Logs temporaires
+  `build/perf08-*`, tests/oracle permanents conservés. État : code local
+  fonctionnellement validé, **gain S24 non mesuré/non concluant**, CI/APK à
+  vérifier après publication autorisée. Aucun benchmark matériel local.
+- Raffinement avant mesure physique : exiger aussi un gain>5% dans au moins
+  trois des quatre paires, pour ne pas retenir une simple médiane favorable
+  avec deux paires perdantes. Test déterministe de ce cas ajouté ; contrôles
+  affectés relancés, protocole de sélection documenté avant déploiement.

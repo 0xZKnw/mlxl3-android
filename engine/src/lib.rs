@@ -171,10 +171,12 @@ impl Engine {
                 }
             }
             let decode_seconds = decode.elapsed().as_secs_f64();
+            let (tiled_shapes, tuned_shapes) = self.model.gpu.tuned_shapes();
             event(
                 serde_json::json!({"type":"done","tokens":generated.len(),"prefill_seconds":prefill_seconds,
                 "decode_seconds":decode_seconds,"decode_tokens":decode_steps,
                 "decode_tokens_per_second":decode_rate(decode_steps, decode_seconds),
+                "vulkan_tiled_shapes":tiled_shapes,"vulkan_tuned_shapes":tuned_shapes,
                 "prompt_tokens":prompt.len(),"prefill_submissions":prefill_submissions,
                 "decode_submissions":self.model.gpu.submission_count().wrapping_sub(decode_submissions),"finish_reason":if generated.len() == max_tokens {"length"} else {"stop"}}),
             )?;

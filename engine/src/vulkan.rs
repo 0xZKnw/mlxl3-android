@@ -4,11 +4,13 @@ use anyhow::{Context, Result, bail, ensure};
 use ash::{Entry, vk};
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     ffi::{CStr, CString},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 const CODEBOOK_BYTES: usize = 3 * 65536 * 4;
@@ -34,6 +36,28 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 
+fn exl3_groups(outputs: usize) -> Option<u32> {
+    ((16..=32768).contains(&outputs) && outputs.is_multiple_of(16)).then_some((outputs / 4) as u32)
+}
+
+fn prefer_tiled(scalar: [f64; 4], tiled: [f64; 4], parity: bool) -> bool {
+    let median = |mut times: [f64; 4]| {
+        if !times.iter().all(|t| t.is_finite() && *t > 0. && *t < 30.) {
+            return None;
+        }
+        times.sort_by(f64::total_cmp);
+        (times[3] <= times[0] * 1.5).then_some((times[1] + times[2]) / 2.)
+    };
+    parity
+        && scalar
+            .iter()
+            .zip(tiled)
+            .filter(|(a, b)| *b < **a * 0.95)
+            .count()
+            >= 3
+        && matches!((median(scalar), median(tiled)), (Some(a), Some(b)) if b < a * 0.95)
+}
+
 fn dense_batch_output_count(rows: &[usize]) -> Option<usize> {
     if rows.is_empty() || rows.len() > MAX_DENSE_CHUNKS {
         return None;
@@ -52,20 +76,11 @@ fn dense_batch_output_count(rows: &[usize]) -> Option<usize> {
 }
 
 struct Dispatch<'a> {
-    input: &'a Buffer,
     weights: &'a Buffer,
     output: &'a Buffer,
-    pipeline: vk::Pipeline,
     params: [u32; 4],
     outputs: usize,
-}
-
-pub(crate) struct Projection<'a> {
-    pub weights: &'a Buffer,
-    pub input: &'a [f32],
-    pub outputs: usize,
-    pub bits: u32,
-    pub codebook: u32,
+    groups: u32,
 }
 
 struct Instance {
@@ -101,13 +116,6 @@ pub struct Buffer {
     size: usize,
 }
 impl Buffer {
-    fn write_f32(&self, values: &[f32]) -> Result<()> {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
-        };
-        self.write(bytes)
-    }
-
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         ensure!(
             bytes.len() <= self.size,
@@ -174,11 +182,12 @@ pub struct Gpu {
     descriptors: Vec<vk::DescriptorSet>,
     layout: vk::PipelineLayout,
     qmv: vk::Pipeline,
+    qmv_tiled: [vk::Pipeline; 8],
+    tuned: BTreeMap<(usize, usize, u32, u32), bool>,
     dense: vk::Pipeline,
     input: Option<Buffer>,
     output: Option<Buffer>,
     codebooks: Option<Buffer>,
-    batch_inputs: Vec<Buffer>,
     batch_outputs: Vec<Buffer>,
     submissions: Cell<u64>,
     pub name: String,
@@ -267,11 +276,12 @@ impl Gpu {
             descriptors: vec![],
             layout: vk::PipelineLayout::null(),
             qmv: vk::Pipeline::null(),
+            qmv_tiled: [vk::Pipeline::null(); 8],
+            tuned: BTreeMap::new(),
             dense: vk::Pipeline::null(),
             input: None,
             output: None,
             codebooks: None,
-            batch_inputs: vec![],
             batch_outputs: vec![],
             submissions: Cell::new(0),
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -344,16 +354,31 @@ impl Gpu {
     }
 
     fn pipeline(&self, bytes: &[u8]) -> Result<vk::Pipeline> {
+        self.specialized_pipeline(bytes, None)
+    }
+
+    fn specialized_pipeline(&self, bytes: &[u8], bits: Option<u32>) -> Result<vk::Pipeline> {
         let code = ash::util::read_spv(&mut std::io::Cursor::new(bytes))?;
         unsafe {
             let module = self
                 .device
                 .raw
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?;
-            let stage = vk::PipelineShaderStageCreateInfo::default()
+            let data = bits.unwrap_or(4).to_ne_bytes();
+            let entries = [vk::SpecializationMapEntry::default()
+                .constant_id(0)
+                .offset(0)
+                .size(4)];
+            let specialization = vk::SpecializationInfo::default()
+                .map_entries(&entries)
+                .data(&data);
+            let mut stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(module)
                 .name(c"main");
+            if bits.is_some() {
+                stage = stage.specialization_info(&specialization);
+            }
             let infos = [vk::ComputePipelineCreateInfo::default()
                 .stage(stage)
                 .layout(self.layout)];
@@ -500,6 +525,85 @@ impl Gpu {
         self.submissions.get()
     }
 
+    fn tiled_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
+        ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
+        let index = bits as usize - 1;
+        if self.qmv_tiled[index] == vk::Pipeline::null() {
+            self.qmv_tiled[index] = self.specialized_pipeline(
+                include_bytes!(concat!(env!("OUT_DIR"), "/qmv_tiled.spv")),
+                Some(bits),
+            )?;
+        }
+        Ok(self.qmv_tiled[index])
+    }
+
+    pub fn prepare_exl3(
+        &mut self,
+        weights: &Buffer,
+        inputs: usize,
+        outputs: usize,
+        bits: u32,
+        cb: u32,
+    ) -> Result<()> {
+        ensure!(
+            (1..=32768).contains(&inputs) && (1..=8).contains(&bits),
+            "Invalid EXL3 tuning dimensions"
+        );
+        let key = (inputs, outputs, bits, cb);
+        if self.tuned.contains_key(&key) {
+            return Ok(());
+        }
+        let x: Vec<_> = (0..inputs)
+            .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+            .collect();
+        self.validate_projection(weights, &x, outputs, bits, cb)?;
+        let scalar = self.multiply_kernel(weights, &x, outputs, bits, cb, false)?;
+        let candidate = self.multiply_kernel(weights, &x, outputs, bits, cb, true);
+        let candidate = match candidate {
+            Ok(values) => values,
+            Err(err) if self.device.abandoned.load(Ordering::Relaxed) => return Err(err),
+            Err(_) => {
+                self.tuned.insert(key, false);
+                return Ok(());
+            }
+        };
+        let equal = |a: &[f32], b: &[f32]| {
+            a.len() == outputs
+                && b.len() == outputs
+                && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+        };
+        if !equal(&scalar, &candidate) {
+            self.tuned.insert(key, false);
+            return Ok(());
+        }
+        let mut times = [[0.; 2]; 4];
+        let mut parity = true;
+        for (pair, samples) in times.iter_mut().enumerate() {
+            for tiled in if pair % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = Instant::now();
+                let values = self.multiply_kernel(weights, &x, outputs, bits, cb, tiled)?;
+                samples[usize::from(tiled)] = start.elapsed().as_secs_f64();
+                parity &= equal(&scalar, &values);
+            }
+        }
+        self.tuned.insert(
+            key,
+            prefer_tiled(times.map(|p| p[0]), times.map(|p| p[1]), parity),
+        );
+        Ok(())
+    }
+
+    pub fn tuned_shapes(&self) -> (usize, usize) {
+        (
+            self.tuned.values().filter(|v| **v).count(),
+            self.tuned.len(),
+        )
+    }
+
     pub fn multiply(
         &mut self,
         weights: &Buffer,
@@ -508,7 +612,29 @@ impl Gpu {
         bits: u32,
         codebook: u32,
     ) -> Result<Vec<f32>> {
+        let tiled = self
+            .tuned
+            .get(&(x.len(), outputs, bits, codebook))
+            .copied()
+            .unwrap_or(false);
+        self.multiply_kernel(weights, x, outputs, bits, codebook, tiled)
+    }
+
+    fn multiply_kernel(
+        &mut self,
+        weights: &Buffer,
+        x: &[f32],
+        outputs: usize,
+        bits: u32,
+        codebook: u32,
+        tiled: bool,
+    ) -> Result<Vec<f32>> {
         let params = self.validate_projection(weights, x, outputs, bits, codebook)?;
+        if tiled {
+            let groups = exl3_groups(outputs).context("Invalid tiled EXL3 output shape")?;
+            let pipeline = self.tiled_pipeline(bits)?;
+            return self.compute_groups(pipeline, weights, x, params, outputs, groups);
+        }
         self.compute(
             if bits == 0 { self.dense } else { self.qmv },
             weights,
@@ -537,71 +663,24 @@ impl Gpu {
             let output = self.buffer(&vec![0; 32768 * 4])?;
             self.batch_outputs.push(output);
         }
-        let input = self.input.as_ref().context("GPU input unavailable")?;
-        input.write_f32(x)?;
         let jobs: Vec<_> = chunks
             .iter()
             .zip(&params)
             .zip(&self.batch_outputs)
             .map(|(((weights, rows), params), output)| Dispatch {
-                input,
                 weights,
                 output,
-                pipeline: self.dense,
                 params: *params,
                 outputs: *rows,
+                groups: *rows as u32,
             })
             .collect();
-        self.execute(&jobs)?;
+        self.execute(self.dense, x, &jobs)?;
         let mut result = Vec::with_capacity(total);
         for job in jobs {
             result.extend(job.output.read_f32(job.outputs)?);
         }
         Ok(result)
-    }
-
-    pub(crate) fn multiply_many(
-        &mut self,
-        projections: &[Projection<'_>],
-    ) -> Result<Vec<Vec<f32>>> {
-        let rows: Vec<_> = projections.iter().map(|p| p.outputs).collect();
-        ensure!(
-            projections.len() <= 4 && dense_batch_output_count(&rows).is_some(),
-            "Invalid independent projection batch"
-        );
-        let params = projections
-            .iter()
-            .map(|p| self.validate_projection(p.weights, p.input, p.outputs, p.bits, p.codebook))
-            .collect::<Result<Vec<_>>>()?;
-        while self.batch_inputs.len() < projections.len() {
-            let input = self.buffer(&vec![0; 32768 * 4])?;
-            self.batch_inputs.push(input);
-        }
-        while self.batch_outputs.len() < projections.len() {
-            let output = self.buffer(&vec![0; 32768 * 4])?;
-            self.batch_outputs.push(output);
-        }
-        let mut jobs = Vec::with_capacity(projections.len());
-        for (index, projection) in projections.iter().enumerate() {
-            let input = &self.batch_inputs[index];
-            input.write_f32(projection.input)?;
-            jobs.push(Dispatch {
-                input,
-                weights: projection.weights,
-                output: &self.batch_outputs[index],
-                pipeline: if projection.bits == 0 {
-                    self.dense
-                } else {
-                    self.qmv
-                },
-                params: params[index],
-                outputs: projection.outputs,
-            });
-        }
-        self.execute(&jobs)?;
-        jobs.iter()
-            .map(|job| job.output.read_f32(job.outputs))
-            .collect()
     }
 
     fn compute(
@@ -612,37 +691,58 @@ impl Gpu {
         params: [u32; 4],
         outputs: usize,
     ) -> Result<Vec<f32>> {
-        let input = self.input.as_ref().context("GPU input unavailable")?;
+        self.compute_groups(pipeline, weights, x, params, outputs, outputs as u32)
+    }
+
+    fn compute_groups(
+        &mut self,
+        pipeline: vk::Pipeline,
+        weights: &Buffer,
+        x: &[f32],
+        params: [u32; 4],
+        outputs: usize,
+        groups: u32,
+    ) -> Result<Vec<f32>> {
         let output = self.output.as_ref().context("GPU output unavailable")?;
-        input.write_f32(x)?;
-        self.execute(&[Dispatch {
-            input,
-            weights,
-            output,
+        self.execute(
             pipeline,
-            params,
-            outputs,
-        }])?;
+            x,
+            &[Dispatch {
+                weights,
+                output,
+                params,
+                outputs,
+                groups,
+            }],
+        )?;
         output.read_f32(outputs)
     }
 
-    fn execute(&self, jobs: &[Dispatch<'_>]) -> Result<()> {
+    fn execute(&self, pipeline: vk::Pipeline, x: &[f32], jobs: &[Dispatch<'_>]) -> Result<()> {
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
         );
         ensure!(
-            !jobs.is_empty()
+            !x.is_empty()
+                && x.len() <= 32768
+                && !jobs.is_empty()
                 && jobs.len() <= self.descriptors.len()
                 && jobs.iter().all(|job| job.outputs > 0
                     && job.outputs <= 32768
-                    && job.outputs <= self.max_groups as usize),
+                    && job.groups > 0
+                    && job.groups <= self.max_groups),
             "Invalid compute buffer dimensions"
         );
+        let input = self.input.as_ref().context("GPU input unavailable")?;
         let codebooks = self
             .codebooks
             .as_ref()
             .context("GPU codebooks unavailable")?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
+        };
+        input.write(bytes)?;
         unsafe {
             let d = &self.device.raw;
             d.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
@@ -652,17 +752,13 @@ impl Gpu {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
-            let mut pipeline = vk::Pipeline::null();
+            d.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::COMPUTE, pipeline);
             for (index, job) in jobs.iter().enumerate() {
-                if pipeline != job.pipeline {
-                    pipeline = job.pipeline;
-                    d.cmd_bind_pipeline(self.command, vk::PipelineBindPoint::COMPUTE, pipeline);
-                }
                 // Each dispatch owns a descriptor set and output until the shared fence completes.
                 let infos = [
                     [vk::DescriptorBufferInfo::default()
-                        .buffer(job.input.raw)
-                        .range(job.input.size as u64)],
+                        .buffer(input.raw)
+                        .range(input.size as u64)],
                     [vk::DescriptorBufferInfo::default()
                         .buffer(job.weights.raw)
                         .range(job.weights.size as u64)],
@@ -702,7 +798,7 @@ impl Gpu {
                     0,
                     push,
                 );
-                d.cmd_dispatch(self.command, job.outputs as u32, 1, 1);
+                d.cmd_dispatch(self.command, job.groups, 1, 1);
             }
             let barriers = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -739,6 +835,9 @@ impl Drop for Gpu {
         unsafe {
             let d = &self.device.raw;
             d.destroy_pipeline(self.qmv, None);
+            for pipeline in self.qmv_tiled {
+                d.destroy_pipeline(pipeline, None);
+            }
             d.destroy_pipeline(self.dense, None);
             d.destroy_pipeline_layout(self.layout, None);
             d.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -752,6 +851,94 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiled_selection_requires_parity_stability_and_a_clear_gain() {
+        let scalar = [0.010, 0.0101, 0.0102, 0.0103];
+        let faster = [0.008, 0.0081, 0.0082, 0.0083];
+        assert!(prefer_tiled(scalar, faster, true));
+        assert!(!prefer_tiled(scalar, faster, false));
+        assert!(!prefer_tiled(scalar, scalar, true));
+        assert!(!prefer_tiled(faster, scalar, true));
+        assert!(!prefer_tiled(scalar, [0.01, 0.01, 0.01, 0.01], true));
+        assert!(!prefer_tiled(
+            [0.01; 4],
+            [0.0075, 0.0075, 0.0105, 0.0105],
+            true
+        ));
+        for bad in [0., -1., f64::NAN, f64::INFINITY, 30., f64::MAX] {
+            let mut invalid = faster;
+            invalid[2] = bad;
+            assert!(!prefer_tiled(scalar, invalid, true));
+            assert!(!prefer_tiled(invalid, faster, true));
+        }
+        assert!(!prefer_tiled(scalar, [0.001, 0.008, 0.008, 0.008], true));
+        assert!(!prefer_tiled([0.001, 0.01, 0.01, 0.01], faster, true));
+        assert_eq!(exl3_groups(0), None);
+        assert_eq!(exl3_groups(15), None);
+        assert_eq!(exl3_groups(16), Some(4));
+        assert_eq!(exl3_groups(32768), Some(8192));
+        assert_eq!(exl3_groups(32769), None);
+        assert_eq!(exl3_groups(usize::MAX), None);
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; specialized four-output kernel parity and tuning wiring"]
+    fn tiled_qmv_matches_scalar_all_bitrates_and_codebooks() {
+        let mut gpu = Gpu::new().unwrap();
+        for (rows, cols) in [(128, 128), (256, 384), (2048, 512)] {
+            let x: Vec<_> = (0..rows)
+                .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+                .collect();
+            for bits in 1..=8 {
+                let states: Vec<_> = (0..rows * cols)
+                    .map(|i| ((i * 177 + i / 7 * 313 + 512) & 65535) as u16)
+                    .collect();
+                let bytes: Vec<_> = codec::pack(&states, bits)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect();
+                let buffer = gpu.buffer(&bytes).unwrap();
+                for cb in 0..3 {
+                    let expected = gpu
+                        .multiply_kernel(&buffer, &x, cols, bits as u32, cb, false)
+                        .unwrap();
+                    let actual = gpu
+                        .multiply_kernel(&buffer, &x, cols, bits as u32, cb, true)
+                        .unwrap();
+                    assert_eq!(actual.len(), cols);
+                    assert!(actual.iter().any(|v| v.abs() > 0.01));
+                    for (a, b) in actual.iter().zip(&expected) {
+                        assert_eq!(a.to_bits(), b.to_bits(), "{rows}x{cols}, K{bits}, cb{cb}");
+                    }
+                    if (rows, cols, bits, cb) == (128, 128, 4, 0) {
+                        gpu.prepare_exl3(&buffer, rows, cols, bits as u32, cb)
+                            .unwrap();
+                        assert_eq!(gpu.tuned_shapes().1, 1);
+                        let before = gpu.submission_count();
+                        gpu.prepare_exl3(&buffer, rows, cols, bits as u32, cb)
+                            .unwrap();
+                        assert_eq!(gpu.submission_count(), before);
+                        gpu.tuned.insert((rows, cols, bits as u32, cb), true);
+                        assert_eq!(
+                            gpu.multiply(&buffer, &x, cols, bits as u32, cb).unwrap(),
+                            expected
+                        );
+                        assert!(
+                            gpu.prepare_exl3(&buffer, usize::MAX, cols, bits as u32, cb)
+                                .is_err()
+                        );
+                        assert!(
+                            gpu.multiply_kernel(&buffer, &x[..127], cols, bits as u32, cb, true)
+                                .is_err()
+                        );
+                        assert!(gpu.multiply_kernel(&buffer, &x, cols, 0, cb, true).is_err());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn dense_batch_bounds_reject_empty_zero_large_and_over_budget() {
@@ -928,6 +1115,20 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::*;
+
+    #[kani::proof]
+    fn tiled_groups_cover_exactly_valid_outputs() {
+        let outputs: usize = kani::any();
+        let groups = exl3_groups(outputs);
+        let valid = outputs >= 16 && outputs <= 32768 && outputs % 16 == 0;
+        assert_eq!(groups.is_some(), valid);
+        if let Some(groups) = groups {
+            assert!(groups >= 4 && groups <= 8192);
+            assert_eq!(groups as usize * 4, outputs);
+        }
+        kani::cover!(outputs == 16 && groups == Some(4));
+        kani::cover!(outputs == 32768 && groups == Some(8192));
+    }
 
     #[kani::proof]
     #[kani::unwind(6)]

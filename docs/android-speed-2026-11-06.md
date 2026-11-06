@@ -1,5 +1,10 @@
 # LFM3 Android speed investigation — 6 November 2026
 
+Follow-up: the user reports **1.9 tok/s with the same prompt after d7116bd**.
+Independent projection batching is therefore rejected as the default and is
+removed by the [subsequent kernel change](android-kernels-2026-11-06.md).
+The batching implementation and evidence below describe that historical trial.
+
 The user reports **2.7 tokens/s on a Galaxy S24 Exynos with EXL3 4.49 bpw**.
 The exact APK, prompt, context, driver, temperature and power conditions of that
 measurement are unknown. There is no controlled on-device before/after result.
