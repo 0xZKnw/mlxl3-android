@@ -362,7 +362,7 @@
   Code intégré/public, correction vérifiée dans ces domaines ; gain S24 **non
   mesuré**, performance réelle **non concluante**. Logs `build/issue1-ci38f.log`.
 
-### ANDROID-PERF-2026-11-06-07 — recherche et projections indépendantes groupées — validé fonctionnellement, gain S24 non mesuré
+### ANDROID-PERF-2026-11-06-07 — recherche et projections indépendantes groupées — validé fonctionnellement, puis rejeté comme optimisation
 
 - Reprise demandée : utilisateur rapporte2,7tok/s sur S24/4,49bpw et veut des
   pistesplusfortes, rechercheInternet autorisée. APKexact de la mesure non
@@ -447,7 +447,7 @@
   défaut**, revenir aux projections indépendantes séquentielles de `38f2d17`.
   Les anciennes preuves fonctionnelles restent valides dans leur domaine.
 
-### ANDROID-PERF-2026-11-06-08 — EXL3 spécialisé/tuilé et sélection sur l'appareil — validé localement, gain S24 non mesuré
+### ANDROID-PERF-2026-11-06-08 — EXL3 spécialisé/tuilé et sélection sur l'appareil — validé fonctionnellement en CI, gain S24 non mesuré
 
 - Baseline source `7939437`/moteur `d7116bd` ; chemin séquentiel qualifié
   `38f2d17` à restaurer (head groupé conservé). Historique05..07 et rapports
@@ -502,3 +502,27 @@
   trois des quatre paires, pour ne pas retenir une simple médiane favorable
   avec deux paires perdantes. Test déterministe de ce cas ajouté ; contrôles
   affectés relancés, protocole de sélection documenté avant déploiement.
+
+#### Publication et réception de l'essai 08
+
+- Source publique `85e9db1559b8d6e3d50e68539dc548fe21810300` ;
+  [run 42246844081](https://github.com/0xZKnw/mlxl3-android/actions/runs/42246844081)
+  terminé **cinq jobs réussis**. 16 tests CPU, six contrôles Vulkan (dont les
+  72 cas tuilés bit à bit) et dix tests UI réussis ; benchmark historique
+  facultatif sauté. Huit harnais Kani réussis : 686 obligations, 15 covers,
+  deux obligations internesformat inatteignables ; le ciblé105 est aussi
+  exécuté séparément et n'est pas compté comme une neuvième preuve.
+- JobAPK **3min14**, caches/réseau propres au run, pas de gain CI extrapolé.
+  [Artefact13518731858](https://github.com/0xZKnw/mlxl3-android/actions/runs/42246844081/artifacts/13518731858),
+  fichier `debug/app-debug.apk`, **34 014 540 octets**, SHA-256
+  `8151ba6655891263fde026db1d80677f972fc3654e83ba23806bc68874548768`
+  conforme au manifeste CI ; digestZIP également vérifié. Signaturedebug,
+  zipalign16K et packaging ARM64 validés après téléchargement. Moteur embarqué
+  SHA-256 `8af305dc263d2c9fbaf5b7177bc7d31301d52c61996ab7b97d6df7b3d53bc81a`.
+- État : **code public/APK CI**, aucune installation ni release. Validation
+  fonctionnelle dans les domaines précités ; **débit et surcoût de chargement
+  S24 non mesurés**, sélection sur téléphone à observer. Les timings internes
+  du test logiciel de sélection n'ont pas été conservés comme benchmark ;
+  aucun gain n'en est déduit. Aucun essai lancé encore en cours.
+  Logs temporaires `build/perf08-ci-{apk,proofs,vulkan}.log`, APK local
+  `build/apk-85e9db1/debug/app-debug.apk`, tests/oracle permanents conservés.

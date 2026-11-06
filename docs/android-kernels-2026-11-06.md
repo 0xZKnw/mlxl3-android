@@ -82,3 +82,17 @@ ignored `build/perf08-*` (temporary); regression tests and this report are track
 No hardware GPU benchmark, concurrent desktop profiling load or full 1.7B run
 was performed locally. **New S24 tok/s, load overhead, thermal state and complete
 checkpoint parity remain unmeasured.** CI/APK receipt is recorded in `opti.md`.
+
+Published source: `85e9db1559b8d6e3d50e68539dc548fe21810300`.
+[Run 42246844081](https://github.com/0xZKnw/mlxl3-android/actions/runs/42246844081)
+passes all five jobs: 16 CPU tests, six explicit Vulkan checks, ten UI tests and
+eight CPU Kani harnesses (686 obligations, 15 covers; two unreachable internal
+formatting checks). The optional historical performance benchmark was skipped.
+The software tuning test's internal timings were not retained as benchmark
+evidence; no speedup is claimed from its selection.
+
+[APK artifact](https://github.com/0xZKnw/mlxl3-android/actions/runs/42246844081/artifacts/13518731858):
+`debug/app-debug.apk`, 34,014,540 bytes, SHA-256
+`8151ba6655891263fde026db1d80677f972fc3654e83ba23806bc68874548768`.
+Downloaded ZIP/APK digests, signature, 16 KiB zip alignment and ARM64 packaging
+were checked. APK job 3m14s; no physical phone installation or release.
