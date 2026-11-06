@@ -40,6 +40,18 @@ class StudioScreenTest {
         compose.onNodeWithText("Hello").assertDoesNotExist()
     }
 
+    @Test fun copiesPerformanceReportFromTheModelMenu() {
+        val report = "{\"source_sha\":\"test\",\"wait_ns\":42}"
+        compose.setContent { StudioScreen(conversation, false, true, "Ready", "Test GPU", null, false, {}, {}, {}, {}, {}, {}, report) }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Copier le diagnostic de performances").performClick()
+        compose.runOnIdle {
+            val clipboard = compose.activity.getSystemService(android.content.ClipboardManager::class.java)
+            assertEquals(report, clipboard.primaryClip?.getItemAt(0)?.text.toString())
+            clipboard.clearPrimaryClip()
+        }
+    }
+
     @Test fun busyStateDisablesInputAndExposesCancellation() {
         compose.setContent { StudioScreen(emptyList(), true, false, "Chargement…", "", null, false, {}, {}, {}, {}, {}, {}) }
         compose.onNodeWithContentDescription("Arrêter la génération").assertIsEnabled()

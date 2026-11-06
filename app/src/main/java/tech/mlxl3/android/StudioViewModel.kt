@@ -1,6 +1,10 @@
 package tech.mlxl3.android
 
 import android.app.Application
+import android.app.ActivityManager
+import android.os.Build
+import android.os.Debug
+import android.os.PowerManager
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Handler
@@ -26,6 +30,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var ready by mutableStateOf(false); private set
     var status by mutableStateOf("Import LFM3-1.7B EXL3 to get started"); private set
     var device by mutableStateOf(""); private set
+    var diagnostics by mutableStateOf<String?>(null); private set
+    private var environmentBefore = JSONObject()
     var error by mutableStateOf<String?>(null); private set
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
@@ -34,7 +40,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
-    fun newChat() { if (!busy) messages = emptyList() }
+    fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
+
+    private fun environment(): JSONObject = runCatching {
+        val app = getApplication<Application>()
+        val memory = ActivityManager.MemoryInfo()
+        app.getSystemService(ActivityManager::class.java).getMemoryInfo(memory)
+        val power = app.getSystemService(PowerManager::class.java)
+        JSONObject().put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
+            .put("android_sdk", Build.VERSION.SDK_INT).put("available_ram_bytes", memory.availMem)
+            .put("total_ram_bytes", memory.totalMem).put("low_memory", memory.lowMemory)
+            .put("app_pss_kib", Debug.getPss()).put("power_save", power.isPowerSaveMode)
+            .put("thermal_status", if (Build.VERSION.SDK_INT >= 29) power.currentThermalStatus else JSONObject.NULL)
+    }.getOrElse { JSONObject().put("status", "unavailable").put("reason", it.javaClass.simpleName) }
     fun stop() { stopped.set(true); NativeEngine.cancel(); status = "Stopping…" }
 
     private fun task(work: () -> Unit) {
@@ -52,15 +70,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     private val callback = NativeEngine.Callback { json ->
         val event = JSONObject(json)
+        val report = if (event.optString("type") == "done") JSONObject()
+            .put("engine", event).put("environment_before", environmentBefore)
+            .put("environment_after", environment()).toString(2) else null
         main.post {
             when (event.getString("type")) {
                 "status" -> status = event.getString("text")
-                "ready" -> { ready = true; device = event.getString("device"); status = "LFM3-1.7B · EXL3 · Vulkan" }
+                "ready" -> { ready = true; diagnostics = null; device = event.getString("device"); status = "LFM3-1.7B · EXL3 · Vulkan" }
                 "text" -> {
                     messages = messages.dropLast(1) + ChatMessage("assistant", event.getString("text"))
                     status = "Generating on device…"
                 }
                 "done" -> {
+                    diagnostics = report
                     val rate = event.optDouble("decode_tokens_per_second", Double.NaN)
                     val speed = if (rate.isFinite() && rate >= 0) "%.1f tok/s".format(rate) else "— tok/s"
                     messages.lastOrNull()?.takeIf { it.role == "assistant" }?.let {
@@ -129,6 +151,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val request = previous + ChatMessage("user", prompt.trim())
         messages = request + ChatMessage("assistant", "")
         task {
+            environmentBefore = environment()
+            main.post { diagnostics = null }
             val input = JSONArray()
             request.forEach { input.put(JSONObject().put("role", it.role).put("content", it.text)) }
             val result = NativeEngine.generate(input.toString(), 256, callback)

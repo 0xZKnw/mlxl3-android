@@ -1,6 +1,6 @@
 #ifdef EXL3_REFERENCE
 #include "exl3_procedural.glsl"
 #else
-layout(set = 0, binding = 3, std430) readonly buffer Codebooks { float codebooks[]; };
-float codeword(uint state, uint cb) { return codebooks[cb * 65536u + state]; }
+layout(set = 0, binding = 3, std430) readonly buffer Codebooks { uint codebooks[]; };
+float codeword(uint state, uint cb) { return unpackHalf2x16(codebooks[cb * 32768u + state / 2u])[state % 2u]; }
 #endif

@@ -126,6 +126,7 @@ impl Engine {
             "Conversation exceeds 2048 tokens; start a new chat or shorten the prompt"
         );
         self.model.reset();
+        self.model.gpu.take_profile();
         let result = (|| {
             let started = Instant::now();
             let prefill_submissions = self.model.gpu.submission_count();
@@ -137,9 +138,14 @@ impl Engine {
                         serde_json::json!({"type":"status","text":format!("Reading prompt {}/{}…", i + 1, prompt.len())}),
                     )?;
                 }
+                let evaluated = Instant::now();
                 next = self.model.forward(*token, i + 1 == prompt.len(), cancel)?;
+                self.model.gpu.record_profile(|p| {
+                    p.model_ns = p.model_ns.saturating_add(vulkan::elapsed_ns(evaluated))
+                });
             }
             let prefill_seconds = started.elapsed().as_secs_f64();
+            let prefill_profile = self.model.gpu.take_profile();
             let mut logits = next.context("Model returned no logits")?;
             let prefill_submissions = self
                 .model
@@ -163,20 +169,26 @@ impl Engine {
                     .map_err(|e| anyhow::anyhow!("Decoding: {e}"))?;
                 event(serde_json::json!({"type":"text","text":text}))?;
                 if i + 1 < max_tokens {
+                    let evaluated = Instant::now();
                     logits = self
                         .model
                         .forward(token, true, cancel)?
                         .context("Missing decode logits")?;
+                    self.model.gpu.record_profile(|p| {
+                        p.model_ns = p.model_ns.saturating_add(vulkan::elapsed_ns(evaluated))
+                    });
                     decode_steps += 1;
                 }
             }
             let decode_seconds = decode.elapsed().as_secs_f64();
-            let (tiled_shapes, tuned_shapes) = self.model.gpu.tuned_shapes();
+            let decode_profile = self.model.gpu.take_profile();
             event(
                 serde_json::json!({"type":"done","tokens":generated.len(),"prefill_seconds":prefill_seconds,
                 "decode_seconds":decode_seconds,"decode_tokens":decode_steps,
                 "decode_tokens_per_second":decode_rate(decode_steps, decode_seconds),
-                "vulkan_tiled_shapes":tiled_shapes,"vulkan_tuned_shapes":tuned_shapes,
+                "performance":{"source_sha":option_env!("GITHUB_SHA").unwrap_or("local_unknown"),
+                "gpu":self.model.gpu.diagnostics(),"prefill":prefill_profile,"decode":decode_profile,
+                "timing_scope":"host synchronous latency; head overlaps model/GPU; not GPU timestamps"},
                 "prompt_tokens":prompt.len(),"prefill_submissions":prefill_submissions,
                 "decode_submissions":self.model.gpu.submission_count().wrapping_sub(decode_submissions),"finish_reason":if generated.len() == max_tokens {"length"} else {"stop"}}),
             )?;

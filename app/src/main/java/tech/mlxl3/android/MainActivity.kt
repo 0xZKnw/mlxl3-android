@@ -2,6 +2,9 @@ package tech.mlxl3.android
 
 import android.os.Bundle
 import android.os.Build
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.widget.Toast
 import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -31,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -76,7 +80,7 @@ class MainActivity : ComponentActivity() {
             }
             StudioScreen(model.messages, model.busy, model.ready, model.status, model.device, model.error,
                 model.savedModel, { picker.launch(null) }, model::loadSaved, model::newChat,
-                model::send, model::stop, model::dismissError)
+                model::send, model::stop, model::dismissError, model.diagnostics)
         }
     }
 }
@@ -91,11 +95,12 @@ private val Edge = Color(0xFF303032)
 fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, status: String,
                  device: String, error: String?, savedModel: Boolean, onImport: () -> Unit,
                  onLoad: () -> Unit, onNew: () -> Unit, onSend: (String) -> Unit,
-                 onStop: () -> Unit, onDismissError: () -> Unit) {
+                 onStop: () -> Unit, onDismissError: () -> Unit, diagnostics: String? = null) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
         var menu by remember { mutableStateOf(false) }
+        val context = LocalContext.current
         val list = rememberLazyListState()
         val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
         LaunchedEffect(messages.size, messages.lastOrNull()?.text, imeBottom) {
@@ -120,6 +125,12 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Importer un dossier EXL3") }, onClick = { menu = false; onImport() })
                             if (savedModel) DropdownMenuItem(text = { Text("Charger le modèle enregistré") }, onClick = { menu = false; onLoad() })
+                            if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
+                                menu = false
+                                context.getSystemService(ClipboardManager::class.java)
+                                    .setPrimaryClip(ClipData.newPlainText("MLXL3 performance", diagnostics))
+                                Toast.makeText(context, "Diagnostic copié", Toast.LENGTH_SHORT).show()
+                            })
                         }
                     }
                     IconButton(onClick = onNew, enabled = !busy, modifier = Modifier.padding(start = 4.dp)) {

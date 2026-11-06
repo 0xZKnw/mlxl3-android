@@ -526,3 +526,87 @@
   aucun gain n'en est déduit. Aucun essai lancé encore en cours.
   Logs temporaires `build/perf08-ci-{apk,proofs,vulkan}.log`, APK local
   `build/apk-85e9db1/debug/app-debug.apk`, tests/oracle permanents conservés.
+
+#### Révision utilisateur de l'essai 08 — nouvelle régression
+
+- APK85e9db1 : **1,7tok/s**, même prompt, après2,7 puis1,9tok/s. Le sélecteur
+  de microkernels au chargement n'a donc pas validé le débit de l'application.
+  Résultat utilisateur négatif conservé ; attribution thermique, sélection,
+  synchronisations et mémoire à établir, aucune cause exclusive affirmée.
+  Décision : **rejeté comme accélération livrée**, pas de gain revendiqué.
+
+### ANDROID-PERF-2026-11-06-09 — diagnostic de bout en bout avant nouvelle optimisation — préenregistré
+
+- Reprise : utilisateur rapporte1,7tok/s surS24/EXL3 4,49bpw, compare à34tok/s
+  sous llama.cpp/Termux surS25Ultra. Modèle/GGUF/backend de la comparaison à
+  demander, pas de cible20tok/s présumée acquise. Baseline85e9db1/18bd2b2.
+- Lire08/07/06/05 et rapports, puis vrais kernels/graphes llama.cpp et EXLlama,
+  documentation mémoire/Vulkan/Android. Distinguer constat de code, hypothèse,
+  test logiciel et attribution physique. Pas de nouveau kernel choisi à l'aveugle.
+- Pistes à auditer : dispersion/réutilisation des poids EXL3 et LUT, opération
+  GPU trop petite + fence par projection, transformations/attention CPU,
+  choix de mémoire/cohérence/map/unmap, headBF16, duplication/mmaps et pression
+  mémoire, préfill token-par-token, biais/échauffement de la calibration.
+- Si instrumentation nécessaire : mesurer le parcours de production, garder
+  compteurs/latenceshost CPU/préparation/projection/head/readback distincts ;
+  timestamps GPU seulement avec capacité physique vérifiée. Diagnostics
+  copiables depuis l'app (pas seulement JSON inaccessible) avec build, GPU,
+  paramètres, sélection et état mémoire/thermique disponibles. Aucun gain
+  annoncé avant mesures S24. Pas de benchmark matériel Mac concurrent.
+- Vérifications ciblées du diagnostic et invariants/transitions touchés,
+  entréesréelles/fixtures nonvides, sortie sans informationspersonnelles ou
+  prompt ; source-level Rust/Kani pertinent, checks CI/APK exact. Recherche
+  et instrumentation ne constituent pas une validation de20tok/s.
+
+### ANDROID-PERF-2026-11-06-10 — lot coûts CPU/driver et diagnostic — préenregistré
+
+- Demande explicite : plusieurs défauts dans un lot, vérification rapide puis
+  pushAPK. Baseline18bd2b2/85e9db1, retour1,7tok/s. Essai09 recherche en cours,
+  pas de profilage physique possible (aucun appareilADB connecté).
+- Changements prévus : mapping persistant des seuls buffers de travail pour
+  retirer map/unmap par projection ; préférence DEVICE_LOCAL parmi les types
+  HOST_VISIBLE|HOST_COHERENT compatibles ; SU/SV arrondies FP16 au chargement
+  plutôt qu'à chaque token ; anglesRoPE calculés une fois par dimension et
+  position au lieu de chaque tête. Retirer la calibration automatique et son
+  choix expérimental du chemin livré, conserver le kernel scalaire de référence.
+- Diagnostic : tempshost upload/commandes/attente/readback, tempshead et modèle,
+  prefill/decode distincts, build/GPU/typesmémoire, étatmémoire/thermiqueAndroid,
+  copiable depuis le menu sans texte de conversation ni chemin de modèle.
+- Protocole : parité fixture/logits et projectionsGPU existantes, réutilisation
+  des buffers persistants et erreurs de bornes ; tests CPU typesmémoire/RoPE/
+  échelles, Kani sur sélection/bornes praticables ; fmt/Clippy/SPIR-V/CIAPK/UI.
+  Compteurs d'appels supprimés ne seront pas présentés comme un gain de débit.
+  Aucun nouveau kernel ni benchmark matériel local ; gainS24 non mesuré.
+- Extension préenregistrée avant modification : les codebooks sont déjà des
+  valeursFP16 exactes mais la LUT les stocke enFP32. Les empaqueter deux par
+  uint32 pour réduire l'empreinte786432→393216octets, conversionexacte à la
+  lecture (pas de nouvelle quantification). Vérifier les196608valeurs bit à
+  bit contre le shaderprocédural indépendant, puis projections/fixture.
+  Réduction d'empreinte seule, aucun gain de débit ni bande passante présumé.
+
+#### Résultats locaux et décision avant publication du lot09/10
+
+- Recherche09 **terminée pour les constats de code** : sourceVulkan llama.cpp
+  6c01da6278ab6c69ed67d9124806b50d2b299ba7 lue (graphes/fusion/soumissions),
+  GEMVEXLlama et guidesKhronos consultés. Hypothèses physiques non attribuées :
+  S24 non connecté. Comparaison34tok/sLFM3/Q4_K_M probable, backend inconnu ;
+  Termux n'implique pasGPU. Pas de benchmark relancé ni de chiffre inventé.
+- Lot10 implémenté : buffers persistants, mémoirelocale compatible privilégiée,
+  LUT2×pluscompacte sans changer lescodes, SU/SV précalculées, anglesRoPEpartagés,
+  calibration automatique retirée ; diagnosticcopiable sans prompt/réponse/paths.
+  Compteurs host parphase ethead imbriqué, mémoire/PSS/thermiqueAndroid séparés.
+- **19 testsCPU**, sept contrôles fonctionnelsVulkan réussis explicitement sur
+  Mesalogiciel :196608codesbitexact,72casQMV, buffers/réutilisation/erreurs,
+  headdense, fixtureEngine/oracle128logits et diagnostics. Format/Clippystrict,
+  actionlint/diffcheck, compilationKotlin/testKotlin et lintAndroid réussis.
+- Kani mémoire :190obligations/2covers (4flagsu32symboliques, masqueu32arbitraire,
+  unwind7,1obligationformatinatteignable) ; indicesLUT :27obligations/3covers,
+  u32/u16complets. Premier comparateurtuple échoue enKani mais ses entrées
+  concrètes passentnativement ; remplacé parboucleexplicite puis mêmeharnais
+  inchangé réussi. Échecs/contre-exemples conservés `build/perf10-kani*`.
+  Mutationretourpremiercompatible détectée par test, source restaurée et retestée.
+- Détails/commandes/limites : [rapport](docs/android-perf-batch-2026-11-06.md).
+  Logs temporaires `build/perf10-*` présents. État : **validé localement dans
+  ces domaines**, codeprêtàpublier sousautorisationexistante, CI/APK à inspecter.
+  **Aucun gain S24 mesuré**, causephysique de1,7tok/s nonconfirmée ; pas de
+  preuve complète GPU/FFI/Android. Pas de benchmark matériel concurrent.

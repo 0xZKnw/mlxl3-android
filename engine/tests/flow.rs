@@ -205,9 +205,15 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     );
     let done = events.last().unwrap();
     assert_eq!(done["type"], "done");
-    let tuned = done["vulkan_tuned_shapes"].as_u64().unwrap();
-    assert!(tuned > 0);
-    assert!(done["vulkan_tiled_shapes"].as_u64().unwrap() <= tuned);
+    assert_eq!(done["performance"]["gpu"]["automatic_calibration"], false);
+    assert_eq!(done["performance"]["gpu"]["scratch_mapping"], "persistent");
+    for phase in ["prefill", "decode"] {
+        let p = &done["performance"][phase];
+        assert!(p["wait_ns"].as_u64().unwrap() > 0);
+        assert!(p["model_ns"].as_u64().unwrap() >= p["wait_ns"].as_u64().unwrap());
+        assert!(p["head_ns"].as_u64().unwrap() > 0);
+    }
+    assert!(!done["performance"].to_string().contains("Hello"));
     assert_eq!(
         done["prefill_submissions"].as_u64().unwrap(),
         done["prompt_tokens"].as_u64().unwrap() * 21 + 1

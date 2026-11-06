@@ -20,6 +20,15 @@ struct Tensor {
     shape: Vec<usize>,
     dtype: Dtype,
 }
+
+fn rounded_scales(values: Vec<f32>) -> Result<Vec<f32>> {
+    let values: Vec<_> = values.into_iter().map(math::half).collect();
+    ensure!(
+        values.iter().all(|v| v.is_finite()),
+        "EXL3 scales exceed FP16 range"
+    );
+    Ok(values)
+}
 pub struct Weights {
     shards: Vec<Mmap>,
     tensors: BTreeMap<String, Tensor>,
@@ -222,10 +231,9 @@ impl Linear {
             } else {
                 Codebook::Default
             };
-            let su = scale("suh", "su", rows)?;
-            let sv = scale("svh", "sv", cols)?;
+            let su = rounded_scales(scale("suh", "su", rows)?)?;
+            let sv = rounded_scales(scale("svh", "sv", cols)?)?;
             let buffer = gpu.buffer(w.bytes(&trellis)?)?;
-            gpu.prepare_exl3(&buffer, rows, cols, bits as u32, cb as u32)?;
             Storage::Exl3 {
                 buffer,
                 input: rows,
@@ -268,6 +276,7 @@ impl Linear {
 
     pub fn forward(&self, gpu: &mut Gpu, x: &[f32]) -> Result<Vec<f32>> {
         ensure!(x.len() == self.input, "Linear input shape mismatch");
+        let mut cpu_started = std::time::Instant::now();
         let mut result = match &self.storage {
             Storage::Exl3 {
                 buffer,
@@ -280,21 +289,34 @@ impl Linear {
             } => {
                 let mut xhat = vec![0.; *input];
                 for (i, value) in x.iter().enumerate() {
-                    xhat[i] = math::half(math::half(*value) * math::half(su[i]));
+                    xhat[i] = math::half(math::half(*value) * su[i]);
                 }
                 math::hadamard(&mut xhat)?;
+                gpu.record_profile(|p| {
+                    p.projection_cpu_ns = p
+                        .projection_cpu_ns
+                        .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
+                });
                 let mut y = gpu.multiply(buffer, &xhat, *output, *bits, *cb)?;
+                cpu_started = std::time::Instant::now();
                 y.iter_mut().for_each(|v| *v = math::half(*v));
                 math::hadamard(&mut y)?;
                 for (v, scale) in y.iter_mut().zip(sv) {
-                    *v = math::half(*v * math::half(*scale));
+                    *v = math::half(*v * *scale);
                 }
                 y.truncate(self.output);
                 y
             }
             Storage::Dense { chunks, dtype } => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();
-                gpu.multiply_dense_chunks(chunks, &x, *dtype)?
+                gpu.record_profile(|p| {
+                    p.projection_cpu_ns = p
+                        .projection_cpu_ns
+                        .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
+                });
+                let result = gpu.multiply_dense_chunks(chunks, &x, *dtype)?;
+                cpu_started = std::time::Instant::now();
+                result
             }
         };
         // Match the FP16 projection boundary used by EXL3 reference execution.
@@ -303,6 +325,26 @@ impl Linear {
             result.len() == self.output && result.iter().all(|v| v.is_finite()),
             "Invalid linear output"
         );
+        gpu.record_profile(|p| {
+            p.projection_cpu_ns = p
+                .projection_cpu_ns
+                .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
+        });
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn immutable_scales_round_once_and_reject_overflow() {
+        assert_eq!(
+            rounded_scales(vec![1.0002, -1.0002, 65504., 1e-8]).unwrap(),
+            [1., -1., 65504., 0.]
+        );
+        for value in [f32::MAX, f32::NAN, f32::INFINITY] {
+            assert!(rounded_scales(vec![value]).is_err());
+        }
     }
 }

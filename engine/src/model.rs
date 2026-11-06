@@ -370,7 +370,12 @@ impl Model {
         self.position += 1;
         if logits {
             let hidden = math::rms_norm(&hidden, &self.norm, self.config.norm_eps)?;
-            Ok(Some(self.head.forward(&mut self.gpu, &hidden)?))
+            let started = std::time::Instant::now();
+            let result = self.head.forward(&mut self.gpu, &hidden)?;
+            self.gpu.record_profile(|p| {
+                p.head_ns = p.head_ns.saturating_add(crate::vulkan::elapsed_ns(started))
+            });
+            Ok(Some(result))
         } else {
             Ok(None)
         }

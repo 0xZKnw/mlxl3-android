@@ -70,10 +70,14 @@ pub fn rope(
         "Invalid RoPE parameters"
     );
     let active = (fraction * dim as f32) as usize / 2;
-    for head in heads.chunks_exact_mut(dim) {
-        for j in 0..active {
+    let angles: Vec<_> = (0..active)
+        .map(|j| {
             let angle = position as f32 / theta.powf((2 * j) as f32 / dim as f32);
-            let (sin, cos) = angle.sin_cos();
+            angle.sin_cos()
+        })
+        .collect();
+    for head in heads.chunks_exact_mut(dim) {
+        for (j, &(sin, cos)) in angles.iter().enumerate() {
             let a = head[j];
             let b = head[j + dim / 2];
             head[j] = half(a * cos - b * sin);
@@ -177,6 +181,23 @@ fn greedy_selection_stays_in_vocabulary() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_rope_angles_match_per_head_reference() {
+        for fraction in [0.5, 1.] {
+            let mut actual: Vec<_> = (0..4 * 128).map(|i| (i % 31) as f32 / 32.).collect();
+            let mut expected = actual.clone();
+            for head in expected.as_chunks_mut::<128>().0 {
+                for j in 0..(fraction * 64.) as usize {
+                    let (sin, cos) = (37. / 10000f32.powf((2 * j) as f32 / 128.)).sin_cos();
+                    let (a, b) = (head[j], head[j + 64]);
+                    head[j] = half(a * cos - b * sin);
+                    head[j + 64] = half(b * cos + a * sin);
+                }
+            }
+            rope(&mut actual, 128, 10000., fraction, 37).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
     #[test]
     fn hadamard_matches_independent_sylvester_matrix() {
         let input: Vec<_> = (0..256)

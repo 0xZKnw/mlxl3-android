@@ -81,7 +81,7 @@ jobs:
         with:
           kani-version: '0.68.0'
           command: cargo kani
-          args: --manifest-path engine/Cargo.toml --lib --harness tiled_groups_cover_exactly_valid_outputs
+          args: --manifest-path engine/Cargo.toml --lib --harness memory_selection_checks_flags_and_prefers_local_for_four_types
       - name: All CPU proof harnesses
         run: cargo kani --manifest-path engine/Cargo.toml --lib
 
@@ -102,6 +102,7 @@ jobs:
         run: |
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::tiled_qmv -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::persistent_scratch -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test vulkan -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1
 

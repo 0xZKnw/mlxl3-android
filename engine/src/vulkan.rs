@@ -13,13 +13,45 @@ use std::{
     time::Instant,
 };
 
-const CODEBOOK_BYTES: usize = 3 * 65536 * 4;
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct Profile {
+    pub upload_ns: u64,
+    pub record_submit_ns: u64,
+    pub wait_ns: u64,
+    pub readback_ns: u64,
+    pub projection_cpu_ns: u64,
+    pub model_ns: u64,
+    pub head_ns: u64,
+}
+
+pub(crate) fn elapsed_ns(start: Instant) -> u64 {
+    start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
+    let required =
+        (vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT).as_raw();
+    let mut fallback = None;
+    for (i, flags) in flags.iter().take(32).enumerate() {
+        if allowed & (1u32 << i) != 0 && flags & required == required {
+            if flags & vk::MemoryPropertyFlags::DEVICE_LOCAL.as_raw() != 0 {
+                return Some(i);
+            }
+            if fallback.is_none() {
+                fallback = Some(i);
+            }
+        }
+    }
+    fallback
+}
+
+const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
 
 fn codebook_offset(codebook: u32, state: u16) -> Option<usize> {
     if codebook >= 3 {
         return None;
     }
-    Some((codebook as usize * 65536 + usize::from(state)) * 4)
+    Some((codebook as usize * 65536 + usize::from(state)) * 2)
 }
 
 fn codebook_table() -> Vec<u8> {
@@ -27,8 +59,8 @@ fn codebook_table() -> Vec<u8> {
     for cb in [Codebook::Default, Codebook::Mcg, Codebook::Mul1] {
         for state in 0..=u16::MAX {
             let offset = codebook_offset(cb as u32, state).expect("valid codebook");
-            table[offset..offset + 4]
-                .copy_from_slice(&codec::decode_codeword(state, cb).to_f32().to_le_bytes());
+            table[offset..offset + 2]
+                .copy_from_slice(&codec::decode_codeword(state, cb).to_bits().to_le_bytes());
         }
     }
     table
@@ -114,8 +146,31 @@ pub struct Buffer {
     raw: vk::Buffer,
     memory: vk::DeviceMemory,
     size: usize,
+    mapped: Option<*mut std::ffi::c_void>,
 }
+// Buffers move with the serialized engine; the raw mapping deliberately keeps them !Sync.
+unsafe impl Send for Buffer {}
 impl Buffer {
+    fn with_mapping<T>(&self, action: impl FnOnce(*mut std::ffi::c_void) -> T) -> Result<T> {
+        ensure!(
+            !self.device.abandoned.load(Ordering::Relaxed),
+            "GPU timed out; restart the app"
+        );
+        if let Some(ptr) = self.mapped {
+            return Ok(action(ptr));
+        }
+        unsafe {
+            let ptr = self.device.raw.map_memory(
+                self.memory,
+                0,
+                self.size as u64,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            let result = action(ptr);
+            self.device.raw.unmap_memory(self.memory);
+            Ok(result)
+        }
+    }
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         ensure!(
             bytes.len() <= self.size,
@@ -125,16 +180,9 @@ impl Buffer {
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
         );
-        unsafe {
-            let ptr = self.device.raw.map_memory(
-                self.memory,
-                0,
-                self.size as u64,
-                vk::MemoryMapFlags::empty(),
-            )?;
+        self.with_mapping(|ptr| unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast(), bytes.len());
-            self.device.raw.unmap_memory(self.memory);
-        }
+        })?;
         Ok(())
     }
     fn read_f32(&self, count: usize) -> Result<Vec<f32>> {
@@ -143,16 +191,9 @@ impl Buffer {
             "GPU buffer read exceeds allocation"
         );
         let mut output = vec![0.; count];
-        unsafe {
-            let ptr = self.device.raw.map_memory(
-                self.memory,
-                0,
-                self.size as u64,
-                vk::MemoryMapFlags::empty(),
-            )?;
+        self.with_mapping(|ptr| unsafe {
             std::ptr::copy_nonoverlapping(ptr.cast::<f32>(), output.as_mut_ptr(), count);
-            self.device.raw.unmap_memory(self.memory);
-        }
+        })?;
         ensure!(
             output.iter().all(|x| x.is_finite()),
             "GPU returned non-finite values"
@@ -164,6 +205,9 @@ impl Drop for Buffer {
     fn drop(&mut self) {
         if !self.device.abandoned.load(Ordering::Relaxed) {
             unsafe {
+                if self.mapped.is_some() {
+                    self.device.raw.unmap_memory(self.memory);
+                }
                 self.device.raw.destroy_buffer(self.raw, None);
                 self.device.raw.free_memory(self.memory, None);
             }
@@ -173,6 +217,7 @@ impl Drop for Buffer {
 
 pub struct Gpu {
     device: Arc<Device>,
+    properties: vk::PhysicalDeviceProperties,
     queue: vk::Queue,
     pool: vk::CommandPool,
     command: vk::CommandBuffer,
@@ -190,6 +235,8 @@ pub struct Gpu {
     codebooks: Option<Buffer>,
     batch_outputs: Vec<Buffer>,
     submissions: Cell<u64>,
+    profile: Cell<Profile>,
+    used_memory_types: Cell<u32>,
     pub name: String,
     pub max_range: usize,
     max_groups: u32,
@@ -267,6 +314,7 @@ impl Gpu {
         });
         let mut gpu = Self {
             device,
+            properties: props,
             queue,
             pool: vk::CommandPool::null(),
             command: vk::CommandBuffer::null(),
@@ -284,6 +332,8 @@ impl Gpu {
             codebooks: None,
             batch_outputs: vec![],
             submissions: Cell::new(0),
+            profile: Cell::new(Profile::default()),
+            used_memory_types: Cell::new(0),
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
                 .to_string_lossy()
                 .into_owned(),
@@ -347,8 +397,8 @@ impl Gpu {
         }
         gpu.qmv = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/qmv.spv")))?;
         gpu.dense = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense.spv")))?;
-        gpu.input = Some(gpu.buffer(&vec![0; 32768 * 4])?);
-        gpu.output = Some(gpu.buffer(&vec![0; 32768 * 4])?);
+        gpu.input = Some(gpu.scratch_buffer()?);
+        gpu.output = Some(gpu.scratch_buffer()?);
         gpu.codebooks = Some(gpu.buffer(&codebook_table())?);
         Ok(gpu)
     }
@@ -426,15 +476,12 @@ impl Gpu {
                 None,
             )?;
             let req = d.get_buffer_memory_requirements(raw);
-            let ty = (0..self.device.memory.memory_type_count).find(|i| {
-                req.memory_type_bits & (1 << i) != 0
-                    && self.device.memory.memory_types[*i as usize]
-                        .property_flags
-                        .contains(
-                            vk::MemoryPropertyFlags::HOST_VISIBLE
-                                | vk::MemoryPropertyFlags::HOST_COHERENT,
-                        )
-            });
+            let flags: Vec<_> = self.device.memory.memory_types
+                [..self.device.memory.memory_type_count as usize]
+                .iter()
+                .map(|t| t.property_flags.as_raw())
+                .collect();
+            let ty = choose_memory_type(&flags, req.memory_type_bits);
             let Some(ty) = ty else {
                 d.destroy_buffer(raw, None);
                 bail!("No host-visible coherent Vulkan memory");
@@ -442,7 +489,7 @@ impl Gpu {
             let memory = match d.allocate_memory(
                 &vk::MemoryAllocateInfo::default()
                     .allocation_size(req.size)
-                    .memory_type_index(ty),
+                    .memory_type_index(ty as u32),
                 None,
             ) {
                 Ok(memory) => memory,
@@ -456,12 +503,53 @@ impl Gpu {
                 raw,
                 memory,
                 size,
+                mapped: None,
             };
             d.bind_buffer_memory(raw, memory, 0)?;
             buffer.write(bytes)?;
             self.allocated += size;
+            self.used_memory_types
+                .set(self.used_memory_types.get() | (1 << ty));
             Ok(buffer)
         }
+    }
+
+    fn scratch_buffer(&mut self) -> Result<Buffer> {
+        let mut buffer = self.buffer(&vec![0; 32768 * 4])?;
+        buffer.mapped = Some(unsafe {
+            self.device.raw.map_memory(
+                buffer.memory,
+                0,
+                buffer.size as u64,
+                vk::MemoryMapFlags::empty(),
+            )?
+        });
+        Ok(buffer)
+    }
+
+    pub(crate) fn record_profile(&self, update: impl FnOnce(&mut Profile)) {
+        let mut profile = self.profile.get();
+        update(&mut profile);
+        self.profile.set(profile);
+    }
+
+    pub(crate) fn take_profile(&self) -> Profile {
+        self.profile.replace(Profile::default())
+    }
+
+    pub fn diagnostics(&self) -> serde_json::Value {
+        let types: Vec<_> = (0..self.device.memory.memory_type_count)
+            .filter(|i| self.used_memory_types.get() & (1 << i) != 0)
+            .map(|i| {
+                let t = self.device.memory.memory_types[i as usize];
+                serde_json::json!({"index":i,"flags":t.property_flags.as_raw(),"heap":t.heap_index})
+            })
+            .collect();
+        serde_json::json!({"device":self.name,"device_type":self.properties.device_type.as_raw(),
+            "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
+            "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
+            "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
+            "kernel":"scalar_reference","automatic_calibration":false,"scratch_mapping":"persistent"})
     }
 
     fn validate_projection(
@@ -612,12 +700,7 @@ impl Gpu {
         bits: u32,
         codebook: u32,
     ) -> Result<Vec<f32>> {
-        let tiled = self
-            .tuned
-            .get(&(x.len(), outputs, bits, codebook))
-            .copied()
-            .unwrap_or(false);
-        self.multiply_kernel(weights, x, outputs, bits, codebook, tiled)
+        self.multiply_kernel(weights, x, outputs, bits, codebook, false)
     }
 
     fn multiply_kernel(
@@ -660,7 +743,7 @@ impl Gpu {
             .map(|(weights, rows)| self.validate_projection(weights, x, *rows, 0, dtype))
             .collect::<Result<Vec<_>>>()?;
         while self.batch_outputs.len() < chunks.len() {
-            let output = self.buffer(&vec![0; 32768 * 4])?;
+            let output = self.scratch_buffer()?;
             self.batch_outputs.push(output);
         }
         let jobs: Vec<_> = chunks
@@ -676,10 +759,12 @@ impl Gpu {
             })
             .collect();
         self.execute(self.dense, x, &jobs)?;
+        let started = Instant::now();
         let mut result = Vec::with_capacity(total);
         for job in jobs {
             result.extend(job.output.read_f32(job.outputs)?);
         }
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
         Ok(result)
     }
 
@@ -715,7 +800,10 @@ impl Gpu {
                 groups,
             }],
         )?;
-        output.read_f32(outputs)
+        let started = Instant::now();
+        let result = output.read_f32(outputs);
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        result
     }
 
     fn execute(&self, pipeline: vk::Pipeline, x: &[f32], jobs: &[Dispatch<'_>]) -> Result<()> {
@@ -742,7 +830,10 @@ impl Gpu {
         let bytes = unsafe {
             std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
         };
+        let started = Instant::now();
         input.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        let recording = Instant::now();
         unsafe {
             let d = &self.device.raw;
             d.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty())?;
@@ -817,7 +908,13 @@ impl Gpu {
             let submits = [vk::SubmitInfo::default().command_buffers(&commands)];
             d.queue_submit(self.queue, &submits, self.fence)?;
             self.submissions.set(self.submissions.get().wrapping_add(1));
-            if let Err(err) = d.wait_for_fences(&[self.fence], true, 30_000_000_000) {
+            self.record_profile(|p| {
+                p.record_submit_ns = p.record_submit_ns.saturating_add(elapsed_ns(recording))
+            });
+            let waiting = Instant::now();
+            let waited = d.wait_for_fences(&[self.fence], true, 30_000_000_000);
+            self.record_profile(|p| p.wait_ns = p.wait_ns.saturating_add(elapsed_ns(waiting)));
+            if let Err(err) = waited {
                 // Pending work may still own buffers; retain resources until process exit.
                 self.device.abandoned.store(true, Ordering::Relaxed);
                 bail!("Vulkan dispatch failed ({err:?}); restart the app");
@@ -851,6 +948,38 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memory_selection_preserves_requirements_and_prefers_local() {
+        assert_eq!(choose_memory_type(&[6, 7, 7], 7), Some(1));
+        assert_eq!(
+            choose_memory_type(&[140, 142, 142, u32::MAX], u32::MAX),
+            Some(3)
+        );
+        assert_eq!(choose_memory_type(&[6, 7], 1), Some(0));
+        assert_eq!(choose_memory_type(&[1, 2, 4], u32::MAX), None);
+        assert_eq!(choose_memory_type(&[], u32::MAX), None);
+        assert_eq!(choose_memory_type(&[7; 32], 1 << 31), Some(31));
+        assert_eq!(choose_memory_type(&[7; 33], 0), None);
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; persistent scratch mappings and checked copies"]
+    fn persistent_scratch_mapping_survives_reuse_and_errors() {
+        let mut gpu = Gpu::new().unwrap();
+        let buffer = gpu.scratch_buffer().unwrap();
+        let address = buffer.mapped.unwrap();
+        for values in [[1f32, -2., 3.], [4., 5., 6.]] {
+            let bytes: Vec<_> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            buffer.write(&bytes).unwrap();
+            assert_eq!(buffer.read_f32(3).unwrap(), values);
+            assert_eq!(buffer.mapped, Some(address));
+        }
+        assert!(buffer.write(&vec![0; buffer.size + 1]).is_err());
+        assert!(buffer.read_f32(usize::MAX).is_err());
+        assert!(buffer.read_f32(buffer.size / 4 + 1).is_err());
+        buffer.write(&1f32.to_ne_bytes()).unwrap();
+        assert_eq!(buffer.read_f32(1).unwrap(), [1.]);
+    }
 
     #[test]
     fn tiled_selection_requires_parity_stability_and_a_clear_gain() {
@@ -958,11 +1087,15 @@ mod tests {
     fn codebook_table_has_all_finite_values_and_checked_offsets() {
         let table = codebook_table();
         assert_eq!(table.len(), CODEBOOK_BYTES);
-        let (values, tail) = table.as_chunks::<4>();
+        let (values, tail) = table.as_chunks::<2>();
         assert!(tail.is_empty());
-        assert!(values.iter().all(|b| f32::from_le_bytes(*b).is_finite()));
+        assert!(
+            values
+                .iter()
+                .all(|b| half::f16::from_bits(u16::from_le_bytes(*b)).is_finite())
+        );
         assert_eq!(codebook_offset(0, 0), Some(0));
-        assert_eq!(codebook_offset(2, u16::MAX), Some(CODEBOOK_BYTES - 4));
+        assert_eq!(codebook_offset(2, u16::MAX), Some(CODEBOOK_BYTES - 2));
         assert_eq!(codebook_offset(3, 0), None);
         assert_eq!(codebook_offset(u32::MAX, u16::MAX), None);
     }
@@ -1115,6 +1248,29 @@ mod tests {
 #[cfg(kani)]
 mod proofs {
     use super::*;
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn memory_selection_checks_flags_and_prefers_local_for_four_types() {
+        let flags: [u32; 4] = kani::any();
+        let allowed: u32 = kani::any();
+        let index = choose_memory_type(&flags, allowed);
+        let mut eligible = false;
+        for i in 0..4 {
+            let valid = allowed & (1 << i) != 0 && flags[i] & 6 == 6;
+            eligible |= valid;
+            if valid {
+                assert!(index.is_some());
+                let selected = index.unwrap();
+                assert!(selected < 4 && allowed & (1 << selected) != 0 && flags[selected] & 6 == 6);
+                if flags[i] & 1 != 0 {
+                    assert!(flags[selected] & 1 != 0);
+                }
+            }
+        }
+        assert_eq!(index.is_some(), eligible);
+        kani::cover!(index == Some(3) && flags[0] & 6 == 6 && flags[0] & 1 == 0);
+        kani::cover!(index.is_none());
+    }
 
     #[kani::proof]
     fn tiled_groups_cover_exactly_valid_outputs() {
@@ -1161,10 +1317,10 @@ mod proofs {
         let offset = codebook_offset(cb, state);
         assert_eq!(offset.is_some(), cb < 3);
         if let Some(offset) = offset {
-            assert_eq!(offset % 4, 0);
-            assert!(offset + 4 <= CODEBOOK_BYTES);
-            assert_eq!(offset / 4 / 65536, cb as usize);
-            assert_eq!(offset / 4 % 65536, usize::from(state));
+            assert_eq!(offset % 2, 0);
+            assert!(offset + 2 <= CODEBOOK_BYTES);
+            assert_eq!(offset / 2 / 65536, cb as usize);
+            assert_eq!(offset / 2 % 65536, usize::from(state));
         }
         kani::cover!(cb == 2 && state == u16::MAX);
         kani::cover!(cb == 0 && state == 0);
