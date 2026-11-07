@@ -129,13 +129,35 @@ fn main() {
         );
         for mcg in [false, true] {
             let mut compiler = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()));
-            compiler.args(["--target-env=vulkan1.1", "-O", "-fshader-stage=compute", "-DEXL3_NATIVE=1", "-DEXL3_PARTIALS=1", "-DEXL3_UNROLL2=1"])
+            compiler
+                .args([
+                    "--target-env=vulkan1.1",
+                    "-O",
+                    "-fshader-stage=compute",
+                    "-DEXL3_NATIVE=1",
+                    "-DEXL3_PARTIALS=1",
+                    "-DEXL3_UNROLL2=1",
+                ])
                 .arg(format!("-DEXL3_BITS={bits}"))
                 .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"));
-            if mcg { compiler.arg("-DEXL3_FIXED_MCG=1"); }
-            let name = if mcg { format!("qmv_wave_{bits}_mcg_unroll2.spv") } else { format!("qmv_wave_{bits}_cooperative_unroll2.spv") };
-            let status = compiler.arg("shaders/qmv_stream.comp").arg("-o").arg(out.join(name)).status().expect("glslc");
-            assert!(status.success(), "unroll2 K{bits} shader compilation failed");
+            if mcg {
+                compiler.arg("-DEXL3_FIXED_MCG=1");
+            }
+            let name = if mcg {
+                format!("qmv_wave_{bits}_mcg_unroll2.spv")
+            } else {
+                format!("qmv_wave_{bits}_cooperative_unroll2.spv")
+            };
+            let status = compiler
+                .arg("shaders/qmv_stream.comp")
+                .arg("-o")
+                .arg(out.join(name))
+                .status()
+                .expect("glslc");
+            assert!(
+                status.success(),
+                "unroll2 K{bits} shader compilation failed"
+            );
         }
     }
 }

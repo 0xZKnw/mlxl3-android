@@ -23,7 +23,9 @@ pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_benchmark(
     callback: JObject,
 ) -> jstring {
     boundary(&mut env, |env| {
-        let mut guard = ENGINE.try_lock().map_err(|_| anyhow::anyhow!("Engine is busy"))?;
+        let mut guard = ENGINE
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Engine is busy"))?;
         let engine = guard.as_mut().context("Load a model first")?;
         engine.benchmark(32, 128, &CANCEL, &mut |event| emit(env, &callback, event))
     })

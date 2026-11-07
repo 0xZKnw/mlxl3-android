@@ -248,12 +248,20 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         true
     );
     let mut bench_events = vec![];
-    experimental.benchmark(2, 3, &cancelled, &mut |event| { bench_events.push(event); Ok(()) }).unwrap();
+    experimental
+        .benchmark(2, 3, &cancelled, &mut |event| {
+            bench_events.push(event);
+            Ok(())
+        })
+        .unwrap();
     let benchmark = bench_events.last().unwrap();
     assert_eq!(benchmark["type"], "benchmark_done");
     assert_eq!(benchmark["prompt_tokens"], 2);
     assert_eq!(benchmark["decode_tokens"], 3);
-    assert_eq!(benchmark["performance"]["generation"]["fixed_input_tokens"], true);
+    assert_eq!(
+        benchmark["performance"]["generation"]["fixed_input_tokens"],
+        true
+    );
     assert_eq!(benchmark["performance"]["generation"]["gpu_greedy"], true);
     drop(experimental);
     engine.model.reset();

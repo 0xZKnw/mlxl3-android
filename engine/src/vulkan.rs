@@ -78,7 +78,9 @@ static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 
-pub fn set_unroll2(enabled: bool) { REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed); }
+pub fn set_unroll2(enabled: bool) {
+    REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed);
+}
 
 pub fn set_layer_batch(value: u32) -> bool {
     if ![1, 2, 4].contains(&value) {
@@ -1521,7 +1523,9 @@ impl Gpu {
                 self.mcg_attempted[index] = true;
                 let bytes: &[u8] = match (bits, self.enable_unroll2) {
                     (4, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg.spv")),
-                    (4, true) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg_unroll2.spv")),
+                    (4, true) => {
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg_unroll2.spv"))
+                    }
                     (5, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg.spv")),
                     _ => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg_unroll2.spv")),
                 };
@@ -1556,10 +1560,20 @@ impl Gpu {
                 && self.allow_cooperative_k4
             {
                 let bytes: &[u8] = match (bits, self.enable_unroll2) {
-                    (4, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv")),
-                    (4, true) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative_unroll2.spv")),
-                    (5, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative.spv")),
-                    _ => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative_unroll2.spv")),
+                    (4, false) => {
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"))
+                    }
+                    (4, true) => include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/qmv_wave_4_cooperative_unroll2.spv"
+                    )),
+                    (5, false) => {
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative.spv"))
+                    }
+                    _ => include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/qmv_wave_5_cooperative_unroll2.spv"
+                    )),
                 };
                 match self.pipeline_with_subgroup(bytes, None, true) {
                     Ok(pipeline) => {
