@@ -81,12 +81,16 @@ static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
 
 pub fn set_head_rows(value: u32) -> bool {
-    if ![1, 2, 4, 8].contains(&value) { return false; }
+    if ![1, 2, 4, 8].contains(&value) {
+        return false;
+    }
     REQUESTED_HEAD_ROWS.store(value, Ordering::Relaxed);
     true
 }
 
-pub fn set_subgroup_head(enabled: bool) { REQUESTED_SUBGROUP_HEAD.store(enabled, Ordering::Relaxed); }
+pub fn set_subgroup_head(enabled: bool) {
+    REQUESTED_SUBGROUP_HEAD.store(enabled, Ordering::Relaxed);
+}
 
 pub fn set_unroll2(enabled: bool) {
     REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed);
@@ -911,8 +915,12 @@ impl Gpu {
             dense_rows: vk::Pipeline::null(),
             fast_head: REQUESTED_FAST_HEAD.load(Ordering::Relaxed),
             subgroup_head: REQUESTED_SUBGROUP_HEAD.load(Ordering::Relaxed)
-                && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
-                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::ARITHMETIC),
+                && subgroup
+                    .supported_stages
+                    .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::ARITHMETIC),
             head_rows: REQUESTED_HEAD_ROWS.load(Ordering::Relaxed),
             reduce: vk::Pipeline::null(),
             swiglu: vk::Pipeline::null(),
@@ -1063,12 +1071,24 @@ impl Gpu {
             gpu.fast_head = false;
         }
         if gpu.subgroup_head {
-            gpu.dense_subgroup = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_subgroup.spv"))).unwrap_or(vk::Pipeline::null());
-            if gpu.dense_subgroup == vk::Pipeline::null() { gpu.subgroup_head = false; }
-            else { gpu.capture_stats("dense_subgroup".into(), gpu.dense_subgroup); }
+            gpu.dense_subgroup = gpu
+                .pipeline(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/dense_subgroup.spv"
+                )))
+                .unwrap_or(vk::Pipeline::null());
+            if gpu.dense_subgroup == vk::Pipeline::null() {
+                gpu.subgroup_head = false;
+            } else {
+                gpu.capture_stats("dense_subgroup".into(), gpu.dense_subgroup);
+            }
         }
-        gpu.dense_rows = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_rows.spv"))).unwrap_or(vk::Pipeline::null());
-        if gpu.dense_rows == vk::Pipeline::null() { gpu.head_rows = 4; }
+        gpu.dense_rows = gpu
+            .pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_rows.spv")))
+            .unwrap_or(vk::Pipeline::null());
+        if gpu.dense_rows == vk::Pipeline::null() {
+            gpu.head_rows = 4;
+        }
         gpu.reduce = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/reduce.spv")))?;
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
@@ -3129,13 +3149,22 @@ impl Gpu {
     ) -> Result<DenseHeadPlan> {
         let rows: Vec<_> = chunks.iter().map(|(_, rows)| *rows).collect();
         let total = dense_batch_output_count(&rows).context("Invalid dense head chunks")?;
-        if rows.iter().any(|rows| rows.div_ceil(self.head_rows as usize) > self.max_groups as usize) {
+        if rows
+            .iter()
+            .any(|rows| rows.div_ceil(self.head_rows as usize) > self.max_groups as usize)
+        {
             self.head_rows = 4;
         }
         let rows_per_group = self.head_rows;
-        let pipeline = if rows_per_group != 4 { self.dense_rows }
-            else if self.subgroup_head { self.dense_subgroup }
-            else if self.fast_head { self.dense_pair } else { self.dense };
+        let pipeline = if rows_per_group != 4 {
+            self.dense_rows
+        } else if self.subgroup_head {
+            self.dense_subgroup
+        } else if self.fast_head {
+            self.dense_pair
+        } else {
+            self.dense
+        };
         let dummy = vec![0.0; input_len];
         let params = chunks
             .iter()
@@ -3263,7 +3292,12 @@ impl Gpu {
                 input,
                 weights,
                 output,
-                params: [plan.input_len as u32, *rows as u32, plan.dtype, plan.rows_per_group],
+                params: [
+                    plan.input_len as u32,
+                    *rows as u32,
+                    plan.dtype,
+                    plan.rows_per_group,
+                ],
                 outputs: *rows,
                 groups: rows.div_ceil(plan.rows_per_group as usize) as u32,
                 groups_y: 1,
@@ -3778,10 +3812,17 @@ mod tests {
         for input in [128usize, 129, 2048] {
             let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
             for dtype in 0..=1 {
-                let bytes: Vec<u8> = (0..input * 9).flat_map(|i| {
-                    let v = (i as f32 % 29. - 14.) / 64.;
-                    (if dtype == 0 { half::f16::from_f32(v).to_bits() } else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
-                }).collect();
+                let bytes: Vec<u8> = (0..input * 9)
+                    .flat_map(|i| {
+                        let v = (i as f32 % 29. - 14.) / 64.;
+                        (if dtype == 0 {
+                            half::f16::from_f32(v).to_bits()
+                        } else {
+                            half::bf16::from_f32(v).to_bits()
+                        })
+                        .to_le_bytes()
+                    })
+                    .collect();
                 let baseline = gpu.buffer(&bytes).unwrap();
                 let reference = gpu.multiply(&baseline, &x, 9, 0, dtype).unwrap();
                 for rows in [1, 2, 8] {
@@ -3789,7 +3830,10 @@ mod tests {
                     let chunks = vec![(gpu.buffer(&bytes).unwrap(), 9)];
                     let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
                     let actual = gpu.forward_dense_head(&plan, &x).unwrap();
-                    assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+                    assert_eq!(
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                    );
                 }
                 gpu.head_rows = 4;
             }
@@ -3803,19 +3847,33 @@ mod tests {
         let gpu = Gpu::new();
         set_subgroup_head(false);
         let mut gpu = gpu.unwrap();
-        if !gpu.subgroup_head { return; }
+        if !gpu.subgroup_head {
+            return;
+        }
         for input in [128usize, 129, 2048] {
             let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
             for dtype in 0..=1 {
-                let bytes: Vec<u8> = (0..input * 5).flat_map(|i| {
-                    let v = (i as f32 % 29. - 14.) / 64.;
-                    (if dtype == 0 { half::f16::from_f32(v).to_bits() } else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
-                }).collect();
+                let bytes: Vec<u8> = (0..input * 5)
+                    .flat_map(|i| {
+                        let v = (i as f32 % 29. - 14.) / 64.;
+                        (if dtype == 0 {
+                            half::f16::from_f32(v).to_bits()
+                        } else {
+                            half::bf16::from_f32(v).to_bits()
+                        })
+                        .to_le_bytes()
+                    })
+                    .collect();
                 let chunks = vec![(gpu.buffer(&bytes).unwrap(), 5)];
                 let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
                 let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
                 let actual = gpu.forward_dense_head(&plan, &x).unwrap();
-                assert!(actual.iter().zip(&reference).all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005));
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
             }
         }
     }
