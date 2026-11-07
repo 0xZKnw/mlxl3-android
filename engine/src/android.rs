@@ -17,6 +17,19 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_benchmark(
+    mut env: JNIEnv,
+    _class: JClass,
+    callback: JObject,
+) -> jstring {
+    boundary(&mut env, |env| {
+        let mut guard = ENGINE.try_lock().map_err(|_| anyhow::anyhow!("Engine is busy"))?;
+        let engine = guard.as_mut().context("Load a model first")?;
+        engine.benchmark(32, 128, &CANCEL, &mut |event| emit(env, &callback, event))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setSplitK(
     _env: JNIEnv,
     _class: JClass,

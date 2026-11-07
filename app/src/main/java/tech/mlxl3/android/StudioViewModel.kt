@@ -146,7 +146,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     private val callback = NativeEngine.Callback { json ->
         val event = JSONObject(json)
-        val report = if (event.optString("type") == "done") JSONObject()
+        val report = if (event.optString("type") in listOf("done", "benchmark_done")) JSONObject()
             .put("engine", event).put("environment_before", environmentBefore)
             .put("environment_after", environment()).toString(2) else null
         main.post {
@@ -165,6 +165,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                         messages = messages.dropLast(1) + it.copy(speed = speed)
                     }
                     status = "${event.getInt("tokens")} tokens · %.1f s".format(event.getDouble("decode_seconds") + event.getDouble("prefill_seconds"))
+                }
+                "benchmark_done" -> {
+                    diagnostics = report
+                    val rate = event.optDouble("decode_tokens_per_second", Double.NaN)
+                    status = if (rate.isFinite() && rate >= 0) "Benchmark : %.1f tok/s".format(rate) else "Benchmark terminé"
                 }
             }
         }
@@ -259,6 +264,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 check(stopped.get()) { result }
             }
+        }
+    }
+
+    fun benchmark() {
+        if (busy || !ready) return
+        task {
+            environmentBefore = environment()
+            main.post { diagnostics = null; status = "Benchmark…" }
+            val result = NativeEngine.benchmark(callback)
+            if (result.isNotEmpty()) check(stopped.get()) { result }
         }
     }
 

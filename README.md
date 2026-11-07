@@ -61,6 +61,9 @@ per submission. It only combines adjacent layers whose GPU paths are enabled;
 cancellation is checked between batches. The default is 1.
 The optional K4/K5 two-tile loop is an experiment, disabled by default. It does
 not guarantee that the driver actually unrolls the loop or improves throughput.
+The menu's fixed benchmark evaluates 32 prefill and 128 decode steps using a
+repeatable sequence of vocabulary IDs. It is not a generated answer. Copy the
+diagnostic afterward and alternate configurations under similar thermal conditions.
 Android system traces include `MLXL3 upload`, `MLXL3 record commands`,
 `MLXL3 queue submit`, `MLXL3 fence wait`, and `MLXL3 readback` slices. Capture
 them with CPU scheduling and frequency tracks in Perfetto to distinguish CPU

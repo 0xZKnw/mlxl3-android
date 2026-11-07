@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
                 model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg,
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
-                model.unroll2, model::chooseUnroll2)
+                model.unroll2, model::chooseUnroll2, model::benchmark)
         }
     }
 }
@@ -110,7 +110,7 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  gpuAttentionLayer: Boolean = false, onGpuAttentionLayer: (Boolean) -> Unit = {},
                  ffnK4Split: Int = 0, ffnK5Split: Int = 0, onCycleFfnSplit: (Boolean) -> Unit = {},
                  layerBatch: Int = 1, onCycleLayerBatch: () -> Unit = {},
-                 unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}) {
+                 unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}, onBenchmark: () -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -140,6 +140,7 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Importer un dossier EXL3") }, onClick = { menu = false; onImport() })
                             if (savedModel) DropdownMenuItem(text = { Text("Charger le modèle enregistré") }, onClick = { menu = false; onLoad() })
+                            if (ready) DropdownMenuItem(text = { Text("Benchmark fixe · 128 tokens") }, onClick = { menu = false; onBenchmark() })
                             if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
                                 menu = false
                                 context.getSystemService(ClipboardManager::class.java)
