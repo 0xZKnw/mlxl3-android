@@ -10,6 +10,7 @@ fn main() {
         "hadamard",
         "dense",
         "dense_pair",
+        "rms_residual",
         "reduce",
         "swiglu",
         "convolution",

@@ -97,6 +97,8 @@ pub struct Profile {
     pub device_attention_gate_samples: u64,
     pub device_head_ns: u64,
     pub device_head_samples: u64,
+    pub device_norm_residual_ns: u64,
+    pub device_norm_residual_samples: u64,
     pub device_samples: u64,
     pub device_exl3_samples: u64,
     pub device_exl3_input_ns: u64,

@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
             StudioScreen(model.messages, model.busy, model.ready, model.status, model.device, model.error,
                 model.savedModel, { picker.launch(null) }, model::loadSaved, model::newChat,
                 model::send, model::stop, model::dismissError, model.diagnostics, model.splitK, model::chooseSplitK,
-                model.fastHead, model::chooseFastHead)
+                model.fastHead, model::chooseFastHead, model.gpuConvLayer, model::chooseGpuConvLayer)
         }
     }
 }
@@ -98,7 +98,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  onLoad: () -> Unit, onNew: () -> Unit, onSend: (String) -> Unit,
                  onStop: () -> Unit, onDismissError: () -> Unit, diagnostics: String? = null,
                  splitK: Int = 4, onSplitK: (Int) -> Unit = {},
-                 fastHead: Boolean = false, onFastHead: (Boolean) -> Unit = {}) {
+                 fastHead: Boolean = false, onFastHead: (Boolean) -> Unit = {},
+                 gpuConvLayer: Boolean = false, onGpuConvLayer: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -134,6 +135,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                             }
                             DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onFastHead(!fastHead) })
+                            DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onGpuConvLayer(!gpuConvLayer) })
                             if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
                                 menu = false
                                 context.getSystemService(ClipboardManager::class.java)

@@ -67,9 +67,14 @@ fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
 const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
 static REQUESTED_SPLIT_K: AtomicU32 = AtomicU32::new(4);
 static REQUESTED_FAST_HEAD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_GPU_CONV_LAYER: AtomicBool = AtomicBool::new(false);
 
 pub fn set_fast_head(enabled: bool) {
     REQUESTED_FAST_HEAD.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_gpu_conv_layer(enabled: bool) {
+    REQUESTED_GPU_CONV_LAYER.store(enabled, Ordering::Relaxed);
 }
 
 pub fn set_split_k(value: u32) -> bool {
@@ -101,8 +106,9 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
-const MAX_DESCRIPTOR_SETS: usize = 2 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 48;
-const QUERY_COUNT: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
+const MAX_DESCRIPTOR_SETS: usize = 2 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 160;
+const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
+const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 160;
 
 fn projection_queries(index: usize) -> Option<u32> {
     (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
@@ -160,6 +166,7 @@ pub(crate) struct MlpPlan {
     up: Exl3Matrix,
     down: Exl3Matrix,
     activate: vk::CommandBuffer,
+    activate_query: u32,
 }
 
 pub(crate) struct ConvPlan {
@@ -167,6 +174,18 @@ pub(crate) struct ConvPlan {
     output: Exl3Matrix,
     state: Buffer,
     convolve: vk::CommandBuffer,
+    convolve_query: u32,
+}
+
+pub(crate) struct ConvLayerPlan {
+    device: Arc<Device>,
+    hidden: Buffer,
+    _weights: Vec<Buffer>,
+    commands: [vk::CommandBuffer; 4],
+    query_firsts: [u32; 4],
+    conv_input: vk::CommandBuffer,
+    mlp_gate: vk::CommandBuffer,
+    size: usize,
 }
 
 pub(crate) struct DenseHeadPlan {
@@ -183,6 +202,7 @@ pub(crate) struct DenseGatePlan {
     input_len: usize,
     outputs: usize,
     command: vk::CommandBuffer,
+    query_first: u32,
 }
 
 fn timestamp_delta(start: u64, end: u64, bits: u32) -> Option<u64> {
@@ -396,6 +416,7 @@ pub struct Gpu {
     hadamard: vk::Pipeline,
     prepared: usize,
     queries: vk::QueryPool,
+    next_operator_query: Cell<u32>,
     timestamp_bits: u32,
     dense: vk::Pipeline,
     dense_pair: vk::Pipeline,
@@ -403,6 +424,8 @@ pub struct Gpu {
     reduce: vk::Pipeline,
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
+    rms_residual: vk::Pipeline,
+    gpu_conv_layer: bool,
     partials: Option<Buffer>,
     input: Option<Buffer>,
     rotated: Option<Buffer>,
@@ -683,6 +706,7 @@ impl Gpu {
             hadamard: vk::Pipeline::null(),
             prepared: 0,
             queries: vk::QueryPool::null(),
+            next_operator_query: Cell::new(OPERATOR_QUERY_BASE),
             timestamp_bits,
             dense: vk::Pipeline::null(),
             dense_pair: vk::Pipeline::null(),
@@ -690,6 +714,8 @@ impl Gpu {
             reduce: vk::Pipeline::null(),
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
+            rms_residual: vk::Pipeline::null(),
+            gpu_conv_layer: REQUESTED_GPU_CONV_LAYER.load(Ordering::Relaxed),
             partials: None,
             input: None,
             rotated: None,
@@ -828,6 +854,7 @@ impl Gpu {
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
             gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/convolution.spv")))?;
+        gpu.rms_residual = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/rms_residual.spv")))?;
         let partial_bytes = 32768 * 4 * gpu.split_k.max(4) as usize * 4;
         gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
@@ -1097,6 +1124,7 @@ impl Gpu {
             "native_codebook_arithmetic":"default/mcg: precise FP16 pair add; mul1: exact LUT; accumulation: FP32",
             "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| (*n || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "projection":"gpu_resident_mlp_conv",
+            "gpu_conv_layer_experimental":self.gpu_conv_layer,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
@@ -1196,7 +1224,12 @@ impl Gpu {
         });
     }
 
-    fn verify_cooperative(&mut self, bits: u32, candidate: vk::Pipeline, mcg_only: bool) -> Result<bool> {
+    fn verify_cooperative(
+        &mut self,
+        bits: u32,
+        candidate: vk::Pipeline,
+        mcg_only: bool,
+    ) -> Result<bool> {
         let reference_bytes: &[u8] = match bits {
             4 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv")),
             5 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv")),
@@ -1216,7 +1249,9 @@ impl Gpu {
                 .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
                 .collect();
             for codebook in 0..3 {
-                if mcg_only && codebook != 1 { continue; }
+                if mcg_only && codebook != 1 {
+                    continue;
+                }
                 let params = [rows as u32, cols as u32, bits, codebook];
                 let expected = self.compute_groups(
                     reference,
@@ -1253,7 +1288,11 @@ impl Gpu {
     fn stream_pipeline(&mut self, bits: u32, codebook: u32) -> Result<(vk::Pipeline, bool)> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
-        if codebook == 1 && (bits == 4 || bits == 5) && self.native_verified && self.allow_cooperative_k4 {
+        if codebook == 1
+            && (bits == 4 || bits == 5)
+            && self.native_verified
+            && self.allow_cooperative_k4
+        {
             if !self.mcg_attempted[index] {
                 self.mcg_attempted[index] = true;
                 let bytes: &[u8] = if bits == 4 {
@@ -1266,17 +1305,25 @@ impl Gpu {
                     if matches!(&verified, Ok(true)) {
                         self.qmv_mcg[index] = pipeline;
                         self.mcg_cooperative[index] = true;
-                        self.capture_stats(format!("exl3_{bits}bit_wave32_cooperative_mcg"), pipeline);
+                        self.capture_stats(
+                            format!("exl3_{bits}bit_wave32_cooperative_mcg"),
+                            pipeline,
+                        );
                     } else {
                         if self.device.abandoned.load(Ordering::Relaxed) {
-                            return Err(verified.err().unwrap_or_else(|| anyhow::anyhow!("GPU abandoned")));
+                            return Err(verified
+                                .err()
+                                .unwrap_or_else(|| anyhow::anyhow!("GPU abandoned")));
                         }
                         unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
-                        self.native_pipeline_errors.push(format!("MCG K{bits} self-test failed; using generic path"));
+                        self.native_pipeline_errors
+                            .push(format!("MCG K{bits} self-test failed; using generic path"));
                     }
                 }
             }
-            if self.mcg_cooperative[index] { return Ok((self.qmv_mcg[index], true)); }
+            if self.mcg_cooperative[index] {
+                return Ok((self.qmv_mcg[index], true));
+            }
         }
         if self.qmv_stream[index] == vk::Pipeline::null() {
             if (bits == 4 || bits == 5) && self.native_verified && self.allow_cooperative_k4 {
@@ -1523,15 +1570,16 @@ impl Gpu {
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
             kernel: if split {
-                let cooperative = if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
-                    shape.bits + 10
-                } else if shape.bits == 4 && self.cooperative_k4_active {
-                    4
-                } else if shape.bits == 5 && self.cooperative_k5_active {
-                    5
-                } else {
-                    0
-                };
+                let cooperative =
+                    if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
+                        shape.bits + 10
+                    } else if shape.bits == 4 && self.cooperative_k4_active {
+                        4
+                    } else if shape.bits == 5 && self.cooperative_k5_active {
+                        5
+                    } else {
+                        0
+                    };
                 wave_kernel_label(self.split_k, cooperative)
             } else if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
                 "native_f16_literal"
@@ -1614,7 +1662,7 @@ impl Gpu {
             self.gate_input = Some(input);
             self.gate_output = Some(output);
         }
-        let command = self.prepare_operator(Dispatch {
+        let (command, query_first) = self.prepare_operator(Dispatch {
             input: self.gate_input.as_ref().context("Gate input unavailable")?,
             weights: &weights,
             output: self
@@ -1634,6 +1682,7 @@ impl Gpu {
             input_len,
             outputs,
             command,
+            query_first,
         })
     }
 
@@ -1656,7 +1705,7 @@ impl Gpu {
         input.write(bytes)?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
         self.submit_graph(&[gate.command], Instant::now())?;
-        self.collect_gate_interval();
+        self.collect_gate_interval(gate.query_first);
         output.read_f32(gate.outputs)
     }
 
@@ -1716,7 +1765,7 @@ impl Gpu {
         for matrix in matrices {
             self.collect_timestamps(Some(matrix.query_first));
         }
-        self.collect_gate_interval();
+        self.collect_gate_interval(gate.query_first);
         let started = Instant::now();
         let qkv = matrices
             .iter()
@@ -1727,7 +1776,7 @@ impl Gpu {
         Ok((qkv, gate))
     }
 
-    fn collect_gate_interval(&self) {
+    fn collect_gate_interval(&self, query_first: u32) {
         if self.queries == vk::QueryPool::null() {
             return;
         }
@@ -1736,7 +1785,7 @@ impl Gpu {
         let result = unsafe {
             self.device.raw.get_query_pool_results(
                 self.queries,
-                2,
+                query_first,
                 &mut ticks,
                 vk::QueryResultFlags::TYPE_64,
             )
@@ -1818,7 +1867,10 @@ impl Gpu {
         });
     }
 
-    fn prepare_operator(&self, job: Dispatch<'_>) -> Result<vk::CommandBuffer> {
+    fn prepare_operator(&self, job: Dispatch<'_>) -> Result<(vk::CommandBuffer, u32)> {
+        let query_first = self.next_operator_query.get();
+        ensure!(query_first <= QUERY_COUNT - 2, "Operator query capacity exhausted");
+        self.next_operator_query.set(query_first + 2);
         let command = unsafe {
             self.device.raw.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
@@ -1839,9 +1891,9 @@ impl Gpu {
             &sets,
             &[job],
             vk::CommandBufferUsageFlags::empty(),
-            Some(2),
+            Some(query_first),
         )?;
-        Ok(command)
+        Ok((command, query_first))
     }
 
     pub(crate) fn prepare_mlp(
@@ -1864,7 +1916,7 @@ impl Gpu {
             "Invalid MLP projection shapes"
         );
         let size = gate.shape.output;
-        let activate = self.prepare_operator(Dispatch {
+        let (activate, activate_query) = self.prepare_operator(Dispatch {
             input: &gate.output,
             weights: &up.output,
             output: self.input.as_ref().context("GPU input unavailable")?,
@@ -1880,6 +1932,7 @@ impl Gpu {
             up,
             down,
             activate,
+            activate_query,
         })
     }
 
@@ -1903,7 +1956,7 @@ impl Gpu {
         for m in [&plan.gate, &plan.up, &plan.down] {
             self.collect_timestamps(Some(m.query_first));
         }
-        self.collect_interval(2, Some(false));
+        self.collect_interval(plan.activate_query, Some(false));
         let started = Instant::now();
         let result = plan.down.output.read_f32(plan.down.shape.output);
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
@@ -1942,7 +1995,7 @@ impl Gpu {
         );
         let bytes: Vec<_> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let state = self.buffer(&bytes)?;
-        let convolve = self.prepare_operator(Dispatch {
+        let (convolve, convolve_query) = self.prepare_operator(Dispatch {
             input: &input.output,
             weights: &state,
             output: self.input.as_ref().context("GPU input unavailable")?,
@@ -1958,7 +2011,110 @@ impl Gpu {
             output,
             state,
             convolve,
+            convolve_query,
         })
+    }
+
+    pub(crate) fn gpu_conv_layer_enabled(&self) -> bool {
+        self.gpu_conv_layer
+    }
+
+    pub(crate) fn prepare_conv_layer(
+        &mut self,
+        conv: &ConvPlan,
+        mlp: &MlpPlan,
+        norms: [&[f32]; 4],
+        eps: f32,
+    ) -> Result<ConvLayerPlan> {
+        let size = conv.output.shape.output;
+        ensure!(size == mlp.down.shape.output && size == mlp.gate.shape.input &&
+            norms.iter().all(|n| n.len() == size && n.iter().all(|v| v.is_finite())) &&
+            eps.is_finite() && eps > 0., "Invalid resident convolution layer");
+        let hidden = self.mapped_buffer(size * 4)?;
+        let weights = norms.iter().map(|norm| {
+            let bytes: Vec<u8> = norm.iter().map(|v| crate::math::half(*v)).flat_map(|v| v.to_ne_bytes()).collect();
+            self.buffer(&bytes)
+        }).collect::<Result<Vec<_>>>()?;
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let specs = [
+            (&hidden, input, 0u32),
+            (&conv.output.output, &hidden, 1u32),
+            (&hidden, input, 0u32),
+            (&mlp.down.output, &hidden, 1u32),
+        ];
+        let mut commands = Vec::new();
+        let mut query_firsts = Vec::new();
+        for (i, (source, target, residual)) in specs.into_iter().enumerate() {
+            let (command, query) = self.prepare_operator(Dispatch {
+                input: source,
+                weights: &weights[i],
+                output: target,
+                params: [size as u32, residual, eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            })?;
+            commands.push(command);
+            query_firsts.push(query);
+        }
+        Ok(ConvLayerPlan {
+            device: self.device.clone(), hidden, _weights: weights,
+            commands: commands.try_into().map_err(|_| anyhow::anyhow!("Invalid norm command count"))?,
+            query_firsts: query_firsts.try_into().map_err(|_| anyhow::anyhow!("Invalid norm query count"))?,
+            conv_input: conv.input.command, mlp_gate: mlp.gate.command, size,
+        })
+    }
+
+    pub(crate) fn forward_conv_layer(
+        &self, plan: &ConvLayerPlan, conv: &ConvPlan, mlp: &MlpPlan,
+        x: &[f32], position: usize,
+    ) -> Result<Vec<f32>> {
+        ensure!(Arc::ptr_eq(&plan.device, &self.device) && plan.conv_input == conv.input.command &&
+            plan.mlp_gate == mlp.gate.command && x.len() == plan.size &&
+            x.iter().all(|v| v.is_finite()) && position < 2048, "Invalid resident convolution input");
+        conv.state.write(&(position as u32).to_ne_bytes())?;
+        let bytes = unsafe { std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x)) };
+        let started = Instant::now();
+        plan.hidden.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        self.submit_graph(&[
+            plan.commands[0], conv.input.command, conv.convolve, conv.output.command,
+            plan.commands[1], plan.commands[2], mlp.gate.command, mlp.up.command,
+            mlp.activate, mlp.down.command, plan.commands[3],
+        ], Instant::now())?;
+        for matrix in [&conv.input, &conv.output, &mlp.gate, &mlp.up, &mlp.down] {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
+        self.collect_interval(conv.convolve_query, Some(true));
+        self.collect_interval(mlp.activate_query, Some(false));
+        for query in plan.query_firsts { self.collect_norm_interval(query); }
+        let started = Instant::now();
+        let output = plan.hidden.read_f32(plan.size);
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        output
+    }
+
+    fn collect_norm_interval(&self, query_first: u32) {
+        if self.queries == vk::QueryPool::null() { return; }
+        let mut ticks = [0u64; 2];
+        let started = Instant::now();
+        let result = unsafe { self.device.raw.get_query_pool_results(self.queries, query_first, &mut ticks, vk::QueryResultFlags::TYPE_64) };
+        self.record_profile(|p| {
+            p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started));
+            match result {
+                Ok(()) => if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
+                    let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
+                    p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
+                    p.device_other_ns = p.device_other_ns.saturating_add(ns);
+                    p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
+                    p.device_norm_residual_samples = p.device_norm_residual_samples.saturating_add(1);
+                    p.device_samples = p.device_samples.saturating_add(1);
+                },
+                Err(err) => { p.query_read_failures = p.query_read_failures.saturating_add(1); p.last_query_error = Some(format!("norm interval: {err:?}")); }
+            }
+        });
     }
 
     pub(crate) fn forward_conv(
@@ -1984,7 +2140,7 @@ impl Gpu {
         for m in [&plan.input, &plan.output] {
             self.collect_timestamps(Some(m.query_first));
         }
-        self.collect_interval(2, Some(true));
+        self.collect_interval(plan.convolve_query, Some(true));
         let started = Instant::now();
         let result = plan.output.output.read_f32(plan.output.shape.output);
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
@@ -2297,11 +2453,11 @@ impl Gpu {
         ensure!(
             phase_queries.is_none()
                 || jobs.len() == 3
-                || (phase_queries == Some(2) && jobs.len() == 1),
+                || (phase_queries.is_some_and(|q| q >= OPERATOR_QUERY_BASE) && jobs.len() == 1),
             "Invalid EXL3 phase queries"
         );
         let query_first = phase_queries.unwrap_or(0);
-        let query_count = if phase_queries.is_some() && phase_queries != Some(2) {
+        let query_count = if phase_queries.is_some() && jobs.len() == 3 {
             4
         } else {
             2
@@ -2537,6 +2693,7 @@ impl Drop for Gpu {
             d.destroy_pipeline(self.reduce, None);
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
+            d.destroy_pipeline(self.rms_residual, None);
             d.destroy_pipeline(self.hadamard, None);
             d.destroy_query_pool(self.queries, None);
             d.destroy_pipeline_layout(self.layout, None);
@@ -2551,6 +2708,41 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; experimental resident convolution layer"]
+    fn resident_conv_layer_matches_cpu_layer_across_ring() {
+        let mut gpu = Gpu::new().unwrap();
+        let make_conv = |gpu: &mut Gpu| {
+            let input = resident_matrix(gpu, 128, 384, 11);
+            let output = resident_matrix(gpu, 128, 128, 17);
+            let weights: Vec<f32> = (0..128 * 7).map(|i| (i as f32 % 19. - 9.) / 64.).collect();
+            gpu.prepare_conv(input, output, &weights).unwrap()
+        };
+        let reference_conv = make_conv(&mut gpu);
+        let candidate_conv = make_conv(&mut gpu);
+        let gate = resident_matrix(&mut gpu, 128, 256, 19);
+        let up = resident_matrix(&mut gpu, 128, 256, 23);
+        let down = resident_matrix(&mut gpu, 256, 128, 29);
+        let mlp = gpu.prepare_mlp(gate, up, down).unwrap();
+        let norms: Vec<Vec<f32>> = (0..4).map(|n| (0..128).map(|i| 0.75 + ((i + n) % 9) as f32 / 64.).collect()).collect();
+        let plan = gpu.prepare_conv_layer(&candidate_conv, &mlp, [&norms[0], &norms[1], &norms[2], &norms[3]], 1e-5).unwrap();
+        for position in 0..10 {
+            let x: Vec<f32> = (0..128).map(|i| ((i * 7 + position * 3) % 41) as f32 / 32. - 0.5).collect();
+            let normalized = crate::math::rms_norm(&x, &norms[0], 1e-5).unwrap();
+            let conv = gpu.forward_conv(&reference_conv, &normalized, position).unwrap();
+            let post = crate::math::rms_norm(&conv, &norms[1], 1e-5).unwrap();
+            let hidden: Vec<f32> = x.iter().zip(&post).map(|(a, b)| a + b).collect();
+            let normalized = crate::math::rms_norm(&hidden, &norms[2], 1e-5).unwrap();
+            let down = gpu.forward_mlp(&mlp, &normalized).unwrap();
+            let post = crate::math::rms_norm(&down, &norms[3], 1e-5).unwrap();
+            let expected: Vec<f32> = hidden.iter().zip(&post).map(|(a, b)| a + b).collect();
+            let before = gpu.submission_count();
+            let actual = gpu.forward_conv_layer(&plan, &candidate_conv, &mlp, &x, position).unwrap();
+            assert_eq!(gpu.submission_count() - before, 1);
+            assert!(actual.iter().zip(&expected).all(|(a, b)| (a - b).abs() <= 0.003 + b.abs() * 0.005), "position {position}");
+        }
+    }
 
     #[test]
     #[ignore = "requires Vulkan; experimental paired dense head"]
@@ -3047,7 +3239,7 @@ mod tests {
         assert_eq!(projection_queries(0), Some(4));
         assert_eq!(
             projection_queries(MAX_EXL3_MATRICES - 1),
-            Some(QUERY_COUNT - 4)
+            Some(OPERATOR_QUERY_BASE - 4)
         );
         assert_eq!(projection_queries(MAX_EXL3_MATRICES), None);
         assert_eq!(projection_queries(usize::MAX), None);
@@ -3622,7 +3814,7 @@ mod proofs {
             assert_eq!(first as usize / 4 - 1, index);
         }
         assert_eq!(valid_group_size(count), count >= 1 && count <= 3);
-        kani::cover!(index == MAX_EXL3_MATRICES - 1 && first == Some(QUERY_COUNT - 4));
+        kani::cover!(index == MAX_EXL3_MATRICES - 1 && first == Some(OPERATOR_QUERY_BASE - 4));
         kani::cover!(index == usize::MAX && first.is_none());
         kani::cover!(count == 3 && valid_group_size(count));
     }

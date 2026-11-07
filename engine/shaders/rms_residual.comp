@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { float weight[]; };
+layout(set = 0, binding = 2, std430) buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint length; uint residual; uint eps_bits; uint unused; } p;
+shared float scale;
+#include "half_round.glsl"
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid == 0u) {
+        precise float sum = 0.0;
+        for (uint i = 0u; i < p.length; ++i) {
+            precise float value = x[i];
+            precise float product = value * value;
+            sum = sum + product;
+        }
+        scale = 1.0 / sqrt(sum / float(p.length) + uintBitsToFloat(p.eps_bits));
+    }
+    barrier();
+    for (uint i = tid; i < p.length; i += 128u) {
+        precise float normalized = halfRound(x[i] * scale * halfRound(weight[i]));
+        y[i] = p.residual == 0u ? normalized : y[i] + normalized;
+    }
+}

@@ -1,6 +1,6 @@
 use crate::{
     math,
-    vulkan::{ConvPlan, Gpu, MlpPlan},
+    vulkan::{ConvLayerPlan, ConvPlan, Gpu, MlpPlan},
     weights::{Linear, Weights},
 };
 use anyhow::{Context, Result, ensure};
@@ -173,6 +173,7 @@ struct Layer {
     ffn_norm: Vec<f32>,
     post_ffn_norm: Vec<f32>,
     mlp: MlpPlan,
+    gpu_conv_layer: Option<ConvLayerPlan>,
 }
 pub struct Model {
     pub config: Config,
@@ -316,14 +317,18 @@ impl Model {
                 config.intermediate_size,
             )?
             .into_exl3()?;
-            layers.push(Layer {
-                operator,
-                operator_norm: norm("operator_norm", h)?,
-                post_operator_norm: norm("post_operator_norm", h)?,
-                ffn_norm: norm("ffn_norm", h)?,
-                post_ffn_norm: norm("post_ffn_norm", h)?,
-                mlp: gpu.prepare_mlp(w1, w3, w2)?,
-            });
+            let operator_norm = norm("operator_norm", h)?;
+            let post_operator_norm = norm("post_operator_norm", h)?;
+            let ffn_norm = norm("ffn_norm", h)?;
+            let post_ffn_norm = norm("post_ffn_norm", h)?;
+            let mlp = gpu.prepare_mlp(w1, w3, w2)?;
+            let gpu_conv_layer = if gpu.gpu_conv_layer_enabled() {
+                if let Operator::Conv(conv) = &operator {
+                    Some(gpu.prepare_conv_layer(&conv.plan, &mlp,
+                        [&operator_norm, &post_operator_norm, &ffn_norm, &post_ffn_norm], config.norm_eps)?)
+                } else { None }
+            } else { None };
+            layers.push(Layer { operator, operator_norm, post_operator_norm, ffn_norm, post_ffn_norm, mlp, gpu_conv_layer });
         }
         ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
         progress("Loading vocabulary projection…");
@@ -372,6 +377,10 @@ impl Model {
         });
         for layer in &mut self.layers {
             ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
+            if let (Some(plan), Operator::Conv(conv)) = (&layer.gpu_conv_layer, &layer.operator) {
+                hidden = self.gpu.forward_conv_layer(plan, &conv.plan, &layer.mlp, &hidden, self.position)?;
+                continue;
+            }
             let normalized = normalize(
                 &self.gpu,
                 &hidden,
