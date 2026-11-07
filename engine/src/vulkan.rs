@@ -2530,6 +2530,8 @@ impl Gpu {
         );
         let (baseline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
         let multiwave = self.multiwave_pipeline(shape.bits)?;
+        // Multiwave always writes split partials, even if the baseline fell back.
+        let split = split || multiwave.is_some();
         let pipeline = multiwave.unwrap_or(baseline);
         let split_count = self.split_for_shape(shape.input, shape.output, shape.bits);
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
