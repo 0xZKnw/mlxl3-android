@@ -1,0 +1,51 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+// Host requires four full 32-lane subgroups. Logical indexing below does not
+// assume a mapping between local invocation IDs and subgroup invocation IDs.
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Scales { float scale[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint phase; uint logical; } p;
+shared float block[128];
+#include "half_round.glsl"
+
+void main() {
+    uint tid = gl_SubgroupID * 32u + gl_SubgroupInvocationID;
+    uint index = gl_WorkGroupID.x * 128u + tid;
+    // Padded activations are +0 even when the padded SU scale is negative.
+    precise float dot = 0.0;
+    uint phase = p.phase & 255u;
+    uint splits = p.phase >> 8u;
+    if (splits == 0u) splits = 4u;
+    if (phase == 2u) {
+        // Preserve ordered additions before the FP16 boundary for the selected split count.
+        for (uint part = 0u; part < splits; ++part)
+            for (uint quad = 0u; quad < 4u; ++quad)
+                dot += x[(part * p.cols + index) * 4u + quad];
+    }
+    precise float value = phase == 0u
+        ? (index < p.logical ? halfRound(halfRound(x[index]) * scale[index]) : 0.0)
+        : halfRound(phase == 2u ? dot : x[index]);
+    // The same butterfly operands and ordered FP32 add/subtract operations as
+    // the fallback. Shuffle replaces only the exchange, never the arithmetic.
+    for (uint stride = 1u; stride < 32u; stride *= 2u) {
+        precise float other = subgroupShuffle(value, gl_SubgroupInvocationID ^ stride);
+        value = (tid & stride) == 0u ? value + other : other - value;
+    }
+    block[tid] = value;
+    barrier();
+    precise float other32 = block[tid ^ 32u];
+    value = (tid & 32u) == 0u ? value + other32 : other32 - value;
+    barrier(); // Finish every read before overwriting the shared tile.
+    block[tid] = value;
+    barrier();
+    precise float other64 = block[tid ^ 64u];
+    value = (tid & 64u) == 0u ? value + other64 : other64 - value;
+    // Same f32 sqrt(128) and FP16 boundaries as the independent CPU reference.
+    value = halfRound(value / uintBitsToFloat(0x413504f3u));
+    if (phase != 0u) value = halfRound(value * scale[p.rows + index]);
+    y[index] = value;
+}

@@ -79,6 +79,8 @@ static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 static REQUESTED_EXL3_MULTIWAVE: AtomicBool = AtomicBool::new(false);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_SHUFFLE_HADAMARD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_VECTOR_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_WAVE_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
 static REQUESTED_GPU_TIMESTAMPS: AtomicBool = AtomicBool::new(true);
@@ -119,6 +121,16 @@ pub fn set_head_rows(value: u32) -> bool {
 /// Opt-in 2048-wide dense head, guarded at startup. Applies on model reload.
 pub fn set_wave_head(enabled: bool) {
     REQUESTED_WAVE_HEAD.store(enabled, Ordering::Relaxed);
+}
+
+/// Vectorized 2048-wide head; opt-in, validated at startup, applies on reload.
+pub fn set_vector_head(enabled: bool) {
+    REQUESTED_VECTOR_HEAD.store(enabled, Ordering::Relaxed);
+}
+
+/// Opt-in wave32 Hadamard; exact startup parity required before activation.
+pub fn set_shuffle_hadamard(enabled: bool) {
+    REQUESTED_SHUFFLE_HADAMARD.store(enabled, Ordering::Relaxed);
 }
 
 pub fn set_subgroup_head(enabled: bool) {
@@ -631,6 +643,10 @@ pub struct Gpu {
     ffn_k5_split: u32,
     native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
+    shuffle_hadamard_requested: bool,
+    shuffle_hadamard_supported: bool,
+    shuffle_hadamard_active: bool,
+    shuffle_hadamard_self_test: serde_json::Value,
     prepared: usize,
     queries: vk::QueryPool,
     next_operator_query: Cell<u32>,
@@ -639,6 +655,10 @@ pub struct Gpu {
     dense_pair: vk::Pipeline,
     dense_subgroup: vk::Pipeline,
     dense_rows: vk::Pipeline,
+    dense_vector: vk::Pipeline,
+    vector_head_requested: bool,
+    vector_head_active: bool,
+    vector_head_self_test: serde_json::Value,
     dense_wave: vk::Pipeline,
     wave_head_requested: bool,
     wave_head_rows: u32,
@@ -882,8 +902,9 @@ impl Gpu {
         if force_wave32 {
             extension_names.push(c"VK_EXT_subgroup_size_control".as_ptr());
         }
-        let mut enabled_sizes =
-            vk::PhysicalDeviceSubgroupSizeControlFeatures::default().subgroup_size_control(true);
+        let mut enabled_sizes = vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
+            .subgroup_size_control(true)
+            .compute_full_subgroups(size_features.compute_full_subgroups == vk::TRUE);
         let mut device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queues);
         if force_wave32 {
             device_info = device_info.push_next(&mut enabled_sizes);
@@ -982,6 +1003,18 @@ impl Gpu {
             },
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
+            shuffle_hadamard_requested: REQUESTED_SHUFFLE_HADAMARD.load(Ordering::Relaxed),
+            shuffle_hadamard_supported: force_wave32
+                && size_features.compute_full_subgroups == vk::TRUE
+                && sizes.max_compute_workgroup_subgroups >= 4
+                && subgroup
+                    .supported_stages
+                    .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::SHUFFLE),
+            shuffle_hadamard_active: false,
+            shuffle_hadamard_self_test: serde_json::json!({"status":"not_requested"}),
             prepared: 0,
             queries: vk::QueryPool::null(),
             next_operator_query: Cell::new(OPERATOR_QUERY_BASE),
@@ -990,6 +1023,10 @@ impl Gpu {
             dense_pair: vk::Pipeline::null(),
             dense_subgroup: vk::Pipeline::null(),
             dense_rows: vk::Pipeline::null(),
+            dense_vector: vk::Pipeline::null(),
+            vector_head_requested: REQUESTED_VECTOR_HEAD.load(Ordering::Relaxed),
+            vector_head_active: false,
+            vector_head_self_test: serde_json::json!({"status":"not_requested"}),
             dense_wave: vk::Pipeline::null(),
             wave_head_requested: REQUESTED_WAVE_HEAD.load(Ordering::Relaxed),
             wave_head_rows: if subgroup
@@ -1257,10 +1294,157 @@ impl Gpu {
         gpu.configure_subgroup_norm()?;
         gpu.configure_fused_norm()?;
         gpu.configure_wave_head()?;
+        gpu.configure_vector_head()?;
+        gpu.configure_shuffle_hadamard()?;
         // Startup checks must not enter prefill/decode counters.
         gpu.take_profile();
         gpu.submissions.set(0);
         Ok(gpu)
+    }
+
+    fn configure_shuffle_hadamard(&mut self) -> Result<()> {
+        if !self.shuffle_hadamard_requested {
+            return Ok(());
+        }
+        if !self.shuffle_hadamard_supported {
+            self.shuffle_hadamard_self_test = serde_json::json!({"status":"unsupported_subgroup"});
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate = match self.pipeline_with_subgroup_full(
+            include_bytes!(concat!(env!("OUT_DIR"), "/hadamard_wave.spv")),
+            None,
+            true,
+            true,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                self.shuffle_hadamard_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+                return Ok(());
+            }
+        };
+        self.capture_stats("hadamard_wave32_shuffle".into(), candidate);
+        match self.check_shuffle_hadamard(candidate) {
+            Ok(report) => {
+                unsafe { self.device.raw.destroy_pipeline(self.hadamard, None) };
+                self.hadamard = candidate;
+                self.shuffle_hadamard_active = true;
+                self.shuffle_hadamard_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.shuffle_hadamard_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.shuffle_hadamard_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
+    }
+
+    fn check_shuffle_hadamard(&mut self, pipeline: vk::Pipeline) -> Result<serde_json::Value> {
+        let mut checked = 0usize;
+        // Two workgroups, signed scales, padded inputs, all three transform
+        // phases and each split count, with zeros and cancellation-heavy input.
+        for case in 0..3 {
+            let scales: Vec<f32> = (0..512)
+                .map(|i| if i % 2 == 0 { 0.75 } else { -1.25 })
+                .collect();
+            let bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let buffer = self.buffer(&bytes)?;
+            for (phase, splits, logical) in [
+                (0u32, 0u32, 129u32),
+                (0, 0, 256),
+                (1, 0, 256),
+                (2, 1, 256),
+                (2, 2, 256),
+                (2, 4, 256),
+                (2, 8, 256),
+            ] {
+                let count = if phase == 2 {
+                    256 * 4 * splits as usize
+                } else {
+                    256
+                };
+                let x: Vec<f32> = (0..count)
+                    .map(|i| match case {
+                        0 => {
+                            if i % 2 == 0 {
+                                0.0
+                            } else {
+                                -0.0
+                            }
+                        }
+                        1 => ((i * 37 % 251) as f32 - 125.) / 113.,
+                        _ => {
+                            if i % 2 == 0 {
+                                0.999
+                            } else {
+                                -1.001
+                            }
+                        }
+                    })
+                    .collect();
+                let params = [256, 256, phase | (splits << 8), logical];
+                let expected = self.compute_groups(self.hadamard, &buffer, &x, params, 256, 2)?;
+                let actual = self.compute_groups(pipeline, &buffer, &x, params, 256, 2)?;
+                for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
+                    ensure!(
+                        a.is_finite() && a.to_bits() == b.to_bits(),
+                        "Shuffle Hadamard mismatch {case}/{phase}/{splits}/{index}: {a} != {b}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        Ok(
+            serde_json::json!({"status":"passed_bit_exact","checked_values":checked,
+            "reference":"baseline Vulkan Hadamard; signed scales, padding, phases 0/1/2, split 1/2/4/8",
+            "scope":"startup fixtures; not full-model parity"}),
+        )
+    }
+
+    fn configure_vector_head(&mut self) -> Result<()> {
+        if !self.vector_head_requested {
+            return Ok(());
+        }
+        if self.wave_head_rows == 0 {
+            self.vector_head_self_test = serde_json::json!({"status":"unsupported_subgroup"});
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate = match self.pipeline_with_subgroup(
+            include_bytes!(concat!(env!("OUT_DIR"), "/dense_vector.spv")),
+            None,
+            true,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                self.vector_head_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+                return Ok(());
+            }
+        };
+        self.capture_stats("dense_vector_eight_weights_per_lane".into(), candidate);
+        match self.check_wave_head(candidate) {
+            Ok(report) => {
+                self.dense_vector = candidate;
+                self.vector_head_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.vector_head_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.vector_head_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
     }
 
     fn configure_wave_head(&mut self) -> Result<()> {
@@ -1845,6 +2029,16 @@ impl Gpu {
         bits: Option<u32>,
         wave32: bool,
     ) -> Result<vk::Pipeline> {
+        self.pipeline_with_subgroup_full(bytes, bits, wave32, false)
+    }
+
+    fn pipeline_with_subgroup_full(
+        &self,
+        bytes: &[u8],
+        bits: Option<u32>,
+        wave32: bool,
+        full_subgroups: bool,
+    ) -> Result<vk::Pipeline> {
         let code = ash::util::read_spv(&mut std::io::Cursor::new(bytes))?;
         unsafe {
             let module = self
@@ -1867,6 +2061,9 @@ impl Gpu {
                 .required_subgroup_size(32);
             if wave32 && self.force_wave32 {
                 stage = stage.push_next(&mut size);
+            }
+            if full_subgroups {
+                stage = stage.flags(vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS);
             }
             if bits.is_some() {
                 stage = stage.specialization_info(&specialization);
@@ -2017,11 +2214,18 @@ impl Gpu {
             "parallel_norm_active":self.parallel_norm_active,
             "parallel_norm_self_test":self.parallel_norm_self_test,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
+            "shuffle_hadamard_requested":self.shuffle_hadamard_requested,
+            "shuffle_hadamard_supported":self.shuffle_hadamard_supported,
+            "shuffle_hadamard_active":self.shuffle_hadamard_active,
+            "shuffle_hadamard_self_test":self.shuffle_hadamard_self_test,
+            "hadamard_kernel":if self.shuffle_hadamard_active {"wave32_shuffle_experimental"} else {"shared_memory"},
+            "vector_head_requested":self.vector_head_requested,"vector_head_active":self.vector_head_active,
+            "vector_head_self_test":self.vector_head_self_test,
             "wave_head_requested":self.wave_head_requested,"wave_head_active":self.wave_head_active,
             "wave_head_self_test":self.wave_head_self_test,
             "wave_head_rows_per_group":self.wave_head_rows,
-            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.wave_head_active {"one_subgroup_per_row_2048_experimental"} else if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
-            "dense_head_rows_per_group":if self.wave_head_active {self.wave_head_rows} else {self.head_rows},
+            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.vector_head_active {"vector_eight_weights_per_lane_2048_experimental"} else if self.wave_head_active {"one_subgroup_per_row_2048_experimental"} else if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
+            "dense_head_rows_per_group":if self.vector_head_active || self.wave_head_active {self.wave_head_rows} else {self.head_rows},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
             "cooperative_k4_self_test":if self.cooperative_k4_active {self.cooperative_k4_self_test} else if self.mcg_cooperative[3] {"passed_mcg"} else {self.cooperative_k4_self_test},
             "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
@@ -3956,17 +4160,26 @@ impl Gpu {
         {
             self.head_rows = 4;
         }
-        self.wave_head_active = self.dense_wave != vk::Pipeline::null()
+        self.vector_head_active = self.dense_vector != vk::Pipeline::null()
+            && input_len == 2048
+            && self.wave_head_rows > 0
+            && rows.iter().all(|rows| {
+                rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize
+            });
+        self.wave_head_active = !self.vector_head_active
+            && self.dense_wave != vk::Pipeline::null()
             && input_len == 2048
             && rows.iter().all(|rows| {
                 rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize
             });
-        let rows_per_group = if self.wave_head_active {
+        let rows_per_group = if self.vector_head_active || self.wave_head_active {
             self.wave_head_rows
         } else {
             self.head_rows
         };
-        let pipeline = if self.wave_head_active {
+        let pipeline = if self.vector_head_active {
+            self.dense_vector
+        } else if self.wave_head_active {
             self.dense_wave
         } else if rows_per_group != 4 {
             self.dense_rows
@@ -4605,6 +4818,7 @@ impl Drop for Gpu {
             d.destroy_pipeline(self.dense_subgroup, None);
             d.destroy_pipeline(self.dense_rows, None);
             d.destroy_pipeline(self.dense_wave, None);
+            d.destroy_pipeline(self.dense_vector, None);
             d.destroy_pipeline(self.reduce, None);
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
@@ -5014,6 +5228,99 @@ mod tests {
                 let chunks = vec![(gpu.buffer(&bytes(128 * 5, 3)).unwrap(), 5)];
                 let fallback = gpu.prepare_dense_head(chunks, 128, dtype).unwrap();
                 assert!(!gpu.wave_head_active);
+                assert_eq!(fallback.pipeline, gpu.dense);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan full wave32 subgroups and shuffle support"]
+    fn resident_shuffle_hadamard_guard_and_exact_parity() {
+        for profiling in [false, true] {
+            let mut gpu = Gpu::new_with_options(true, profiling).unwrap();
+            let baseline = gpu.hadamard;
+            assert!(!gpu.shuffle_hadamard_active);
+            // An unrelated pipeline must never pass the numerical guard.
+            assert!(gpu.check_shuffle_hadamard(gpu.copy).is_err());
+            gpu.shuffle_hadamard_requested = true;
+            gpu.configure_shuffle_hadamard().unwrap();
+            if gpu.shuffle_hadamard_supported {
+                assert!(
+                    gpu.shuffle_hadamard_active,
+                    "{}",
+                    gpu.shuffle_hadamard_self_test
+                );
+                assert_ne!(gpu.hadamard, baseline);
+                assert_eq!(gpu.shuffle_hadamard_self_test["checked_values"], 5376);
+                assert_eq!(gpu.shuffle_hadamard_self_test["status"], "passed_bit_exact");
+            } else {
+                assert!(!gpu.shuffle_hadamard_active);
+                assert_eq!(gpu.hadamard, baseline);
+                assert_eq!(
+                    gpu.shuffle_hadamard_self_test["status"],
+                    "unsupported_subgroup"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan subgroup arithmetic; guarded vectorized head"]
+    fn resident_vector_head_guard_and_chunked_greedy() {
+        for profiling in [false, true] {
+            set_gpu_timestamps(profiling);
+            set_vector_head(true);
+            let gpu = Gpu::new();
+            set_vector_head(false);
+            set_gpu_timestamps(true);
+            let mut gpu = gpu.unwrap();
+            if gpu.wave_head_rows == 0 {
+                assert_eq!(gpu.vector_head_self_test["status"], "unsupported_subgroup");
+                continue;
+            }
+            assert_ne!(gpu.dense_vector, vk::Pipeline::null());
+            assert_eq!(gpu.vector_head_self_test["checked_values"], 102);
+            assert!(gpu.check_wave_head(gpu.copy).is_err());
+            for dtype in 0..=1 {
+                let bytes = |count: usize, bias: usize| -> Vec<u8> {
+                    (0..count)
+                        .flat_map(|i| {
+                            let v = ((i * 17 + bias) % 113) as f32 / 128. - 0.25;
+                            (if dtype == 0 {
+                                half::f16::from_f32(v).to_bits()
+                            } else {
+                                half::bf16::from_f32(v).to_bits()
+                            })
+                            .to_le_bytes()
+                        })
+                        .collect()
+                };
+                let chunks = vec![
+                    (gpu.buffer(&bytes(2048 * 5, 3)).unwrap(), 5),
+                    (gpu.buffer(&bytes(2048 * 7, 9)).unwrap(), 7),
+                ];
+                let x: Vec<f32> = (0..2048)
+                    .map(|i| ((i * 19 % 79) as f32 - 39.) / 64.)
+                    .collect();
+                let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+                let mut plan = gpu.prepare_dense_head(chunks, 2048, dtype).unwrap();
+                assert!(gpu.vector_head_active);
+                let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                assert_eq!(actual.len(), 12);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| a.is_finite() && (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
+                let vocabulary = [1u32, 3, 4, 5, 9, 11];
+                gpu.prepare_greedy_head(&mut plan, &vocabulary).unwrap();
+                let reference: Vec<_> = reference.into_iter().map(crate::math::half).collect();
+                let expected = crate::math::greedy_in_vocabulary(&reference, &vocabulary).unwrap();
+                assert_eq!(gpu.forward_greedy_head(&plan, &x).unwrap(), expected);
+                let chunks = vec![(gpu.buffer(&bytes(128 * 5, 3)).unwrap(), 5)];
+                let fallback = gpu.prepare_dense_head(chunks, 128, dtype).unwrap();
+                assert!(!gpu.vector_head_active);
                 assert_eq!(fallback.pipeline, gpu.dense);
             }
         }

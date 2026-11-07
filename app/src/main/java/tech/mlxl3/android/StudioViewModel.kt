@@ -63,6 +63,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var fusedNorm by mutableStateOf(prefs.getBoolean("fused_norm", false)); private set
     var subgroupNorm by mutableStateOf(prefs.getBoolean("subgroup_norm", false)); private set
     var exl3Multiwave by mutableStateOf(prefs.getBoolean("exl3_multiwave", false)); private set
+    var shuffleHadamard by mutableStateOf(prefs.getBoolean("shuffle_hadamard", false)); private set
+    var vectorHead by mutableStateOf(prefs.getBoolean("vector_head", false)); private set
     var waveHead by mutableStateOf(prefs.getBoolean("wave_head", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
@@ -158,6 +160,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         exl3Multiwave = enabled
         prefs.edit { putBoolean("exl3_multiwave", enabled) }
         status = "EXL3 multiwave ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseShuffleHadamard(enabled: Boolean) {
+        if (busy) return
+        shuffleHadamard = enabled
+        prefs.edit { putBoolean("shuffle_hadamard", enabled) }
+        status = "Hadamard shuffle ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseVectorHead(enabled: Boolean) {
+        if (busy) return
+        vectorHead = enabled
+        prefs.edit { putBoolean("vector_head", enabled) }
+        status = "Tête vectorisée ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun chooseWaveHead(enabled: Boolean) {
         if (busy) return
@@ -267,6 +281,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setSubgroupNorm(subgroupNorm)
         NativeEngine.setExl3Multiwave(exl3Multiwave)
         NativeEngine.setWaveHead(waveHead)
+        NativeEngine.setVectorHead(vectorHead)
+        NativeEngine.setShuffleHadamard(shuffleHadamard)
         check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
         NativeEngine.setGpuTimestamps(gpuTimestamps)
         NativeEngine.setParallelNorm(parallelNorm)
@@ -317,6 +333,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setSubgroupNorm(subgroupNorm)
             NativeEngine.setExl3Multiwave(exl3Multiwave)
             NativeEngine.setWaveHead(waveHead)
+            NativeEngine.setVectorHead(vectorHead)
+            NativeEngine.setShuffleHadamard(shuffleHadamard)
             check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
             NativeEngine.setGpuTimestamps(gpuTimestamps)
             NativeEngine.setParallelNorm(parallelNorm)

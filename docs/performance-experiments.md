@@ -5,7 +5,7 @@ parallel RMSNorm and profiling off. Existing preferences are preserved after
 the one-time profile migration. New experiments are opt-in, never claims of
 measured speedup on Xclipse 940.
 
-The main model menu exposes:
+The previous experiments, now under Advanced settings, include:
 - RMSNorm subgroup: hierarchical subgroup reduction, guarded numerical test.
 - Exact RMSNorm fusion: adjacent post-normalization/residual/pre-normalization,
   preserving both FP16 boundaries. Requires validated parallel RMSNorm;
@@ -15,6 +15,10 @@ The main model menu exposes:
 - Larger GPU lots: 8/12/24 layers, retaining reset/cancel semantics between
   submissions. The final model output still crosses to CPU before the head.
 - Wave head: previous experiment retained for comparison, off by default.
+
+The main model menu now shows only vector head and Hadamard shuffle. See
+[next inference experiments](next-inference-experiments.md) for their guards
+and current validation protocol. Existing choices are preserved.
 
 Reload the model after each setting change. Measure baseline and one experiment
 at a time with profiling off, identical input and a cooled phone, then alternate

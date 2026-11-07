@@ -78,7 +78,8 @@ class StudioScreenTest {
         }
         compose.onNodeWithText("LFM3 1.7B").performClick()
         compose.onNodeWithText("Couches convolution GPU : oui · recharger").assertDoesNotExist()
-        compose.onNodeWithText("Tête une wave/ligne (exp.) : non · recharger").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Tête une wave/ligne (exp.) : non · recharger").assertDoesNotExist()
+        compose.onNodeWithText("Tête vectorisée (exp.) : non · recharger").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
         compose.onNodeWithText("Couches convolution GPU : oui · recharger").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Retour aux expériences").performScrollTo().performClick()
@@ -92,6 +93,34 @@ class StudioScreenTest {
         compose.onNodeWithText("Couches convolution GPU : oui · recharger").assertDoesNotExist()
     }
 
+    @Test fun shuffleHadamardExperimentCanBeToggledAndRestored() {
+        val enabled = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, shuffleHadamard = enabled.value,
+                onShuffleHadamard = { enabled.value = it })
+        }
+        listOf("non", "oui").forEach { state ->
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("Hadamard shuffle (exp.) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", enabled.value) }
+        }
+    }
+
+    @Test fun vectorHeadExperimentCanBeToggledAndRestored() {
+        val enabled = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, vectorHead = enabled.value,
+                onVectorHead = { enabled.value = it })
+        }
+        listOf("non", "oui").forEach { state ->
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("Tête vectorisée (exp.) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", enabled.value) }
+        }
+    }
+
     @Test fun newWaveHeadExperimentCanBeToggledAndRestored() {
         val enabled = androidx.compose.runtime.mutableStateOf(false)
         compose.setContent {
@@ -100,9 +129,11 @@ class StudioScreenTest {
                 onWaveHead = { enabled.value = it })
         }
         compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
         compose.onNodeWithText("Tête une wave/ligne (exp.) : non · recharger").performScrollTo().performClick()
         compose.runOnIdle { assertTrue(enabled.value) }
         compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
         compose.onNodeWithText("Tête une wave/ligne (exp.) : oui · recharger").performScrollTo().performClick()
         compose.runOnIdle { assertFalse(enabled.value) }
     }
@@ -120,12 +151,15 @@ class StudioScreenTest {
         }
         listOf("non", "oui").forEach { state ->
             compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
             compose.onNodeWithText("RMSNorm subgroup (exp.) : $state · recharger").performScrollTo().performClick()
             compose.runOnIdle { assertEquals(state == "non", rms.value) }
             compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
             compose.onNodeWithText("EXL3 multiwave (exp.) : $state · recharger").performScrollTo().performClick()
             compose.runOnIdle { assertEquals(state == "non", exl3.value) }
             compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
             compose.onNodeWithText("Fusion RMSNorm (sans subgroup) : $state · recharger").performScrollTo().performClick()
             compose.runOnIdle { assertEquals(state == "non", fused.value) }
         }

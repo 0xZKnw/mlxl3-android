@@ -14,6 +14,8 @@ object NativeEngine {
     external fun setExl3Multiwave(enabled: Boolean)
     external fun setUnroll2(enabled: Boolean)
     external fun setSubgroupHead(enabled: Boolean)
+    external fun setShuffleHadamard(enabled: Boolean)
+    external fun setVectorHead(enabled: Boolean)
     external fun setWaveHead(enabled: Boolean)
     external fun setHeadRows(value: Int): Boolean
     external fun setGpuTimestamps(enabled: Boolean)

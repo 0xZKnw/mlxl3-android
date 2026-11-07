@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
                 model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
-                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps, model.waveHead, model::chooseWaveHead, model.subgroupNorm, model::chooseSubgroupNorm, model.exl3Multiwave, model::chooseExl3Multiwave, model.fusedNorm, model::chooseFusedNorm)
+                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps, model.waveHead, model::chooseWaveHead, model.subgroupNorm, model::chooseSubgroupNorm, model.exl3Multiwave, model::chooseExl3Multiwave, model.fusedNorm, model::chooseFusedNorm, model.vectorHead, model::chooseVectorHead, model.shuffleHadamard, model::chooseShuffleHadamard)
         }
     }
 }
@@ -119,7 +119,9 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  waveHead: Boolean = false, onWaveHead: (Boolean) -> Unit = {},
                  subgroupNorm: Boolean = false, onSubgroupNorm: (Boolean) -> Unit = {},
                  exl3Multiwave: Boolean = false, onExl3Multiwave: (Boolean) -> Unit = {},
-                 fusedNorm: Boolean = false, onFusedNorm: (Boolean) -> Unit = {}) {
+                 fusedNorm: Boolean = false, onFusedNorm: (Boolean) -> Unit = {},
+                 vectorHead: Boolean = false, onVectorHead: (Boolean) -> Unit = {},
+                 shuffleHadamard: Boolean = false, onShuffleHadamard: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -159,6 +161,16 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                             })
                             if (!advancedMenu) {
                                 Text("Expériences à comparer", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Quiet)
+                                DropdownMenuItem(text = { Text("Hadamard shuffle (exp.) : ${if (shuffleHadamard) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onShuffleHadamard(!shuffleHadamard) })
+                                DropdownMenuItem(text = { Text("Tête vectorisée (exp.) : ${if (vectorHead) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onVectorHead(!vectorHead) })
+                                DropdownMenuItem(text = { Text("Réglages avancés et retour arrière") },
+                                    onClick = { advancedMenu = true })
+                            } else {
+                                DropdownMenuItem(text = { Text("Retour aux expériences") },
+                                    onClick = { advancedMenu = false })
+                                Text("Choix conservés · performances ≠ parité validée", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Quiet)
                                 DropdownMenuItem(text = { Text("Fusion RMSNorm (sans subgroup) : ${if (fusedNorm) "oui" else "non"} · recharger") },
                                     onClick = { menu = false; onFusedNorm(!fusedNorm) })
                                 DropdownMenuItem(text = { Text("RMSNorm subgroup (exp.) : ${if (subgroupNorm) "oui" else "non"} · recharger") },
@@ -169,12 +181,6 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                     onClick = { menu = false; onCycleLayerBatch() })
                                 DropdownMenuItem(text = { Text("Tête une wave/ligne (exp.) : ${if (waveHead) "oui" else "non"} · recharger") },
                                     onClick = { menu = false; onWaveHead(!waveHead) })
-                                DropdownMenuItem(text = { Text("Réglages avancés et retour arrière") },
-                                    onClick = { advancedMenu = true })
-                            } else {
-                                DropdownMenuItem(text = { Text("Retour aux expériences") },
-                                    onClick = { advancedMenu = false })
-                                Text("Choix conservés · performances ≠ parité validée", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Quiet)
                                 listOf(1, 2, 4, 8).forEach { value ->
                                     DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
                                         onClick = { menu = false; onSplitK(value) })

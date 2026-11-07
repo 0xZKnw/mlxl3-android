@@ -1,0 +1,36 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// Experimental 2048-wide head: each lane loads eight adjacent weights in one
+// aligned uvec4, then uses four independent FP32 accumulation chains. This
+// reduces load/address instructions and dependency depth, not weight bandwidth.
+// One subgroup owns one row; no shared memory or workgroup barriers.
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { vec4 x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { uvec4 packed[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint dtype; uint unused; } p;
+vec2 decode(uint word) {
+    return p.dtype == 0u ? unpackHalf2x16(word)
+        : vec2(uintBitsToFloat((word & 65535u) << 16u), uintBitsToFloat(word & 0xffff0000u));
+}
+void main() {
+    uint row = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID;
+    vec4 acc = vec4(0.0);
+    if (row < p.cols) {
+        for (uint block = gl_SubgroupInvocationID; block < 256u; block += gl_SubgroupSize) {
+            uvec4 words = packed[row * 256u + block];
+            vec4 a = x[block * 2u];
+            vec4 b = x[block * 2u + 1u];
+            vec2 w0 = decode(words.x);
+            vec2 w1 = decode(words.y);
+            vec2 w2 = decode(words.z);
+            vec2 w3 = decode(words.w);
+            acc = fma(vec4(a.x, a.z, b.x, b.z), vec4(w0.x, w1.x, w2.x, w3.x), acc);
+            acc = fma(vec4(a.y, a.w, b.y, b.w), vec4(w0.y, w1.y, w2.y, w3.y), acc);
+        }
+    }
+    // Tail subgroups also reduce, with zero, keeping subgroup ops converged.
+    float sum = subgroupAdd((acc.x + acc.y) + (acc.z + acc.w));
+    if (subgroupElect() && row < p.cols) y[row] = sum;
+}
