@@ -38,16 +38,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val prefs = application.getSharedPreferences("studio", 0)
-    var splitK by mutableStateOf(prefs.getInt("split_k", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
+    private val initialPerformance = PerformanceDefaults.forDevice(Build.MANUFACTURER, Build.MODEL)
+        .withPreferences(prefs.all)
+    var splitK by mutableStateOf(initialPerformance.splitK); private set
     var fastHead by mutableStateOf(prefs.getBoolean("fast_head", false)); private set
-    var gpuConvLayer by mutableStateOf(prefs.getBoolean("gpu_conv_layer", false)); private set
-    var cooperativeK5 by mutableStateOf(prefs.getBoolean("cooperative_k5", false)); private set
+    var gpuConvLayer by mutableStateOf(initialPerformance.gpuConvLayer); private set
+    var cooperativeK5 by mutableStateOf(initialPerformance.cooperativeK5); private set
     var specializedMcg by mutableStateOf(prefs.getBoolean("specialized_mcg", false)); private set
-    var gpuGreedy by mutableStateOf(prefs.getBoolean("gpu_greedy", false)); private set
-    var gpuAttentionLayer by mutableStateOf(prefs.getBoolean("gpu_attention_layer", false)); private set
-    var ffnK4Split by mutableStateOf(prefs.getInt("ffn_k4_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
+    var gpuGreedy by mutableStateOf(initialPerformance.gpuGreedy); private set
+    var gpuAttentionLayer by mutableStateOf(initialPerformance.gpuAttentionLayer); private set
+    var ffnK4Split by mutableStateOf(initialPerformance.ffnK4Split); private set
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
-    var layerBatch by mutableStateOf(prefs.getInt("layer_batch", 1).takeIf { it in listOf(1, 2, 4) } ?: 1); private set
+    var layerBatch by mutableStateOf(initialPerformance.layerBatch); private set
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
@@ -139,6 +141,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         app.getSystemService(ActivityManager::class.java).getMemoryInfo(memory)
         val power = app.getSystemService(PowerManager::class.java)
         JSONObject().put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
+            .put("default_performance_profile", initialPerformance.profile)
             .put("android_sdk", Build.VERSION.SDK_INT).put("available_ram_bytes", memory.availMem)
             .put("total_ram_bytes", memory.totalMem).put("low_memory", memory.lowMemory)
             .put("app_pss_kib", Debug.getPss()).put("power_save", power.isPowerSaveMode)
