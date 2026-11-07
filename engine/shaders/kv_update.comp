@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 128) in;
+layout(set=0,binding=0,std430) readonly buffer Key { float key[]; };
+layout(set=0,binding=1,std430) readonly buffer Value { float value[]; };
+layout(set=0,binding=2,std430) buffer State { float state[]; };
+layout(push_constant) uniform Params { uint kv_size; uint window; uint unused0; uint unused1; } p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.kv_size) return;
+    uint position = floatBitsToUint(state[0]);
+    uint slot = position % p.window;
+    state[1u + slot*p.kv_size + i] = key[i];
+    state[1u + p.window*p.kv_size + slot*p.kv_size + i] = value[i];
+}

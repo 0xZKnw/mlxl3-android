@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 128) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float x[]; };
+layout(set=0,binding=1,std430) readonly buffer WeightsAngles { float data[]; };
+layout(set=0,binding=2,std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint dim; uint heads; uint active; uint eps_bits; } p;
+shared float scale;
+shared float normalized[128];
+#include "half_round.glsl"
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint base = gl_WorkGroupID.x * p.dim;
+    if (tid == 0u) {
+        precise float sum = 0.0;
+        for (uint i = 0u; i < p.dim; ++i) {
+            precise float product = x[base+i] * x[base+i];
+            sum = sum + product;
+        }
+        scale = 1.0 / sqrt(sum / float(p.dim) + uintBitsToFloat(p.eps_bits));
+    }
+    barrier();
+    normalized[tid] = halfRound(x[base+tid] * scale * halfRound(data[tid]));
+    barrier();
+    if (tid < p.dim / 2u) {
+        float a = normalized[tid];
+        float b = normalized[tid+p.dim/2u];
+        if (tid < p.active) {
+            float s = data[p.dim+2u*tid];
+            float c = data[p.dim+2u*tid+1u];
+            precise float ac = a*c; precise float bs = b*s;
+            precise float bc = b*c; precise float as_ = a*s;
+            y[base+tid] = halfRound(ac-bs);
+            y[base+tid+p.dim/2u] = halfRound(bc+as_);
+        } else {
+            y[base+tid] = a; y[base+tid+p.dim/2u] = b;
+        }
+    }
+}

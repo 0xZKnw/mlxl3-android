@@ -1,6 +1,6 @@
 use crate::{
     math,
-    vulkan::{ConvLayerPlan, ConvPlan, Gpu, MlpPlan},
+    vulkan::{AttentionLayerConfig, AttentionLayerPlan, ConvLayerPlan, ConvPlan, Gpu, MlpPlan},
     weights::{Linear, Weights},
 };
 use anyhow::{Context, Result, ensure};
@@ -174,6 +174,7 @@ struct Layer {
     post_ffn_norm: Vec<f32>,
     mlp: MlpPlan,
     gpu_conv_layer: Option<ConvLayerPlan>,
+    gpu_attention_layer: Option<AttentionLayerPlan>,
 }
 pub struct Model {
     pub config: Config,
@@ -217,6 +218,8 @@ impl Model {
             "kv_heads":self.config.num_key_value_heads,"vocabulary":self.config.vocab_size,
             "context_limit":self.context_limit,"position":self.position,"cpu_cache_logical_bytes":cache_bytes,
             "gpu_convolution_cache_logical_bytes":self.config.layer_types.iter().filter(|k| *k == "conv").count()*self.config.hidden_size*7*4,
+            "gpu_attention_layers":self.layers.iter().filter(|l| l.gpu_attention_layer.is_some()).count(),
+            "gpu_attention_cache_logical_bytes":self.layers.iter().filter_map(|l| l.gpu_attention_layer.as_ref()).map(|p| p.cache_bytes()).sum::<usize>(),
             "prefill_batch_size":1,"sampling":"greedy"})
     }
     pub fn load(
@@ -341,6 +344,21 @@ impl Model {
             } else {
                 None
             };
+            let gpu_attention_layer = if gpu.gpu_attention_layer_enabled() {
+                if let Operator::Attention(attn) = &operator
+                    && let (Some(q), Some(k), Some(v), Some(output), Some(gate)) =
+                        (attn.q.exl3_ref(), attn.k.exl3_ref(), attn.v.exl3_ref(), attn.output.exl3_ref(), attn.gate.gate_ref())
+                {
+                    Some(gpu.prepare_attention_layer(AttentionLayerConfig {
+                        q, k, v, output, gate, mlp: &mlp,
+                        norms: [&operator_norm, &post_operator_norm, &ffn_norm, &post_ffn_norm],
+                        q_norm: &attn.q_norm, k_norm: &attn.k_norm,
+                        heads: config.num_attention_heads, kv_heads: config.num_key_value_heads,
+                        dim: config.head_dim, window: attn.window, eps: config.norm_eps,
+                        theta: attn.rope.rope_theta, fraction: attn.rope.partial_rotary_factor,
+                    })?)
+                } else { None }
+            } else { None };
             layers.push(Layer {
                 operator,
                 operator_norm,
@@ -349,6 +367,7 @@ impl Model {
                 post_ffn_norm,
                 mlp,
                 gpu_conv_layer,
+                gpu_attention_layer,
             });
         }
         ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
@@ -408,6 +427,15 @@ impl Model {
                     &hidden,
                     self.position,
                 )?;
+                continue;
+            }
+            if let (Some(plan), Operator::Attention(attn)) = (&layer.gpu_attention_layer, &layer.operator) {
+                let q = attn.q.exl3_ref().context("Missing resident Q")?;
+                let k = attn.k.exl3_ref().context("Missing resident K")?;
+                let v = attn.v.exl3_ref().context("Missing resident V")?;
+                let output = attn.output.exl3_ref().context("Missing resident output")?;
+                let gate = attn.gate.gate_ref().context("Missing resident gate")?;
+                hidden = self.gpu.forward_attention_layer(plan, [q, k, v, output], gate, &layer.mlp, &hidden, self.position)?;
                 continue;
             }
             let normalized = normalize(

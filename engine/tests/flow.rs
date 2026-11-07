@@ -186,12 +186,14 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     mlxl3_android::vulkan::set_fast_head(true);
     mlxl3_android::vulkan::set_experimental_kernels(true, true);
     mlxl3_android::vulkan::set_gpu_greedy(true);
+    mlxl3_android::vulkan::set_gpu_attention_layer(true);
     assert!(mlxl3_android::vulkan::set_split_k(8));
     let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
     mlxl3_android::vulkan::set_gpu_conv_layer(false);
     mlxl3_android::vulkan::set_fast_head(false);
     mlxl3_android::vulkan::set_experimental_kernels(false, false);
     mlxl3_android::vulkan::set_gpu_greedy(false);
+    mlxl3_android::vulkan::set_gpu_attention_layer(false);
     assert!(mlxl3_android::vulkan::set_split_k(4));
     let mut experimental = experimental.unwrap();
     for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {

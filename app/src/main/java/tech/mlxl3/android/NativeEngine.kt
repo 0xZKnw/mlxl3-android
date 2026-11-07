@@ -8,6 +8,7 @@ object NativeEngine {
     external fun setGpuConvLayer(enabled: Boolean)
     external fun setExperimentalKernels(k5: Boolean, mcg: Boolean)
     external fun setGpuGreedy(enabled: Boolean)
+    external fun setGpuAttentionLayer(enabled: Boolean)
     external fun load(path: String, callback: Callback): String
     external fun generate(messages: String, maxTokens: Int, callback: Callback): String
     external fun cancel()

@@ -71,6 +71,11 @@ static REQUESTED_GPU_CONV_LAYER: AtomicBool = AtomicBool::new(false);
 static REQUESTED_COOPERATIVE_K5: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SPECIALIZED_MCG: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_GREEDY: AtomicBool = AtomicBool::new(false);
+static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
+
+pub fn set_gpu_attention_layer(enabled: bool) {
+    REQUESTED_GPU_ATTENTION_LAYER.store(enabled, Ordering::Relaxed);
+}
 
 pub fn set_gpu_greedy(enabled: bool) {
     REQUESTED_GPU_GREEDY.store(enabled, Ordering::Relaxed);
@@ -118,9 +123,9 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
-const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 160;
+const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 256;
 const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
-const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 160;
+const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 256;
 
 fn projection_queries(index: usize) -> Option<u32> {
     (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
@@ -200,6 +205,48 @@ pub(crate) struct ConvLayerPlan {
     size: usize,
 }
 
+pub(crate) struct AttentionLayerPlan {
+    device: Arc<Device>,
+    hidden: Buffer,
+    cache: Buffer,
+    q_data: Buffer,
+    k_data: Buffer,
+    _buffers: Vec<Buffer>,
+    commands: [vk::CommandBuffer; 9],
+    query_firsts: [u32; 9],
+    identities: [vk::CommandBuffer; 6],
+    q_weights: Vec<f32>,
+    k_weights: Vec<f32>,
+    heads: usize,
+    kv_heads: usize,
+    dim: usize,
+    active: usize,
+    theta: f32,
+}
+
+impl AttentionLayerPlan {
+    pub(crate) fn cache_bytes(&self) -> usize { self.cache.size }
+}
+
+pub(crate) struct AttentionLayerConfig<'a> {
+    pub q: &'a Exl3Matrix,
+    pub k: &'a Exl3Matrix,
+    pub v: &'a Exl3Matrix,
+    pub output: &'a Exl3Matrix,
+    pub gate: &'a DenseGatePlan,
+    pub mlp: &'a MlpPlan,
+    pub norms: [&'a [f32]; 4],
+    pub q_norm: &'a [f32],
+    pub k_norm: &'a [f32],
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub dim: usize,
+    pub window: usize,
+    pub eps: f32,
+    pub theta: f32,
+    pub fraction: f32,
+}
+
 pub(crate) struct DenseHeadPlan {
     chunks: Vec<(Buffer, usize)>,
     outputs: Vec<Buffer>,
@@ -221,6 +268,7 @@ pub(crate) struct DenseGatePlan {
     _weights: Buffer,
     input_len: usize,
     outputs: usize,
+    dtype: u32,
     command: vk::CommandBuffer,
     query_first: u32,
 }
@@ -289,6 +337,7 @@ struct Dispatch<'a> {
     input: &'a Buffer,
     weights: &'a Buffer,
     output: &'a Buffer,
+    aux: Option<&'a Buffer>,
     params: [u32; 4],
     outputs: usize,
     groups: u32,
@@ -460,8 +509,12 @@ pub struct Gpu {
     convolution: vk::Pipeline,
     rms_residual: vk::Pipeline,
     greedy: vk::Pipeline,
+    norm_rope: vk::Pipeline,
+    kv_update: vk::Pipeline,
+    attention: vk::Pipeline,
     gpu_conv_layer: bool,
     gpu_greedy: bool,
+    gpu_attention_layer: bool,
     partials: Option<Buffer>,
     input: Option<Buffer>,
     rotated: Option<Buffer>,
@@ -754,8 +807,12 @@ impl Gpu {
             convolution: vk::Pipeline::null(),
             rms_residual: vk::Pipeline::null(),
             greedy: vk::Pipeline::null(),
+            norm_rope: vk::Pipeline::null(),
+            kv_update: vk::Pipeline::null(),
+            attention: vk::Pipeline::null(),
             gpu_conv_layer: REQUESTED_GPU_CONV_LAYER.load(Ordering::Relaxed),
             gpu_greedy: REQUESTED_GPU_GREEDY.load(Ordering::Relaxed),
+            gpu_attention_layer: REQUESTED_GPU_ATTENTION_LAYER.load(Ordering::Relaxed),
             partials: None,
             input: None,
             rotated: None,
@@ -899,6 +956,9 @@ impl Gpu {
             "/rms_residual.spv"
         )))?;
         gpu.greedy = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/greedy.spv")))?;
+        gpu.norm_rope = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/norm_rope.spv")))?;
+        gpu.kv_update = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/kv_update.spv")))?;
+        gpu.attention = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/attention.spv")))?;
         let partial_bytes = 32768 * 4 * gpu.split_k.max(4) as usize * 4;
         gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
@@ -1170,6 +1230,7 @@ impl Gpu {
             "projection":"gpu_resident_mlp_conv",
             "gpu_conv_layer_experimental":self.gpu_conv_layer,
             "gpu_greedy_requested":self.gpu_greedy,
+            "gpu_attention_layer_experimental":self.gpu_attention_layer,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
@@ -1552,6 +1613,7 @@ impl Gpu {
                 groups: (shape.rows / 128) as u32,
                 groups_y: 1,
                 pipeline: self.hadamard,
+                aux: None,
                 barrier_after: true,
             },
             Dispatch {
@@ -1568,6 +1630,7 @@ impl Gpu {
                 groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
                 groups_y: if split { self.split_k } else { 1 },
                 pipeline,
+                aux: None,
                 barrier_after: true,
             },
             Dispatch {
@@ -1584,6 +1647,7 @@ impl Gpu {
                 groups: (shape.cols / 128) as u32,
                 groups_y: 1,
                 pipeline: self.hadamard,
+                aux: None,
                 barrier_after: false,
             },
         ];
@@ -1724,6 +1788,7 @@ impl Gpu {
             groups: dense_groups(outputs).context("Invalid gate groups")?,
             groups_y: 1,
             pipeline: self.dense,
+            aux: None,
             barrier_after: false,
         })?;
         Ok(DenseGatePlan {
@@ -1731,6 +1796,7 @@ impl Gpu {
             _weights: weights,
             input_len,
             outputs,
+            dtype,
             command,
             query_first,
         })
@@ -1978,6 +2044,7 @@ impl Gpu {
             groups: size.div_ceil(128) as u32,
             groups_y: 1,
             pipeline: self.swiglu,
+            aux: None,
             barrier_after: true,
         })?;
         Ok(MlpPlan {
@@ -2057,6 +2124,7 @@ impl Gpu {
             groups: h.div_ceil(128) as u32,
             groups_y: 1,
             pipeline: self.convolution,
+            aux: None,
             barrier_after: true,
         })?;
         Ok(ConvPlan {
@@ -2074,6 +2142,120 @@ impl Gpu {
 
     pub(crate) fn gpu_greedy_enabled(&self) -> bool {
         self.gpu_greedy
+    }
+
+    pub(crate) fn gpu_attention_layer_enabled(&self) -> bool {
+        self.gpu_attention_layer
+    }
+
+    pub(crate) fn prepare_attention_layer(&mut self, c: AttentionLayerConfig<'_>) -> Result<AttentionLayerPlan> {
+        let size = c.heads.checked_mul(c.dim).context("Attention size overflow")?;
+        let kv_size = c.kv_heads.checked_mul(c.dim).context("KV size overflow")?;
+        let active = (c.fraction * c.dim as f32) as usize / 2;
+        ensure!(self.properties.limits.max_compute_shared_memory_size >= 8192 && c.dim == 128 && c.heads > 0 && c.kv_heads > 0 && c.heads.is_multiple_of(c.kv_heads)
+            && (1..=2048).contains(&c.window) && (1..=64).contains(&active)
+            && c.theta.is_finite() && c.theta > 0. && c.eps.is_finite() && c.eps > 0.
+            && c.q.shape.input == size && c.q.shape.output == size
+            && c.k.shape.input == size && c.k.shape.output == kv_size
+            && c.v.shape.input == size && c.v.shape.output == kv_size
+            && c.output.shape.input == size && c.output.shape.output == size
+            && c.gate.input_len == size && c.gate.outputs == c.heads
+            && c.mlp.gate.shape.input == size && c.mlp.down.shape.output == size
+            && c.norms.iter().all(|v| v.len() == size && v.iter().all(|x| x.is_finite()))
+            && c.q_norm.len() == c.dim && c.k_norm.len() == c.dim
+            && c.q_norm.iter().chain(c.k_norm).all(|x| x.is_finite()), "Invalid resident attention configuration");
+        ensure!([c.q, c.k, c.v, c.output, &c.mlp.gate, &c.mlp.up, &c.mlp.down]
+            .iter().all(|m| Arc::ptr_eq(&m.weights.device, &self.device))
+            && Arc::ptr_eq(&c.gate.device, &self.device), "Attention belongs to another GPU");
+        let state_len = c.window.checked_mul(kv_size).and_then(|n| n.checked_mul(2)).and_then(|n| n.checked_add(1)).context("KV cache size overflow")?;
+        let hidden = self.mapped_buffer(size * 4)?;
+        let cache = self.mapped_buffer(state_len * 4)?;
+        let q_data = self.mapped_buffer(c.dim * 2 * 4)?;
+        let k_data = self.mapped_buffer(c.dim * 2 * 4)?;
+        let q_output = self.mapped_buffer(size * 4)?;
+        let k_output = self.mapped_buffer(kv_size * 4)?;
+        let norm_weights = c.norms.iter().map(|norm| {
+            let bytes: Vec<u8> = norm.iter().map(|v| crate::math::half(*v)).flat_map(|v| v.to_ne_bytes()).collect();
+            self.buffer(&bytes)
+        }).collect::<Result<Vec<_>>>()?;
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let gate_output = self.gate_output.as_ref().context("Gate output unavailable")?;
+        let specs = [
+            Dispatch { input: &hidden, weights: &norm_weights[0], output: input, aux: None, params: [size as u32, 0, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
+            Dispatch { input, weights: &c.gate._weights, output: gate_output, aux: None, params: [size as u32, c.heads as u32, c.gate.dtype, 0], outputs: c.heads, groups: dense_groups(c.heads).context("Invalid gate size")?, groups_y: 1, pipeline: self.dense, barrier_after: true },
+            Dispatch { input: &c.q.output, weights: &q_data, output: &q_output, aux: None, params: [c.dim as u32, c.heads as u32, active as u32, c.eps.to_bits()], outputs: size, groups: c.heads as u32, groups_y: 1, pipeline: self.norm_rope, barrier_after: true },
+            Dispatch { input: &c.k.output, weights: &k_data, output: &k_output, aux: None, params: [c.dim as u32, c.kv_heads as u32, active as u32, c.eps.to_bits()], outputs: kv_size, groups: c.kv_heads as u32, groups_y: 1, pipeline: self.norm_rope, barrier_after: true },
+            Dispatch { input: &k_output, weights: &c.v.output, output: &cache, aux: None, params: [kv_size as u32, c.window as u32, 0, 0], outputs: kv_size, groups: kv_size.div_ceil(128) as u32, groups_y: 1, pipeline: self.kv_update, barrier_after: true },
+            Dispatch { input: &q_output, weights: &cache, output: input, aux: Some(gate_output), params: [c.heads as u32, c.kv_heads as u32, c.dim as u32, c.window as u32], outputs: size, groups: c.heads as u32, groups_y: 1, pipeline: self.attention, barrier_after: true },
+            Dispatch { input: &c.output.output, weights: &norm_weights[1], output: &hidden, aux: None, params: [size as u32, 1, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
+            Dispatch { input: &hidden, weights: &norm_weights[2], output: input, aux: None, params: [size as u32, 0, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
+            Dispatch { input: &c.mlp.down.output, weights: &norm_weights[3], output: &hidden, aux: None, params: [size as u32, 1, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
+        ];
+        let mut commands = Vec::new();
+        let mut query_firsts = Vec::new();
+        for spec in specs { let (command, query) = self.prepare_operator(spec)?; commands.push(command); query_firsts.push(query); }
+        let mut buffers = norm_weights;
+        buffers.push(q_output); buffers.push(k_output);
+        Ok(AttentionLayerPlan {
+            device: self.device.clone(), hidden, cache, q_data, k_data, _buffers: buffers,
+            commands: commands.try_into().map_err(|_| anyhow::anyhow!("Invalid attention command count"))?,
+            query_firsts: query_firsts.try_into().map_err(|_| anyhow::anyhow!("Invalid attention query count"))?,
+            identities: [c.q.command, c.k.command, c.v.command, c.output.command, c.gate.command, c.mlp.gate.command],
+            q_weights: c.q_norm.to_vec(), k_weights: c.k_norm.to_vec(), heads: c.heads, kv_heads: c.kv_heads,
+            dim: c.dim, active, theta: c.theta,
+        })
+    }
+
+    pub(crate) fn forward_attention_layer(
+        &self,
+        plan: &AttentionLayerPlan,
+        matrices: [&Exl3Matrix; 4],
+        gate: &DenseGatePlan,
+        mlp: &MlpPlan,
+        x: &[f32],
+        position: usize,
+    ) -> Result<Vec<f32>> {
+        let [q, k, v, output] = matrices;
+        ensure!(Arc::ptr_eq(&plan.device, &self.device) && position < 2048 &&
+            plan.identities == [q.command, k.command, v.command, output.command, gate.command, mlp.gate.command] &&
+            x.len() == plan.heads * plan.dim && plan.kv_heads > 0 && x.iter().all(|v| v.is_finite()),
+            "Invalid resident attention input");
+        let mut q_data = vec![0f32; plan.dim * 2];
+        let mut k_data = vec![0f32; plan.dim * 2];
+        q_data[..plan.dim].copy_from_slice(&plan.q_weights);
+        k_data[..plan.dim].copy_from_slice(&plan.k_weights);
+        for j in 0..plan.active {
+            let angle = position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
+            let (sin, cos) = angle.sin_cos();
+            q_data[plan.dim + 2*j] = sin; q_data[plan.dim + 2*j+1] = cos;
+            k_data[plan.dim + 2*j] = sin; k_data[plan.dim + 2*j+1] = cos;
+        }
+        let started = Instant::now();
+        let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let q_bytes: Vec<u8> = q_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let k_bytes: Vec<u8> = k_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        plan.hidden.write(&hidden_bytes)?;
+        plan.q_data.write(&q_bytes)?;
+        plan.k_data.write(&k_bytes)?;
+        plan.cache.write(&(position as u32).to_ne_bytes())?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        self.submit_graph(&[
+            plan.commands[0], q.command, k.command, v.command, plan.commands[1],
+            plan.commands[2], plan.commands[3], plan.commands[4], plan.commands[5],
+            output.command, plan.commands[6], plan.commands[7], mlp.gate.command,
+            mlp.up.command, mlp.activate, mlp.down.command, plan.commands[8],
+        ], Instant::now())?;
+        for matrix in [q, k, v, output, &mlp.gate, &mlp.up, &mlp.down] {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
+        self.collect_gate_interval(plan.query_firsts[1]);
+        for i in [2usize, 3, 4, 5] { self.collect_other_interval(plan.query_firsts[i], true); }
+        for i in [0usize, 6, 7, 8] { self.collect_other_interval(plan.query_firsts[i], false); }
+        self.collect_interval(mlp.activate_query, Some(false));
+        let started = Instant::now();
+        let result = plan.hidden.read_f32(plan.heads * plan.dim);
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        result
     }
 
     pub(crate) fn prepare_conv_layer(
@@ -2125,6 +2307,7 @@ impl Gpu {
                 groups: 1,
                 groups_y: 1,
                 pipeline: self.rms_residual,
+                aux: None,
                 barrier_after: true,
             })?;
             commands.push(command);
@@ -2192,7 +2375,7 @@ impl Gpu {
         self.collect_interval(conv.convolve_query, Some(true));
         self.collect_interval(mlp.activate_query, Some(false));
         for query in plan.query_firsts {
-            self.collect_norm_interval(query);
+            self.collect_other_interval(query, false);
         }
         let started = Instant::now();
         let output = plan.hidden.read_f32(plan.size);
@@ -2200,7 +2383,7 @@ impl Gpu {
         output
     }
 
-    fn collect_norm_interval(&self, query_first: u32) {
+    fn collect_other_interval(&self, query_first: u32, attention: bool) {
         if self.queries == vk::QueryPool::null() {
             return;
         }
@@ -2223,9 +2406,13 @@ impl Gpu {
                             as u64;
                         p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
                         p.device_other_ns = p.device_other_ns.saturating_add(ns);
-                        p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
-                        p.device_norm_residual_samples =
-                            p.device_norm_residual_samples.saturating_add(1);
+                        if attention {
+                            p.device_attention_gpu_ns = p.device_attention_gpu_ns.saturating_add(ns);
+                            p.device_attention_gpu_samples = p.device_attention_gpu_samples.saturating_add(1);
+                        } else {
+                            p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
+                            p.device_norm_residual_samples = p.device_norm_residual_samples.saturating_add(1);
+                        }
                         p.device_samples = p.device_samples.saturating_add(1);
                     }
                 }
@@ -2306,6 +2493,7 @@ impl Gpu {
                     groups,
                     groups_y: self.split_k,
                     pipeline,
+                    aux: None,
                     barrier_after: true,
                 },
                 Dispatch {
@@ -2317,6 +2505,7 @@ impl Gpu {
                     groups: outputs.div_ceil(128) as u32,
                     groups_y: 1,
                     pipeline: self.reduce,
+                    aux: None,
                     barrier_after: false,
                 },
             ],
@@ -2375,6 +2564,7 @@ impl Gpu {
                 } else {
                     self.dense
                 },
+                aux: None,
                 barrier_after: false,
             })
             .collect();
@@ -2469,6 +2659,7 @@ impl Gpu {
                 } else {
                     self.dense
                 },
+                aux: None,
                 barrier_after: i + 1 == plan.chunks.len(),
             });
         }
@@ -2483,6 +2674,7 @@ impl Gpu {
                 groups: 1,
                 groups_y: 1,
                 pipeline: self.greedy,
+                aux: None,
                 barrier_after: false,
             });
             offset += rows;
@@ -2576,6 +2768,7 @@ impl Gpu {
                     .expect("validated dense shape"),
                 groups_y: 1,
                 pipeline: self.dense,
+                aux: None,
                 barrier_after: false,
             })
             .collect();
@@ -2622,6 +2815,7 @@ impl Gpu {
                 groups,
                 groups_y: 1,
                 pipeline,
+                aux: None,
                 barrier_after: false,
             }],
         )?;
@@ -2746,7 +2940,7 @@ impl Gpu {
                 );
             }
             for (index, job) in jobs.iter().enumerate() {
-                let infos = [job.input, job.weights, job.output, codebooks].map(|buffer| {
+                let infos = [job.input, job.weights, job.output, job.aux.unwrap_or(codebooks)].map(|buffer| {
                     [vk::DescriptorBufferInfo::default()
                         .buffer(buffer.raw)
                         .range(buffer.size as u64)]
@@ -2940,6 +3134,9 @@ impl Drop for Gpu {
             d.destroy_pipeline(self.convolution, None);
             d.destroy_pipeline(self.rms_residual, None);
             d.destroy_pipeline(self.greedy, None);
+            d.destroy_pipeline(self.norm_rope, None);
+            d.destroy_pipeline(self.kv_update, None);
+            d.destroy_pipeline(self.attention, None);
             d.destroy_pipeline(self.hadamard, None);
             d.destroy_query_pool(self.queries, None);
             d.destroy_pipeline_layout(self.layout, None);
