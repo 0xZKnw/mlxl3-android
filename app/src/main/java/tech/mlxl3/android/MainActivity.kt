@@ -138,6 +138,12 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Importer un dossier EXL3") }, onClick = { menu = false; onImport() })
                             if (savedModel) DropdownMenuItem(text = { Text("Charger le modèle enregistré") }, onClick = { menu = false; onLoad() })
+                            if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
+                                menu = false
+                                context.getSystemService(ClipboardManager::class.java)
+                                    .setPrimaryClip(ClipData.newPlainText("MLXL3 performance", diagnostics))
+                                Toast.makeText(context, "Diagnostic copié", Toast.LENGTH_SHORT).show()
+                            })
                             listOf(1, 2, 4, 8).forEach { value ->
                                 DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
                                     onClick = { menu = false; onSplitK(value) })
@@ -160,12 +166,6 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
                             DropdownMenuItem(text = { Text("Couches attention GPU : ${if (gpuAttentionLayer) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onGpuAttentionLayer(!gpuAttentionLayer) })
-                            if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
-                                menu = false
-                                context.getSystemService(ClipboardManager::class.java)
-                                    .setPrimaryClip(ClipData.newPlainText("MLXL3 performance", diagnostics))
-                                Toast.makeText(context, "Diagnostic copié", Toast.LENGTH_SHORT).show()
-                            })
                         }
                     }
                     IconButton(onClick = onNew, enabled = !busy, modifier = Modifier.padding(start = 4.dp)) {

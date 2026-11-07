@@ -78,7 +78,9 @@ static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 
 pub fn set_layer_batch(value: u32) -> bool {
-    if ![1, 2, 4].contains(&value) { return false; }
+    if ![1, 2, 4].contains(&value) {
+        return false;
+    }
     REQUESTED_LAYER_BATCH.store(value, Ordering::Relaxed);
     true
 }
@@ -274,12 +276,20 @@ pub(crate) struct AttentionLayerConfig<'a> {
 
 pub(crate) enum ResidentLayer<'a> {
     Conv(&'a ConvLayerPlan, &'a ConvPlan, &'a MlpPlan),
-    Attention(&'a AttentionLayerPlan, [&'a Exl3Matrix; 4], &'a DenseGatePlan, &'a MlpPlan),
+    Attention(
+        &'a AttentionLayerPlan,
+        [&'a Exl3Matrix; 4],
+        &'a DenseGatePlan,
+        &'a MlpPlan,
+    ),
 }
 
 impl ResidentLayer<'_> {
     fn hidden(&self) -> &Buffer {
-        match self { Self::Conv(plan, _, _) => &plan.hidden, Self::Attention(plan, _, _, _) => &plan.hidden }
+        match self {
+            Self::Conv(plan, _, _) => &plan.hidden,
+            Self::Attention(plan, _, _, _) => &plan.hidden,
+        }
     }
 }
 
@@ -290,7 +300,11 @@ pub(crate) struct LayerCopyPlan {
     target: vk::Buffer,
 }
 
-enum OtherKind { Norm, Attention, Copy }
+enum OtherKind {
+    Norm,
+    Attention,
+    Copy,
+}
 
 pub(crate) struct DenseHeadPlan {
     chunks: Vec<(Buffer, usize)>,
@@ -2244,33 +2258,75 @@ impl Gpu {
         self.gpu_attention_layer
     }
 
-    pub(crate) fn layer_batch_size(&self) -> usize { self.layer_batch }
+    pub(crate) fn layer_batch_size(&self) -> usize {
+        self.layer_batch
+    }
 
-    pub(crate) fn prepare_layer_copy(&self, source: &ResidentLayer<'_>, target: &ResidentLayer<'_>, size: usize) -> Result<LayerCopyPlan> {
-        ensure!(size > 0 && size <= 32768 && source.hidden().raw != target.hidden().raw
-            && source.hidden().size >= size * 4 && target.hidden().size >= size * 4
-            && Arc::ptr_eq(&source.hidden().device, &self.device) && Arc::ptr_eq(&target.hidden().device, &self.device),
-            "Invalid resident layer link");
-        let weights = self.codebooks.as_ref().context("GPU codebooks unavailable")?;
+    pub(crate) fn prepare_layer_copy(
+        &self,
+        source: &ResidentLayer<'_>,
+        target: &ResidentLayer<'_>,
+        size: usize,
+    ) -> Result<LayerCopyPlan> {
+        ensure!(
+            size > 0
+                && size <= 32768
+                && source.hidden().raw != target.hidden().raw
+                && source.hidden().size >= size * 4
+                && target.hidden().size >= size * 4
+                && Arc::ptr_eq(&source.hidden().device, &self.device)
+                && Arc::ptr_eq(&target.hidden().device, &self.device),
+            "Invalid resident layer link"
+        );
+        let weights = self
+            .codebooks
+            .as_ref()
+            .context("GPU codebooks unavailable")?;
         let (command, query_first) = self.prepare_operator(Dispatch {
-            input: source.hidden(), weights, output: target.hidden(), aux: None,
-            params: [size as u32, 0, 0, 0], outputs: size,
-            groups: size.div_ceil(128) as u32, groups_y: 1, pipeline: self.copy, barrier_after: true,
+            input: source.hidden(),
+            weights,
+            output: target.hidden(),
+            aux: None,
+            params: [size as u32, 0, 0, 0],
+            outputs: size,
+            groups: size.div_ceil(128) as u32,
+            groups_y: 1,
+            pipeline: self.copy,
+            barrier_after: true,
         })?;
-        Ok(LayerCopyPlan { command, query_first, source: source.hidden().raw, target: target.hidden().raw })
+        Ok(LayerCopyPlan {
+            command,
+            query_first,
+            source: source.hidden().raw,
+            target: target.hidden().raw,
+        })
     }
 
     pub(crate) fn forward_resident_batch(
-        &self, layers: &[ResidentLayer<'_>], links: &[&LayerCopyPlan], x: &[f32], position: usize,
+        &self,
+        layers: &[ResidentLayer<'_>],
+        links: &[&LayerCopyPlan],
+        x: &[f32],
+        position: usize,
     ) -> Result<Vec<f32>> {
-        ensure!((2..=4).contains(&layers.len()) && links.len() + 1 == layers.len() &&
-            position < 2048 && x.iter().all(|v| v.is_finite()), "Invalid resident layer batch");
+        ensure!(
+            (2..=4).contains(&layers.len())
+                && links.len() + 1 == layers.len()
+                && position < 2048
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid resident layer batch"
+        );
         for (i, link) in links.iter().enumerate() {
-            ensure!(link.source == layers[i].hidden().raw && link.target == layers[i+1].hidden().raw,
-                "Resident layer link mismatch");
+            ensure!(
+                link.source == layers[i].hidden().raw && link.target == layers[i + 1].hidden().raw,
+                "Resident layer link mismatch"
+            );
         }
         let first = layers.first().context("Missing first layer")?;
-        ensure!(first.hidden().size >= x.len() * 4, "Invalid resident input shape");
+        ensure!(
+            first.hidden().size >= x.len() * 4,
+            "Invalid resident input shape"
+        );
         let started = Instant::now();
         let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
         first.hidden().write(&bytes)?;
@@ -2279,27 +2335,69 @@ impl Gpu {
         for (i, layer) in layers.iter().enumerate() {
             match layer {
                 ResidentLayer::Conv(plan, conv, mlp) => {
-                    ensure!(Arc::ptr_eq(&plan.device, &self.device) && plan.size == x.len() &&
-                        plan.conv_input == conv.input.command && plan.mlp_gate == mlp.gate.command,
-                        "Invalid convolution batch layer");
+                    ensure!(
+                        Arc::ptr_eq(&plan.device, &self.device)
+                            && plan.size == x.len()
+                            && plan.conv_input == conv.input.command
+                            && plan.mlp_gate == mlp.gate.command,
+                        "Invalid convolution batch layer"
+                    );
                     conv.state.write(&(position as u32).to_ne_bytes())?;
-                    commands.extend_from_slice(&[plan.commands[0], conv.input.command, conv.convolve, conv.output.command,
-                        plan.commands[1], plan.commands[2], mlp.gate.command, mlp.up.command,
-                        mlp.activate, mlp.down.command, plan.commands[3]]);
+                    commands.extend_from_slice(&[
+                        plan.commands[0],
+                        conv.input.command,
+                        conv.convolve,
+                        conv.output.command,
+                        plan.commands[1],
+                        plan.commands[2],
+                        mlp.gate.command,
+                        mlp.up.command,
+                        mlp.activate,
+                        mlp.down.command,
+                        plan.commands[3],
+                    ]);
                 }
                 ResidentLayer::Attention(plan, matrices, gate, mlp) => {
                     let [q, k, v, output] = *matrices;
-                    ensure!(Arc::ptr_eq(&plan.device, &self.device) && plan.heads * plan.dim == x.len() &&
-                        plan.identities == [q.command, k.command, v.command, output.command, gate.command, mlp.gate.command],
-                        "Invalid attention batch layer");
+                    ensure!(
+                        Arc::ptr_eq(&plan.device, &self.device)
+                            && plan.heads * plan.dim == x.len()
+                            && plan.identities
+                                == [
+                                    q.command,
+                                    k.command,
+                                    v.command,
+                                    output.command,
+                                    gate.command,
+                                    mlp.gate.command
+                                ],
+                        "Invalid attention batch layer"
+                    );
                     self.prepare_attention_state(plan, position)?;
-                    commands.extend_from_slice(&[plan.commands[0], q.command, k.command, v.command, plan.commands[1],
-                        plan.commands[2], plan.commands[3], plan.commands[4], plan.commands[5], output.command,
-                        plan.commands[6], plan.commands[7], mlp.gate.command, mlp.up.command,
-                        mlp.activate, mlp.down.command, plan.commands[8]]);
+                    commands.extend_from_slice(&[
+                        plan.commands[0],
+                        q.command,
+                        k.command,
+                        v.command,
+                        plan.commands[1],
+                        plan.commands[2],
+                        plan.commands[3],
+                        plan.commands[4],
+                        plan.commands[5],
+                        output.command,
+                        plan.commands[6],
+                        plan.commands[7],
+                        mlp.gate.command,
+                        mlp.up.command,
+                        mlp.activate,
+                        mlp.down.command,
+                        plan.commands[8],
+                    ]);
                 }
             }
-            if i < links.len() { commands.push(links[i].command); }
+            if i < links.len() {
+                commands.push(links[i].command);
+            }
         }
         self.submit_graph(&commands, Instant::now())?;
         for layer in layers {
@@ -2310,7 +2408,9 @@ impl Gpu {
                     }
                     self.collect_interval(conv.convolve_query, Some(true));
                     self.collect_interval(mlp.activate_query, Some(false));
-                    for query in plan.query_firsts { self.collect_other_interval(query, OtherKind::Norm); }
+                    for query in plan.query_firsts {
+                        self.collect_other_interval(query, OtherKind::Norm);
+                    }
                 }
                 ResidentLayer::Attention(plan, matrices, _, mlp) => {
                     let [q, k, v, output] = *matrices;
@@ -2318,15 +2418,25 @@ impl Gpu {
                         self.collect_timestamps(Some(matrix.query_first));
                     }
                     self.collect_gate_interval(plan.query_firsts[1]);
-                    for i in [2usize, 3, 4, 5] { self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention); }
-                    for i in [0usize, 6, 7, 8] { self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm); }
+                    for i in [2usize, 3, 4, 5] {
+                        self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention);
+                    }
+                    for i in [0usize, 6, 7, 8] {
+                        self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm);
+                    }
                     self.collect_interval(mlp.activate_query, Some(false));
                 }
             }
         }
-        for link in links { self.collect_other_interval(link.query_first, OtherKind::Copy); }
+        for link in links {
+            self.collect_other_interval(link.query_first, OtherKind::Copy);
+        }
         let started = Instant::now();
-        let result = layers.last().context("Missing final layer")?.hidden().read_f32(x.len());
+        let result = layers
+            .last()
+            .context("Missing final layer")?
+            .hidden()
+            .read_f32(x.len());
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
         result
     }
@@ -2840,16 +2950,21 @@ impl Gpu {
                         p.device_other_ns = p.device_other_ns.saturating_add(ns);
                         match kind {
                             OtherKind::Attention => {
-                                p.device_attention_gpu_ns = p.device_attention_gpu_ns.saturating_add(ns);
-                                p.device_attention_gpu_samples = p.device_attention_gpu_samples.saturating_add(1);
+                                p.device_attention_gpu_ns =
+                                    p.device_attention_gpu_ns.saturating_add(ns);
+                                p.device_attention_gpu_samples =
+                                    p.device_attention_gpu_samples.saturating_add(1);
                             }
                             OtherKind::Norm => {
-                                p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
-                                p.device_norm_residual_samples = p.device_norm_residual_samples.saturating_add(1);
+                                p.device_norm_residual_ns =
+                                    p.device_norm_residual_ns.saturating_add(ns);
+                                p.device_norm_residual_samples =
+                                    p.device_norm_residual_samples.saturating_add(1);
                             }
                             OtherKind::Copy => {
                                 p.device_layer_copy_ns = p.device_layer_copy_ns.saturating_add(ns);
-                                p.device_layer_copy_samples = p.device_layer_copy_samples.saturating_add(1);
+                                p.device_layer_copy_samples =
+                                    p.device_layer_copy_samples.saturating_add(1);
                             }
                         }
                         p.device_samples = p.device_samples.saturating_add(1);
