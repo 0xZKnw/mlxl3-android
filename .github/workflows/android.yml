@@ -143,6 +143,7 @@ jobs:
         run: |
           dpkg-query -W vulkan-validationlayers
           {
+            cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::multiwave_shared -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::resident_ -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1

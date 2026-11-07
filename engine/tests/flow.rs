@@ -219,7 +219,10 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     mlxl3_android::vulkan::set_gpu_timestamps(true);
     assert!(mlxl3_android::vulkan::set_split_k(4));
     let mut experimental = experimental.unwrap();
-    assert_eq!(experimental.model.gpu.diagnostics()["fused_norm_active"], true);
+    assert_eq!(
+        experimental.model.gpu.diagnostics()["fused_norm_active"],
+        true
+    );
     assert_eq!(
         experimental.model.gpu.diagnostics()["parallel_norm_active"],
         true
