@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
                 model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
-                model.headRows, model::cycleHeadRows)
+                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm)
         }
     }
 }
@@ -113,7 +113,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  layerBatch: Int = 1, onCycleLayerBatch: () -> Unit = {},
                  unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}, onBenchmark: () -> Unit = {},
                  subgroupHead: Boolean = false, onSubgroupHead: (Boolean) -> Unit = {},
-                 headRows: Int = 4, onCycleHeadRows: () -> Unit = {}) {
+                 headRows: Int = 4, onCycleHeadRows: () -> Unit = {},
+                 parallelNorm: Boolean = false, onParallelNorm: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -178,6 +179,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
                             DropdownMenuItem(text = { Text("Couches attention GPU : ${if (gpuAttentionLayer) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onGpuAttentionLayer(!gpuAttentionLayer) })
+                            DropdownMenuItem(text = { Text("Normalisations parallèles : ${if (parallelNorm) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onParallelNorm(!parallelNorm) })
                         }
                     }
                     IconButton(onClick = onNew, enabled = !busy, modifier = Modifier.padding(start = 4.dp)) {

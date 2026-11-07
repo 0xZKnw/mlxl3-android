@@ -80,6 +80,14 @@ per submission. It only combines adjacent layers whose GPU paths are enabled;
 cancellation is checked between batches. The default is 4 on SM-S921B and 1 elsewhere.
 The optional K4/K5 two-tile loop is an experiment, disabled by default. It does
 not guarantee that the driver actually unrolls the loop or improves throughput.
+The optional **Normalisations parallèles** setting distributes resident-layer
+RMSNorm reduction across 128 threads. It is disabled by default and applies after
+reloading. The FP16 boundary and residual addition are retained, but the FP32
+reduction order changes. A startup comparison checks 13,056 values against the
+CPU serial path and keeps the original shader on mismatch or pipeline failure.
+Diagnostics report `parallel_norm_requested`, `parallel_norm_active` and
+`parallel_norm_self_test`. This check does not establish full-checkpoint parity.
+See [the experiment and S24 comparison protocol](docs/android-parallel-norm-2026-11-07.md).
 The menu's fixed benchmark evaluates 32 prefill and 128 decode steps using a
 repeatable sequence of vocabulary IDs. It is not a generated answer. Copy the
 diagnostic afterward and alternate configurations under similar thermal conditions.

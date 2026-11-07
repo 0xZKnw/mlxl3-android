@@ -1,0 +1,51 @@
+{
+  "provenance": "Selected exact fields from the user's latest diagnostic supplied in chat on 2026-11-07; not the complete original JSON or a controlled A/B measurement.",
+  "source_sha": "903fcd23ed4903e5e316fb1259839839e70f0a34",
+  "fixed_input_tokens": true,
+  "prompt_tokens": 32,
+  "decode_tokens": 128,
+  "decode_seconds": 10.078295938,
+  "decode_tokens_per_second": 12.700559775921912,
+  "decode_submissions": 896,
+  "prefill_seconds": 1.989243906,
+  "decode": {
+    "device_exl3_matvec_ns": 4888482275,
+    "device_norm_residual_ns": 1813966255,
+    "device_norm_residual_samples": 12288,
+    "device_head_ns": 1488883536,
+    "device_attention_gpu_ns": 199301051,
+    "device_queue_ns": 8869010669,
+    "wait_ns": 9208383055,
+    "record_submit_ns": 405178304,
+    "query_read_ns": 23236146,
+    "query_read_failures": 0
+  },
+  "gpu_settings": {
+    "device": "Samsung Xclipse 940",
+    "driver_version": 104869891,
+    "split_k": 8,
+    "ffn_k4_split_override": 4,
+    "ffn_k5_split_override": 0,
+    "gpu_layer_batch_size": 4,
+    "gpu_attention_layer_experimental": true,
+    "gpu_conv_layer_experimental": true,
+    "cooperative_k4_active": true,
+    "cooperative_k5_active": true,
+    "dense_kernel": "four_rows_fp32",
+    "experimental_unroll2_active": false,
+    "specialized_mcg_requested": false,
+    "logical_buffer_bytes": 1418434788
+  },
+  "environment_before": {
+    "thermal_status": 0,
+    "low_memory": false,
+    "power_save": false,
+    "app_pss_kib": 2445994
+  },
+  "environment_after": {
+    "thermal_status": 0,
+    "low_memory": false,
+    "power_save": false,
+    "app_pss_kib": 2302352
+  }
+}

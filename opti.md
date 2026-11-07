@@ -1094,3 +1094,29 @@
   vérificationlogicielle terminées ; **vitesseS24 nonmesurée/nonconcluante**,
   pleincheckpoint/driverSamsung àqualifier. QKV+gate/attention/normsGPU etpréfill
   batch nonimplémentés. Aucune campagne niessai lancé encore en cours.
+
+### ANDROID-PERF-2026-11-07-17 — RMSNorm parallèle, comparaison S24 à effectuer
+
+- Autorisation : après audit et diagnostic physique `903fcd2`, l'utilisateur
+  demande de commencer les optimisations. Branche `codex/parallel-rmsnorm`.
+- Baseline utilisateur : benchmark fixe 32/128, 12,70056 tok/s, 7 soumissions
+  par étape, normes/résidus GPU 14,1716 ms/étape (96 commandes), thermique 0.
+  Champs exacts et provenance dans
+  `docs/measurements/s24-903fcd2-parallel-norm-baseline.json`.
+- Changement ciblé : variante RMSNorm portable 128 threads et réduction partagée
+  au lieu d'une somme sur un seul thread. Frontières FP16 et ajout du résidu
+  conservés ; ordre d'addition FP32 différent. Option indépendante, désactivée
+  par défaut, appliquée après rechargement. Auto-contrôle de 13 056 valeurs au
+  chargement, repli série sur écart/création de pipeline impossible, timeout fatal.
+  EXL3, head, Q/K norm et autres réglages conservés pour isoler l'expérience.
+- Vérification locale : Rust 1.98.1, shaderc 2025.2, Mesa lavapipe 25.0.7.
+  107 520 comparaisons à un oracle f64 (six tailles, queues partielles, zéros,
+  faibles/grandes amplitudes, deux epsilons, avec/sans résidu) réussies ; erreur
+  maximale observée nulle sur ce corpus. Garde rejette un pipeline copie erroné.
+  22 tests CPU, Clippy strict, fmt et validation SPIR-V réussis. 13 tests GPU
+  résidents et fixture moteur complète sous validation de synchronisation réussis,
+  couche chargée et aucun VUID/SYNC-HAZARD. Tolérances de fixture inchangées.
+  Shader série compilé strictement identique en octets à la baseline.
+- Limites : aucun gain S24 ni parité complète 1.7B revendiqués. CI Android et APK
+  à construire. Protocole et résultats détaillés dans
+  `docs/android-parallel-norm-2026-11-07.md`. Logs temporaires dans `build/`.

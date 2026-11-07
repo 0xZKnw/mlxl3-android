@@ -13,6 +13,7 @@ fn main() {
         "dense_subgroup",
         "dense_rows",
         "rms_residual",
+        "rms_residual_parallel",
         "greedy",
         "norm_rope",
         "kv_update",
@@ -35,12 +36,16 @@ fn main() {
                     name
                 } else {
                     name.trim_end_matches("_reference")
+                        .trim_end_matches("_parallel")
                 }
             ))
             .arg("-o")
             .arg(out.join(format!("{name}.spv")));
         if name.ends_with("_reference") {
             compiler.arg("-DEXL3_REFERENCE=1");
+        }
+        if name == "rms_residual_parallel" {
+            compiler.arg("-DRMS_PARALLEL=1");
         }
         let status = compiler
             .status()

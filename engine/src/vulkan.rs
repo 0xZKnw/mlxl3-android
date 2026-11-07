@@ -79,6 +79,11 @@ static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
+static REQUESTED_PARALLEL_NORM: AtomicBool = AtomicBool::new(false);
+
+pub fn set_parallel_norm(enabled: bool) {
+    REQUESTED_PARALLEL_NORM.store(enabled, Ordering::Relaxed);
+}
 
 pub fn set_head_rows(value: u32) -> bool {
     if ![1, 2, 4, 8].contains(&value) {
@@ -595,6 +600,9 @@ pub struct Gpu {
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
     rms_residual: vk::Pipeline,
+    parallel_norm_requested: bool,
+    parallel_norm_active: bool,
+    parallel_norm_self_test: serde_json::Value,
     greedy: vk::Pipeline,
     norm_rope: vk::Pipeline,
     kv_update: vk::Pipeline,
@@ -926,6 +934,9 @@ impl Gpu {
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
             rms_residual: vk::Pipeline::null(),
+            parallel_norm_requested: REQUESTED_PARALLEL_NORM.load(Ordering::Relaxed),
+            parallel_norm_active: false,
+            parallel_norm_self_test: serde_json::json!({"status":"not_requested"}),
             greedy: vk::Pipeline::null(),
             norm_rope: vk::Pipeline::null(),
             kv_update: vk::Pipeline::null(),
@@ -1137,7 +1148,106 @@ impl Gpu {
             gpu.take_profile();
             gpu.submissions.set(0);
         }
+        gpu.configure_parallel_norm()?;
+        // Startup checks must not enter prefill/decode counters.
+        gpu.take_profile();
+        gpu.submissions.set(0);
         Ok(gpu)
+    }
+
+    fn configure_parallel_norm(&mut self) -> Result<()> {
+        self.capture_stats("rms_residual_serial".into(), self.rms_residual);
+        if !self.parallel_norm_requested {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate = match self.pipeline(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/rms_residual_parallel.spv"
+        ))) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                self.parallel_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+                return Ok(());
+            }
+        };
+        self.capture_stats("rms_residual_parallel".into(), candidate);
+        match self.check_parallel_norm(candidate) {
+            Ok(report) => {
+                unsafe { self.device.raw.destroy_pipeline(self.rms_residual, None) };
+                self.rms_residual = candidate;
+                self.parallel_norm_active = true;
+                self.parallel_norm_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.parallel_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.parallel_norm_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
+    }
+
+    fn check_parallel_norm(&mut self, pipeline: vk::Pipeline) -> Result<serde_json::Value> {
+        let mut checked_values = 0usize;
+        let mut max_abs_error = 0f32;
+        for count in [128usize, 2048] {
+            let weights: Vec<f32> = (0..count).map(|i| 0.5 + (i % 17) as f32 / 16.).collect();
+            let bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let weights_buffer = self.buffer(&bytes)?;
+            for case in 0..3 {
+                let x: Vec<f32> = (0..count)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => ((i * 37 % 257) as f32 - 128.) / 32.,
+                        _ => {
+                            if i % 127 == 0 {
+                                16.
+                            } else {
+                                0.0001
+                            }
+                        }
+                    })
+                    .collect();
+                let normalized = crate::math::rms_norm(&x, &weights, 1e-5)?;
+                for residual in [0u32, 1] {
+                    let base: Vec<f32> = (0..count).map(|i| (i % 19) as f32 / 8. - 1.).collect();
+                    let bytes: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
+                    self.output
+                        .as_ref()
+                        .context("GPU output unavailable")?
+                        .write(&bytes)?;
+                    let actual = self.compute_groups(
+                        pipeline,
+                        &weights_buffer,
+                        &x,
+                        [count as u32, residual, 1e-5f32.to_bits(), 0],
+                        count,
+                        1,
+                    )?;
+                    for (i, (&value, &norm)) in actual.iter().zip(&normalized).enumerate() {
+                        let expected = if residual == 0 { norm } else { base[i] + norm };
+                        let error = (value - expected).abs();
+                        ensure!(
+                            error <= 2e-6 + norm.abs() * 0.001,
+                            "Parallel RMSNorm mismatch at {count}/{case}/{residual}/{i}: {value} != {expected}"
+                        );
+                        max_abs_error = max_abs_error.max(error);
+                        checked_values += 1;
+                    }
+                }
+            }
+        }
+        Ok(
+            serde_json::json!({"status":"passed","checked_values":checked_values,
+            "max_abs_error":max_abs_error,"reference":"CPU serial FP32 with FP16 boundary",
+            "tolerance":"2e-6 + 0.001 * abs(normalized); not full-model parity"}),
+        )
     }
 
     fn check_native_codebooks(&mut self) -> Result<()> {
@@ -1382,6 +1492,9 @@ impl Gpu {
             "gpu_greedy_requested":self.gpu_greedy,
             "gpu_attention_layer_experimental":self.gpu_attention_layer,
             "gpu_layer_batch_size":self.layer_batch,
+            "parallel_norm_requested":self.parallel_norm_requested,
+            "parallel_norm_active":self.parallel_norm_active,
+            "parallel_norm_self_test":self.parallel_norm_self_test,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
             "dense_head_rows_per_group":self.head_rows,
@@ -3803,6 +3916,101 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; parallel RMSNorm with independent f64 oracle"]
+    fn resident_parallel_norm_matches_f64_and_preserves_residual() {
+        let mut gpu = Gpu::new().unwrap();
+        let parallel = gpu
+            .pipeline(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/rms_residual_parallel.spv"
+            )))
+            .unwrap();
+        let mut max_oracle_error = 0f32;
+        let mut checked = 0usize;
+        for count in [1usize, 127, 128, 129, 2047, 2048] {
+            let weights: Vec<f32> = (0..count)
+                .map(|i| ((i * 13 % 31) as f32 - 15.) / 7.)
+                .collect();
+            let bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let weights_buffer = gpu.buffer(&bytes).unwrap();
+            for case in 0..6 {
+                let x: Vec<f32> = (0..count)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => 1.,
+                        2 => ((i * 37 % 257) as f32 - 128.) / 31.,
+                        3 => {
+                            if i % 127 == 0 {
+                                -65504.
+                            } else {
+                                0.0001
+                            }
+                        }
+                        4 => ((i % 17) as f32 - 8.) * 0.00001,
+                        _ => {
+                            if i % 2 == 0 {
+                                65504.
+                            } else {
+                                -65504.
+                            }
+                        }
+                    })
+                    .collect();
+                for eps in [1e-5f32, 0.01] {
+                    // Independent high-precision reference, then the checkpoint's
+                    // FP16 weight and normalized-output boundaries.
+                    let squares: f64 = x.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    let scale = (squares / count as f64 + f64::from(eps)).sqrt().recip();
+                    let expected_norm: Vec<f32> = x
+                        .iter()
+                        .zip(&weights)
+                        .map(|(&v, &w)| {
+                            crate::math::half(
+                                (f64::from(v) * scale * f64::from(crate::math::half(w))) as f32,
+                            )
+                        })
+                        .collect();
+                    for residual in [0u32, 1] {
+                        let base: Vec<f32> =
+                            (0..count).map(|i| (i % 19) as f32 / 7. - 1.).collect();
+                        let bytes: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
+                        gpu.output.as_ref().unwrap().write(&bytes).unwrap();
+                        let actual = gpu
+                            .compute_groups(
+                                parallel,
+                                &weights_buffer,
+                                &x,
+                                [count as u32, residual, eps.to_bits(), 0],
+                                count,
+                                1,
+                            )
+                            .unwrap();
+                        for (i, (&value, &norm)) in actual.iter().zip(&expected_norm).enumerate() {
+                            let expected = if residual == 0 { norm } else { base[i] + norm };
+                            let error = (value - expected).abs();
+                            assert!(
+                                error <= 2e-6 + norm.abs() * 0.001,
+                                "count={count} case={case} eps={eps} residual={residual} i={i}: {value} vs {expected}"
+                            );
+                            max_oracle_error = max_oracle_error.max(error);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            gpu.check_parallel_norm(parallel).unwrap()["checked_values"],
+            13056
+        );
+        // A shader returning the input must be rejected by the startup guard.
+        assert!(gpu.check_parallel_norm(gpu.copy).is_err());
+        assert_eq!(gpu.diagnostics()["parallel_norm_active"], false);
+        unsafe { gpu.device.raw.destroy_pipeline(parallel, None) };
+        eprintln!("parallel RMSNorm: {checked} f64 comparisons; max abs error {max_oracle_error}");
+    }
 
     #[test]
     #[ignore = "requires Vulkan; alternate dense head row counts"]

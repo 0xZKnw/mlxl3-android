@@ -17,6 +17,15 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setParallelNorm(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_parallel_norm(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_benchmark(
     mut env: JNIEnv,
     _class: JClass,
