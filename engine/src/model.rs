@@ -324,11 +324,32 @@ impl Model {
             let mlp = gpu.prepare_mlp(w1, w3, w2)?;
             let gpu_conv_layer = if gpu.gpu_conv_layer_enabled() {
                 if let Operator::Conv(conv) = &operator {
-                    Some(gpu.prepare_conv_layer(&conv.plan, &mlp,
-                        [&operator_norm, &post_operator_norm, &ffn_norm, &post_ffn_norm], config.norm_eps)?)
-                } else { None }
-            } else { None };
-            layers.push(Layer { operator, operator_norm, post_operator_norm, ffn_norm, post_ffn_norm, mlp, gpu_conv_layer });
+                    Some(gpu.prepare_conv_layer(
+                        &conv.plan,
+                        &mlp,
+                        [
+                            &operator_norm,
+                            &post_operator_norm,
+                            &ffn_norm,
+                            &post_ffn_norm,
+                        ],
+                        config.norm_eps,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            layers.push(Layer {
+                operator,
+                operator_norm,
+                post_operator_norm,
+                ffn_norm,
+                post_ffn_norm,
+                mlp,
+                gpu_conv_layer,
+            });
         }
         ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
         progress("Loading vocabulary projection…");
@@ -378,7 +399,13 @@ impl Model {
         for layer in &mut self.layers {
             ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
             if let (Some(plan), Operator::Conv(conv)) = (&layer.gpu_conv_layer, &layer.operator) {
-                hidden = self.gpu.forward_conv_layer(plan, &conv.plan, &layer.mlp, &hidden, self.position)?;
+                hidden = self.gpu.forward_conv_layer(
+                    plan,
+                    &conv.plan,
+                    &layer.mlp,
+                    &hidden,
+                    self.position,
+                )?;
                 continue;
             }
             let normalized = normalize(

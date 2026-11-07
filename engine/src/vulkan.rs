@@ -854,7 +854,10 @@ impl Gpu {
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
             gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/convolution.spv")))?;
-        gpu.rms_residual = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/rms_residual.spv")))?;
+        gpu.rms_residual = gpu.pipeline(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/rms_residual.spv"
+        )))?;
         let partial_bytes = 32768 * 4 * gpu.split_k.max(4) as usize * 4;
         gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
@@ -1869,7 +1872,10 @@ impl Gpu {
 
     fn prepare_operator(&self, job: Dispatch<'_>) -> Result<(vk::CommandBuffer, u32)> {
         let query_first = self.next_operator_query.get();
-        ensure!(query_first <= QUERY_COUNT - 2, "Operator query capacity exhausted");
+        ensure!(
+            query_first <= QUERY_COUNT - 2,
+            "Operator query capacity exhausted"
+        );
         self.next_operator_query.set(query_first + 2);
         let command = unsafe {
             self.device.raw.allocate_command_buffers(
@@ -2027,14 +2033,28 @@ impl Gpu {
         eps: f32,
     ) -> Result<ConvLayerPlan> {
         let size = conv.output.shape.output;
-        ensure!(size == mlp.down.shape.output && size == mlp.gate.shape.input &&
-            norms.iter().all(|n| n.len() == size && n.iter().all(|v| v.is_finite())) &&
-            eps.is_finite() && eps > 0., "Invalid resident convolution layer");
+        ensure!(
+            size == mlp.down.shape.output
+                && size == mlp.gate.shape.input
+                && norms
+                    .iter()
+                    .all(|n| n.len() == size && n.iter().all(|v| v.is_finite()))
+                && eps.is_finite()
+                && eps > 0.,
+            "Invalid resident convolution layer"
+        );
         let hidden = self.mapped_buffer(size * 4)?;
-        let weights = norms.iter().map(|norm| {
-            let bytes: Vec<u8> = norm.iter().map(|v| crate::math::half(*v)).flat_map(|v| v.to_ne_bytes()).collect();
-            self.buffer(&bytes)
-        }).collect::<Result<Vec<_>>>()?;
+        let weights = norms
+            .iter()
+            .map(|norm| {
+                let bytes: Vec<u8> = norm
+                    .iter()
+                    .map(|v| crate::math::half(*v))
+                    .flat_map(|v| v.to_ne_bytes())
+                    .collect();
+                self.buffer(&bytes)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let input = self.input.as_ref().context("GPU input unavailable")?;
         let specs = [
             (&hidden, input, 0u32),
@@ -2060,36 +2080,69 @@ impl Gpu {
             query_firsts.push(query);
         }
         Ok(ConvLayerPlan {
-            device: self.device.clone(), hidden, _weights: weights,
-            commands: commands.try_into().map_err(|_| anyhow::anyhow!("Invalid norm command count"))?,
-            query_firsts: query_firsts.try_into().map_err(|_| anyhow::anyhow!("Invalid norm query count"))?,
-            conv_input: conv.input.command, mlp_gate: mlp.gate.command, size,
+            device: self.device.clone(),
+            hidden,
+            _weights: weights,
+            commands: commands
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid norm command count"))?,
+            query_firsts: query_firsts
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid norm query count"))?,
+            conv_input: conv.input.command,
+            mlp_gate: mlp.gate.command,
+            size,
         })
     }
 
     pub(crate) fn forward_conv_layer(
-        &self, plan: &ConvLayerPlan, conv: &ConvPlan, mlp: &MlpPlan,
-        x: &[f32], position: usize,
+        &self,
+        plan: &ConvLayerPlan,
+        conv: &ConvPlan,
+        mlp: &MlpPlan,
+        x: &[f32],
+        position: usize,
     ) -> Result<Vec<f32>> {
-        ensure!(Arc::ptr_eq(&plan.device, &self.device) && plan.conv_input == conv.input.command &&
-            plan.mlp_gate == mlp.gate.command && x.len() == plan.size &&
-            x.iter().all(|v| v.is_finite()) && position < 2048, "Invalid resident convolution input");
+        ensure!(
+            Arc::ptr_eq(&plan.device, &self.device)
+                && plan.conv_input == conv.input.command
+                && plan.mlp_gate == mlp.gate.command
+                && x.len() == plan.size
+                && x.iter().all(|v| v.is_finite())
+                && position < 2048,
+            "Invalid resident convolution input"
+        );
         conv.state.write(&(position as u32).to_ne_bytes())?;
-        let bytes = unsafe { std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x)) };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
+        };
         let started = Instant::now();
         plan.hidden.write(bytes)?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
-        self.submit_graph(&[
-            plan.commands[0], conv.input.command, conv.convolve, conv.output.command,
-            plan.commands[1], plan.commands[2], mlp.gate.command, mlp.up.command,
-            mlp.activate, mlp.down.command, plan.commands[3],
-        ], Instant::now())?;
+        self.submit_graph(
+            &[
+                plan.commands[0],
+                conv.input.command,
+                conv.convolve,
+                conv.output.command,
+                plan.commands[1],
+                plan.commands[2],
+                mlp.gate.command,
+                mlp.up.command,
+                mlp.activate,
+                mlp.down.command,
+                plan.commands[3],
+            ],
+            Instant::now(),
+        )?;
         for matrix in [&conv.input, &conv.output, &mlp.gate, &mlp.up, &mlp.down] {
             self.collect_timestamps(Some(matrix.query_first));
         }
         self.collect_interval(conv.convolve_query, Some(true));
         self.collect_interval(mlp.activate_query, Some(false));
-        for query in plan.query_firsts { self.collect_norm_interval(query); }
+        for query in plan.query_firsts {
+            self.collect_norm_interval(query);
+        }
         let started = Instant::now();
         let output = plan.hidden.read_f32(plan.size);
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
@@ -2097,22 +2150,38 @@ impl Gpu {
     }
 
     fn collect_norm_interval(&self, query_first: u32) {
-        if self.queries == vk::QueryPool::null() { return; }
+        if self.queries == vk::QueryPool::null() {
+            return;
+        }
         let mut ticks = [0u64; 2];
         let started = Instant::now();
-        let result = unsafe { self.device.raw.get_query_pool_results(self.queries, query_first, &mut ticks, vk::QueryResultFlags::TYPE_64) };
+        let result = unsafe {
+            self.device.raw.get_query_pool_results(
+                self.queries,
+                query_first,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
         self.record_profile(|p| {
             p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started));
             match result {
-                Ok(()) => if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
-                    let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period)) as u64;
-                    p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
-                    p.device_other_ns = p.device_other_ns.saturating_add(ns);
-                    p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
-                    p.device_norm_residual_samples = p.device_norm_residual_samples.saturating_add(1);
-                    p.device_samples = p.device_samples.saturating_add(1);
-                },
-                Err(err) => { p.query_read_failures = p.query_read_failures.saturating_add(1); p.last_query_error = Some(format!("norm interval: {err:?}")); }
+                Ok(()) => {
+                    if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
+                        let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period))
+                            as u64;
+                        p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
+                        p.device_other_ns = p.device_other_ns.saturating_add(ns);
+                        p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
+                        p.device_norm_residual_samples =
+                            p.device_norm_residual_samples.saturating_add(1);
+                        p.device_samples = p.device_samples.saturating_add(1);
+                    }
+                }
+                Err(err) => {
+                    p.query_read_failures = p.query_read_failures.saturating_add(1);
+                    p.last_query_error = Some(format!("norm interval: {err:?}"));
+                }
             }
         });
     }
@@ -2725,12 +2794,29 @@ mod tests {
         let up = resident_matrix(&mut gpu, 128, 256, 23);
         let down = resident_matrix(&mut gpu, 256, 128, 29);
         let mlp = gpu.prepare_mlp(gate, up, down).unwrap();
-        let norms: Vec<Vec<f32>> = (0..4).map(|n| (0..128).map(|i| 0.75 + ((i + n) % 9) as f32 / 64.).collect()).collect();
-        let plan = gpu.prepare_conv_layer(&candidate_conv, &mlp, [&norms[0], &norms[1], &norms[2], &norms[3]], 1e-5).unwrap();
+        let norms: Vec<Vec<f32>> = (0..4)
+            .map(|n| {
+                (0..128)
+                    .map(|i| 0.75 + ((i + n) % 9) as f32 / 64.)
+                    .collect()
+            })
+            .collect();
+        let plan = gpu
+            .prepare_conv_layer(
+                &candidate_conv,
+                &mlp,
+                [&norms[0], &norms[1], &norms[2], &norms[3]],
+                1e-5,
+            )
+            .unwrap();
         for position in 0..10 {
-            let x: Vec<f32> = (0..128).map(|i| ((i * 7 + position * 3) % 41) as f32 / 32. - 0.5).collect();
+            let x: Vec<f32> = (0..128)
+                .map(|i| ((i * 7 + position * 3) % 41) as f32 / 32. - 0.5)
+                .collect();
             let normalized = crate::math::rms_norm(&x, &norms[0], 1e-5).unwrap();
-            let conv = gpu.forward_conv(&reference_conv, &normalized, position).unwrap();
+            let conv = gpu
+                .forward_conv(&reference_conv, &normalized, position)
+                .unwrap();
             let post = crate::math::rms_norm(&conv, &norms[1], 1e-5).unwrap();
             let hidden: Vec<f32> = x.iter().zip(&post).map(|(a, b)| a + b).collect();
             let normalized = crate::math::rms_norm(&hidden, &norms[2], 1e-5).unwrap();
@@ -2738,9 +2824,17 @@ mod tests {
             let post = crate::math::rms_norm(&down, &norms[3], 1e-5).unwrap();
             let expected: Vec<f32> = hidden.iter().zip(&post).map(|(a, b)| a + b).collect();
             let before = gpu.submission_count();
-            let actual = gpu.forward_conv_layer(&plan, &candidate_conv, &mlp, &x, position).unwrap();
+            let actual = gpu
+                .forward_conv_layer(&plan, &candidate_conv, &mlp, &x, position)
+                .unwrap();
             assert_eq!(gpu.submission_count() - before, 1);
-            assert!(actual.iter().zip(&expected).all(|(a, b)| (a - b).abs() <= 0.003 + b.abs() * 0.005), "position {position}");
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| (a - b).abs() <= 0.003 + b.abs() * 0.005),
+                "position {position}"
+            );
         }
     }
 
