@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
                 model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
-                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps)
+                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps, model.waveHead, model::chooseWaveHead)
         }
     }
 }
@@ -115,11 +115,13 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  subgroupHead: Boolean = false, onSubgroupHead: (Boolean) -> Unit = {},
                  headRows: Int = 4, onCycleHeadRows: () -> Unit = {},
                  parallelNorm: Boolean = false, onParallelNorm: (Boolean) -> Unit = {},
-                 gpuTimestamps: Boolean = true, onGpuTimestamps: (Boolean) -> Unit = {}) {
+                 gpuTimestamps: Boolean = true, onGpuTimestamps: (Boolean) -> Unit = {},
+                 waveHead: Boolean = false, onWaveHead: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
         var menu by remember { mutableStateOf(false) }
+        var advancedMenu by remember { mutableStateOf(false) }
         val context = LocalContext.current
         val list = rememberLazyListState()
         val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
@@ -136,7 +138,7 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                     Text("MLXL3", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
                         letterSpacing = 0.4.sp, modifier = Modifier.weight(1f).padding(start = 10.dp))
                     Box {
-                        OutlinedButton(onClick = { menu = true }, enabled = !busy,
+                        OutlinedButton(onClick = { advancedMenu = false; menu = true }, enabled = !busy,
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                             border = androidx.compose.foundation.BorderStroke(1.dp, Edge), shape = CircleShape) {
                             Text("LFM3 1.7B", fontSize = 12.sp)
@@ -152,38 +154,49 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                     .setPrimaryClip(ClipData.newPlainText("MLXL3 performance", diagnostics))
                                 Toast.makeText(context, "Diagnostic copié", Toast.LENGTH_SHORT).show()
                             })
-                            listOf(1, 2, 4, 8).forEach { value ->
-                                DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
-                                    onClick = { menu = false; onSplitK(value) })
+                            if (!advancedMenu) {
+                                Text("Expériences à comparer", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Quiet)
+                                DropdownMenuItem(text = { Text("Tête une wave/ligne (exp.) : ${if (waveHead) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onWaveHead(!waveHead) })
+                                DropdownMenuItem(text = { Text("Réglages avancés et retour arrière") },
+                                    onClick = { advancedMenu = true })
+                            } else {
+                                DropdownMenuItem(text = { Text("Retour aux expériences") },
+                                    onClick = { advancedMenu = false })
+                                Text("Choix conservés · performances ≠ parité validée", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Quiet)
+                                listOf(1, 2, 4, 8).forEach { value ->
+                                    DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
+                                        onClick = { menu = false; onSplitK(value) })
+                                }
+                                DropdownMenuItem(text = { Text("FFN K4 : ${if (ffnK4Split == 0) "global" else ffnK4Split} · changer / recharger") },
+                                    onClick = { menu = false; onCycleFfnSplit(true) })
+                                DropdownMenuItem(text = { Text("FFN K5 : ${if (ffnK5Split == 0) "global" else ffnK5Split} · changer / recharger") },
+                                    onClick = { menu = false; onCycleFfnSplit(false) })
+                                DropdownMenuItem(text = { Text("Couches par lot : $layerBatch · changer / recharger") },
+                                    onClick = { menu = false; onCycleLayerBatch() })
+                                DropdownMenuItem(text = { Text("Boucle K4/K5 ×2 : ${if (unroll2) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onUnroll2(!unroll2) })
+                                DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onFastHead(!fastHead) })
+                                DropdownMenuItem(text = { Text("Tête subgroup : ${if (subgroupHead) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onSubgroupHead(!subgroupHead) })
+                                DropdownMenuItem(text = { Text("Lignes tête : $headRows · changer / recharger") },
+                                    onClick = { menu = false; onCycleHeadRows() })
+                                DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onGpuConvLayer(!gpuConvLayer) })
+                                DropdownMenuItem(text = { Text("Kernel K5 expérimental : ${if (cooperativeK5) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onK5(!cooperativeK5) })
+                                DropdownMenuItem(text = { Text("MCG spécialisé : ${if (specializedMcg) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onMcg(!specializedMcg) })
+                                DropdownMenuItem(text = { Text("Sélection GPU : ${if (gpuGreedy) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
+                                DropdownMenuItem(text = { Text("Couches attention GPU : ${if (gpuAttentionLayer) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onGpuAttentionLayer(!gpuAttentionLayer) })
+                                DropdownMenuItem(text = { Text("Profilage GPU : ${if (gpuTimestamps) "complet" else "désactivé"} · recharger") },
+                                    onClick = { menu = false; onGpuTimestamps(!gpuTimestamps) })
+                                DropdownMenuItem(text = { Text("Normalisations parallèles : ${if (parallelNorm) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onParallelNorm(!parallelNorm) })
                             }
-                            DropdownMenuItem(text = { Text("FFN K4 : ${if (ffnK4Split == 0) "global" else ffnK4Split} · changer / recharger") },
-                                onClick = { menu = false; onCycleFfnSplit(true) })
-                            DropdownMenuItem(text = { Text("FFN K5 : ${if (ffnK5Split == 0) "global" else ffnK5Split} · changer / recharger") },
-                                onClick = { menu = false; onCycleFfnSplit(false) })
-                            DropdownMenuItem(text = { Text("Couches par lot : $layerBatch · changer / recharger") },
-                                onClick = { menu = false; onCycleLayerBatch() })
-                            DropdownMenuItem(text = { Text("Boucle K4/K5 ×2 : ${if (unroll2) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onUnroll2(!unroll2) })
-                            DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onFastHead(!fastHead) })
-                            DropdownMenuItem(text = { Text("Tête subgroup : ${if (subgroupHead) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onSubgroupHead(!subgroupHead) })
-                            DropdownMenuItem(text = { Text("Lignes tête : $headRows · changer / recharger") },
-                                onClick = { menu = false; onCycleHeadRows() })
-                            DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onGpuConvLayer(!gpuConvLayer) })
-                            DropdownMenuItem(text = { Text("Kernel K5 expérimental : ${if (cooperativeK5) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onK5(!cooperativeK5) })
-                            DropdownMenuItem(text = { Text("MCG spécialisé : ${if (specializedMcg) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onMcg(!specializedMcg) })
-                            DropdownMenuItem(text = { Text("Sélection GPU : ${if (gpuGreedy) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
-                            DropdownMenuItem(text = { Text("Couches attention GPU : ${if (gpuAttentionLayer) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onGpuAttentionLayer(!gpuAttentionLayer) })
-                            DropdownMenuItem(text = { Text("Profilage GPU : ${if (gpuTimestamps) "complet" else "désactivé"} · recharger") },
-                                onClick = { menu = false; onGpuTimestamps(!gpuTimestamps) })
-                            DropdownMenuItem(text = { Text("Normalisations parallèles : ${if (parallelNorm) "oui" else "non"} · recharger") },
-                                onClick = { menu = false; onParallelNorm(!parallelNorm) })
                         }
                     }
                     IconButton(onClick = onNew, enabled = !busy, modifier = Modifier.padding(start = 4.dp)) {

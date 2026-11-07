@@ -51,6 +51,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var layerBatch by mutableStateOf(initialPerformance.layerBatch); private set
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
+    var waveHead by mutableStateOf(prefs.getBoolean("wave_head", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
     var gpuTimestamps by mutableStateOf(prefs.getBoolean("gpu_timestamps", true)); private set
@@ -121,6 +122,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         unroll2 = enabled
         prefs.edit { putBoolean("unroll2", enabled) }
         status = "Boucle K4/K5 expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseWaveHead(enabled: Boolean) {
+        if (busy) return
+        waveHead = enabled
+        prefs.edit { putBoolean("wave_head", enabled) }
+        status = "Tête une wave/ligne ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun chooseSubgroupHead(enabled: Boolean) {
         if (busy) return
@@ -220,6 +227,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
         NativeEngine.setUnroll2(unroll2)
         NativeEngine.setSubgroupHead(subgroupHead)
+        NativeEngine.setWaveHead(waveHead)
         check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
         NativeEngine.setGpuTimestamps(gpuTimestamps)
         NativeEngine.setParallelNorm(parallelNorm)
@@ -266,6 +274,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
             NativeEngine.setUnroll2(unroll2)
             NativeEngine.setSubgroupHead(subgroupHead)
+            NativeEngine.setWaveHead(waveHead)
             check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
             NativeEngine.setGpuTimestamps(gpuTimestamps)
             NativeEngine.setParallelNorm(parallelNorm)

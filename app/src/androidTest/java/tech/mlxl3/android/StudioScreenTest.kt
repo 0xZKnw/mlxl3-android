@@ -60,11 +60,51 @@ class StudioScreenTest {
                 onGpuTimestamps = { enabled.value = it })
         }
         compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
         compose.onNodeWithText("Profilage GPU : complet · recharger").performScrollTo().performClick()
         compose.runOnIdle { assertFalse(enabled.value) }
         compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
         compose.onNodeWithText("Profilage GPU : désactivé · recharger").performScrollTo().performClick()
         compose.runOnIdle { assertTrue(enabled.value) }
+    }
+
+    @Test fun measuredOptionsAreHiddenButRecoverableWithoutChangingSettings() {
+        var changed = false
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, gpuConvLayer = true,
+                onGpuConvLayer = { changed = true })
+        }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Couches convolution GPU : oui · recharger").assertDoesNotExist()
+        compose.onNodeWithText("Tête une wave/ligne (exp.) : non · recharger").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
+        compose.onNodeWithText("Couches convolution GPU : oui · recharger").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Retour aux expériences").performScrollTo().performClick()
+        compose.onNodeWithText("Couches convolution GPU : oui · recharger").assertDoesNotExist()
+        compose.runOnIdle { assertFalse(changed) }
+        compose.onNodeWithText("Réglages avancés et retour arrière").performScrollTo().performClick()
+        compose.onNodeWithText("Couches convolution GPU : oui · recharger").performScrollTo().performClick()
+        compose.runOnIdle { assertTrue(changed) }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Retour aux expériences").assertDoesNotExist()
+        compose.onNodeWithText("Couches convolution GPU : oui · recharger").assertDoesNotExist()
+    }
+
+    @Test fun newWaveHeadExperimentCanBeToggledAndRestored() {
+        val enabled = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, waveHead = enabled.value,
+                onWaveHead = { enabled.value = it })
+        }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Tête une wave/ligne (exp.) : non · recharger").performScrollTo().performClick()
+        compose.runOnIdle { assertTrue(enabled.value) }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Tête une wave/ligne (exp.) : oui · recharger").performScrollTo().performClick()
+        compose.runOnIdle { assertFalse(enabled.value) }
     }
 
     @Test fun busyStateDisablesInputAndExposesCancellation() {
