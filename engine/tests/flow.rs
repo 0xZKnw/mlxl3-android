@@ -216,7 +216,10 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         experimental.model.gpu.diagnostics()["parallel_norm_self_test"]["status"],
         "passed"
     );
-    assert_eq!(experimental.model.gpu.diagnostics()["gpu_timestamps"], false);
+    assert_eq!(
+        experimental.model.gpu.diagnostics()["gpu_timestamps"],
+        false
+    );
     assert_eq!(experimental.model.diagnostics()["gpu_attention_layers"], 2);
     for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {
         let before = experimental.model.gpu.submission_count();

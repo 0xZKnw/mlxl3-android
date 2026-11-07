@@ -645,7 +645,10 @@ impl Gpu {
     }
 
     fn new_with_native(allow_native: bool) -> Result<Self> {
-        Self::new_with_options(allow_native, REQUESTED_GPU_TIMESTAMPS.load(Ordering::Relaxed))
+        Self::new_with_options(
+            allow_native,
+            REQUESTED_GPU_TIMESTAMPS.load(Ordering::Relaxed),
+        )
     }
 
     fn new_with_options(allow_native: bool, gpu_timestamps: bool) -> Result<Self> {
