@@ -12,7 +12,9 @@ is required. Support on a device is established by testing, not its GPU name.
 ## Status
 
 Experimental implementation, with component checks passing in CI. Full-checkpoint numeric parity,
-memory usage, speed and thermal behavior on the S24 have **not been validated**.
+memory usage and sustained thermal behavior on the S24 have **not been validated**.
+Exploratory fixed-input S24 measurements are available, but do not establish
+full-model correctness or sustained production performance.
 This is not a performance release. The APK contains no model weights and
 requests no Internet permission.
 
@@ -47,8 +49,20 @@ The experimental head row-count selector offers 1, 2, 4 and 8 outputs per
 workgroup. A value other than 4 selects the variable-row kernel instead of the
 paired or subgroup kernel, so compare these options separately.
 Changes apply **only after reloading the model**;
-the defaults are split-K 4, the reference dense head, CPU layer boundaries,
-and disabled experimental K5/MCG/greedy and GPU layer variants. The copied report
+on the measured **Samsung SM-S921B (Exynos S24)**, unset preferences now default to
+split-K 8, FFN K4 override 4, cooperative K5, GPU convolution and attention,
+4 layers per submission, and GPU greedy selection. The reference 4-row dense
+head remains selected; MCG, the two-tile loop and alternative head kernels stay
+off. This profile follows exploratory 32/128-token reports (up to 12.56 tok/s),
+not full-checkpoint parity qualification. Other devices retain split-K 4, CPU
+layer boundaries, batch 1 and disabled experimental variants. Existing saved
+choices always win, including explicit `false` and the FFN `global` override;
+no preferences are silently rewritten on upgrade. Missing values use the
+hardware-specific defaults. Diagnostics identify the default profile, while the
+engine section continues to report effective settings and kernel fallback.
+Native codebook/cooperative self-tests remain in force. These do not validate
+whole GPU layers: a load failure is surfaced rather than silently claiming a
+successful optimized load; disable GPU layer options and reload if necessary. The copied report
 records the effective split count, chosen head kernel, cooperative K4/K5
 selection and its startup parity check, plus separate gate/head device times.
 These timings overlap other reported scopes and must not be added together.
@@ -63,7 +77,7 @@ for the 2048→7680 and 7680→2048 shapes. Tapping cycles through global, 1, 2,
 4 and 8; reload the model to apply. The diagnostic reports effective choices.
 The experimental layer-batch setting cycles through 1, 2 and 4 resident layers
 per submission. It only combines adjacent layers whose GPU paths are enabled;
-cancellation is checked between batches. The default is 1.
+cancellation is checked between batches. The default is 4 on SM-S921B and 1 elsewhere.
 The optional K4/K5 two-tile loop is an experiment, disabled by default. It does
 not guarantee that the driver actually unrolls the loop or improves throughput.
 The menu's fixed benchmark evaluates 32 prefill and 128 decode steps using a
