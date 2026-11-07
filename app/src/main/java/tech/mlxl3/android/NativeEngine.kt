@@ -14,6 +14,7 @@ object NativeEngine {
     external fun setUnroll2(enabled: Boolean)
     external fun setSubgroupHead(enabled: Boolean)
     external fun setHeadRows(value: Int): Boolean
+    external fun setGpuTimestamps(enabled: Boolean)
     external fun setParallelNorm(enabled: Boolean)
     external fun load(path: String, callback: Callback): String
     external fun benchmark(callback: Callback): String

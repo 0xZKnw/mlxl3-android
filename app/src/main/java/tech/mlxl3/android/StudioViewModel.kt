@@ -53,6 +53,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
+    var gpuTimestamps by mutableStateOf(prefs.getBoolean("gpu_timestamps", true)); private set
     var parallelNorm by mutableStateOf(prefs.getBoolean("parallel_norm", false)); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
@@ -134,6 +135,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         prefs.edit { putInt("head_rows", headRows) }
         status = "Lignes de la tête mises à jour · rechargez le modèle"
     }
+    fun chooseGpuTimestamps(enabled: Boolean) {
+        if (busy) return
+        gpuTimestamps = enabled
+        prefs.edit { putBoolean("gpu_timestamps", enabled) }
+        status = "Profilage GPU ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
     fun chooseParallelNorm(enabled: Boolean) {
         if (busy) return
         parallelNorm = enabled
@@ -214,6 +221,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setUnroll2(unroll2)
         NativeEngine.setSubgroupHead(subgroupHead)
         check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
+        NativeEngine.setGpuTimestamps(gpuTimestamps)
         NativeEngine.setParallelNorm(parallelNorm)
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
@@ -259,6 +267,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setUnroll2(unroll2)
             NativeEngine.setSubgroupHead(subgroupHead)
             check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
+            NativeEngine.setGpuTimestamps(gpuTimestamps)
             NativeEngine.setParallelNorm(parallelNorm)
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }

@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
                 model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
-                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm)
+                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps)
         }
     }
 }
@@ -114,7 +114,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}, onBenchmark: () -> Unit = {},
                  subgroupHead: Boolean = false, onSubgroupHead: (Boolean) -> Unit = {},
                  headRows: Int = 4, onCycleHeadRows: () -> Unit = {},
-                 parallelNorm: Boolean = false, onParallelNorm: (Boolean) -> Unit = {}) {
+                 parallelNorm: Boolean = false, onParallelNorm: (Boolean) -> Unit = {},
+                 gpuTimestamps: Boolean = true, onGpuTimestamps: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -179,6 +180,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
                             DropdownMenuItem(text = { Text("Couches attention GPU : ${if (gpuAttentionLayer) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onGpuAttentionLayer(!gpuAttentionLayer) })
+                            DropdownMenuItem(text = { Text("Profilage GPU : ${if (gpuTimestamps) "complet" else "désactivé"} · recharger") },
+                                onClick = { menu = false; onGpuTimestamps(!gpuTimestamps) })
                             DropdownMenuItem(text = { Text("Normalisations parallèles : ${if (parallelNorm) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onParallelNorm(!parallelNorm) })
                         }
