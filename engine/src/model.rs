@@ -380,12 +380,14 @@ impl Model {
         }
     }
 
-    pub fn forward(
-        &mut self,
-        token: u32,
-        logits: bool,
-        cancel: &AtomicBool,
-    ) -> Result<Option<Vec<f32>>> {
+    pub(crate) fn configure_gpu_greedy(&mut self, vocabulary: &[u32]) -> Result<bool> {
+        if self.gpu.gpu_greedy_enabled() {
+            return self.head.prepare_gpu_greedy(&mut self.gpu, vocabulary);
+        }
+        Ok(false)
+    }
+
+    fn advance(&mut self, token: u32, cancel: &AtomicBool) -> Result<Vec<f32>> {
         ensure!(self.position < self.context_limit, "Context is full");
         let started = std::time::Instant::now();
         let mut hidden =
@@ -456,6 +458,11 @@ impl Model {
             "Non-finite hidden state"
         );
         self.position += 1;
+        Ok(hidden)
+    }
+
+    pub fn forward(&mut self, token: u32, logits: bool, cancel: &AtomicBool) -> Result<Option<Vec<f32>>> {
+        let hidden = self.advance(token, cancel)?;
         if logits {
             let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
             let started = std::time::Instant::now();
@@ -468,6 +475,16 @@ impl Model {
             Ok(None)
         }
     }
+
+    pub(crate) fn forward_gpu_greedy(&mut self, token: u32, cancel: &AtomicBool) -> Result<u32> {
+        let hidden = self.advance(token, cancel)?;
+        let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
+        let started = std::time::Instant::now();
+        let result = self.head.forward_gpu_greedy(&mut self.gpu, &hidden)?;
+        self.gpu.record_profile(|p| p.head_ns = p.head_ns.saturating_add(crate::vulkan::elapsed_ns(started)));
+        Ok(result)
+    }
+
 }
 
 #[cfg(test)]

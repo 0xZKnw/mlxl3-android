@@ -70,6 +70,11 @@ static REQUESTED_FAST_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_CONV_LAYER: AtomicBool = AtomicBool::new(false);
 static REQUESTED_COOPERATIVE_K5: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SPECIALIZED_MCG: AtomicBool = AtomicBool::new(false);
+static REQUESTED_GPU_GREEDY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_gpu_greedy(enabled: bool) {
+    REQUESTED_GPU_GREEDY.store(enabled, Ordering::Relaxed);
+}
 
 pub fn set_fast_head(enabled: bool) {
     REQUESTED_FAST_HEAD.store(enabled, Ordering::Relaxed);
@@ -113,7 +118,7 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
-const MAX_DESCRIPTOR_SETS: usize = 2 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 160;
+const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 160;
 const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
 const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 160;
 
@@ -200,6 +205,14 @@ pub(crate) struct DenseHeadPlan {
     outputs: Vec<Buffer>,
     input_len: usize,
     total: usize,
+    command: vk::CommandBuffer,
+    dtype: u32,
+    greedy: Option<GreedyPlan>,
+}
+
+struct GreedyPlan {
+    _mask: Buffer,
+    results: Vec<Buffer>,
     command: vk::CommandBuffer,
 }
 
@@ -370,6 +383,15 @@ impl Buffer {
         );
         Ok(output)
     }
+
+    fn read_u32(&self, count: usize) -> Result<Vec<u32>> {
+        ensure!(count.checked_mul(4).is_some_and(|n| n <= self.size), "GPU buffer read exceeds allocation");
+        let mut output = vec![0u32; count];
+        self.with_mapping(|ptr| unsafe {
+            std::ptr::copy_nonoverlapping(ptr.cast::<u32>(), output.as_mut_ptr(), count);
+        })?;
+        Ok(output)
+    }
 }
 impl Drop for Buffer {
     fn drop(&mut self) {
@@ -434,7 +456,9 @@ pub struct Gpu {
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
     rms_residual: vk::Pipeline,
+    greedy: vk::Pipeline,
     gpu_conv_layer: bool,
+    gpu_greedy: bool,
     partials: Option<Buffer>,
     input: Option<Buffer>,
     rotated: Option<Buffer>,
@@ -726,7 +750,9 @@ impl Gpu {
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
             rms_residual: vk::Pipeline::null(),
+            greedy: vk::Pipeline::null(),
             gpu_conv_layer: REQUESTED_GPU_CONV_LAYER.load(Ordering::Relaxed),
+            gpu_greedy: REQUESTED_GPU_GREEDY.load(Ordering::Relaxed),
             partials: None,
             input: None,
             rotated: None,
@@ -869,6 +895,7 @@ impl Gpu {
             env!("OUT_DIR"),
             "/rms_residual.spv"
         )))?;
+        gpu.greedy = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/greedy.spv")))?;
         let partial_bytes = 32768 * 4 * gpu.split_k.max(4) as usize * 4;
         gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
@@ -1139,6 +1166,7 @@ impl Gpu {
             "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| (*n || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "projection":"gpu_resident_mlp_conv",
             "gpu_conv_layer_experimental":self.gpu_conv_layer,
+            "gpu_greedy_requested":self.gpu_greedy,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
@@ -1303,7 +1331,8 @@ impl Gpu {
     fn stream_pipeline(&mut self, bits: u32, codebook: u32) -> Result<(vk::Pipeline, bool)> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
-        if self.enable_specialized_mcg && codebook == 1
+        if self.enable_specialized_mcg
+            && codebook == 1
             && (bits == 4 || (bits == 5 && self.enable_cooperative_k5))
             && self.native_verified
             && self.allow_cooperative_k4
@@ -1341,7 +1370,10 @@ impl Gpu {
             }
         }
         if self.qmv_stream[index] == vk::Pipeline::null() {
-            if (bits == 4 || (bits == 5 && self.enable_cooperative_k5)) && self.native_verified && self.allow_cooperative_k4 {
+            if (bits == 4 || (bits == 5 && self.enable_cooperative_k5))
+                && self.native_verified
+                && self.allow_cooperative_k4
+            {
                 let bytes: &[u8] = if bits == 4 {
                     include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"))
                 } else {
@@ -2037,6 +2069,10 @@ impl Gpu {
         self.gpu_conv_layer
     }
 
+    pub(crate) fn gpu_greedy_enabled(&self) -> bool {
+        self.gpu_greedy
+    }
+
     pub(crate) fn prepare_conv_layer(
         &mut self,
         conv: &ConvPlan,
@@ -2352,6 +2388,8 @@ impl Gpu {
             input_len,
             total,
             command,
+            dtype,
+            greedy: None,
         })
     }
 
@@ -2376,6 +2414,65 @@ impl Gpu {
         }
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
         Ok(result)
+    }
+
+    pub(crate) fn prepare_greedy_head(&mut self, plan: &mut DenseHeadPlan, vocabulary: &[u32]) -> Result<()> {
+        ensure!(!vocabulary.is_empty() && vocabulary.iter().all(|id| (*id as usize) < plan.total), "Invalid vocabulary");
+        let mut mask = vec![0u32; plan.total];
+        for &id in vocabulary { mask[id as usize] = 1; }
+        let mask_bytes: Vec<u8> = mask.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let mask = self.buffer(&mask_bytes)?;
+        let results = (0..plan.chunks.len()).map(|_| self.mapped_buffer(16)).collect::<Result<Vec<_>>>()?;
+        let layouts = vec![self.set_layout; plan.chunks.len() * 2];
+        let command = unsafe { self.device.raw.allocate_command_buffers(
+            &vk::CommandBufferAllocateInfo::default().command_pool(self.pool)
+                .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1),
+        )? }[0];
+        let sets = unsafe { self.device.raw.allocate_descriptor_sets(
+            &vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.descriptor_pool).set_layouts(&layouts),
+        )? };
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let mut jobs = Vec::with_capacity(plan.chunks.len() * 2);
+        for (i, ((weights, rows), output)) in plan.chunks.iter().zip(&plan.outputs).enumerate() {
+            jobs.push(Dispatch { input, weights, output, params: [plan.input_len as u32, *rows as u32, plan.dtype, 0],
+                outputs: *rows, groups: dense_groups(*rows).context("Invalid head shape")?, groups_y: 1,
+                pipeline: if self.fast_head { self.dense_pair } else { self.dense },
+                barrier_after: i + 1 == plan.chunks.len() });
+        }
+        let mut offset = 0usize;
+        for (((_, rows), logits), result) in plan.chunks.iter().zip(&plan.outputs).zip(&results) {
+            jobs.push(Dispatch { input: logits, weights: &mask, output: result,
+                params: [*rows as u32, offset as u32, 0, 0], outputs: 1, groups: 1, groups_y: 1,
+                pipeline: self.greedy, barrier_after: false });
+            offset += rows;
+        }
+        self.record_jobs(command, &sets, &jobs, vk::CommandBufferUsageFlags::empty(), None)?;
+        plan.greedy = Some(GreedyPlan { _mask: mask, results, command });
+        Ok(())
+    }
+
+    pub(crate) fn forward_greedy_head(&self, plan: &DenseHeadPlan, x: &[f32]) -> Result<u32> {
+        ensure!(x.len() == plan.input_len && x.iter().all(|v| v.is_finite()), "Invalid dense head input");
+        ensure!(plan.chunks.iter().all(|(w, _)| Arc::ptr_eq(&w.device, &self.device)), "Dense head belongs to another GPU");
+        let greedy = plan.greedy.as_ref().context("GPU vocabulary not prepared")?;
+        self.upload(x)?;
+        self.submit(&[greedy.command], Instant::now())?;
+        self.collect_timestamps(None);
+        let started = Instant::now();
+        let mut best: Option<(f32, u32)> = None;
+        for result in &greedy.results {
+            let values = result.read_u32(4)?;
+            ensure!(values[2] == 0, "Non-finite head output");
+            if values[3] != 0 {
+                let candidate = (f32::from_bits(values[0]), values[1]);
+                ensure!(candidate.0.is_finite() && (candidate.1 as usize) < plan.total, "Invalid GPU greedy result");
+                if best.is_none_or(|(score, id)| candidate.0 > score || (candidate.0 == score && candidate.1 < id)) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        best.map(|(_, id)| id).context("No allowed token")
     }
 
     pub fn multiply_dense_chunks(
@@ -2775,6 +2872,7 @@ impl Drop for Gpu {
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
             d.destroy_pipeline(self.rms_residual, None);
+            d.destroy_pipeline(self.greedy, None);
             d.destroy_pipeline(self.hadamard, None);
             d.destroy_query_pool(self.queries, None);
             d.destroy_pipeline_layout(self.layout, None);
@@ -2789,6 +2887,25 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; greedy mask, ties and nonfinite checks"]
+    fn resident_gpu_greedy_matches_cpu_and_rejects_nonfinite() {
+        let mut gpu = Gpu::new().unwrap();
+        let bytes = |values: &[f32]| values.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect::<Vec<_>>();
+        let chunks = vec![(gpu.buffer(&bytes(&[1., 2., 2.])).unwrap(), 3),
+            (gpu.buffer(&bytes(&[3., 0.])).unwrap(), 2)];
+        let mut plan = gpu.prepare_dense_head(chunks, 1, 0).unwrap();
+        let vocabulary = [1u32, 2u32];
+        gpu.prepare_greedy_head(&mut plan, &vocabulary).unwrap();
+        let logits: Vec<f32> = gpu.forward_dense_head(&plan, &[1.]).unwrap().into_iter().map(crate::math::half).collect();
+        assert_eq!(gpu.forward_greedy_head(&plan, &[1.]).unwrap(), crate::math::greedy_in_vocabulary(&logits, &vocabulary).unwrap());
+        assert_eq!(gpu.forward_greedy_head(&plan, &[1.]).unwrap(), 1);
+        let chunks = vec![(gpu.buffer(&bytes(&[65504., 1.])).unwrap(), 2)];
+        let mut plan = gpu.prepare_dense_head(chunks, 1, 0).unwrap();
+        gpu.prepare_greedy_head(&mut plan, &[1]).unwrap();
+        assert!(gpu.forward_greedy_head(&plan, &[2.]).is_err());
+    }
 
     #[test]
     #[ignore = "requires Vulkan; experimental resident convolution layer"]

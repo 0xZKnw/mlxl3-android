@@ -174,6 +174,25 @@ pub struct Linear {
     is_head: bool,
 }
 impl Linear {
+    pub(crate) fn prepare_gpu_greedy(&mut self, gpu: &mut Gpu, vocabulary: &[u32]) -> Result<bool> {
+        if let Storage::Head(plan) = &mut self.storage {
+            gpu.prepare_greedy_head(plan, vocabulary)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn forward_gpu_greedy(&self, gpu: &mut Gpu, x: &[f32]) -> Result<u32> {
+        ensure!(x.len() == self.input, "Linear input shape mismatch");
+        let Storage::Head(plan) = &self.storage else { anyhow::bail!("GPU greedy requires a dense head") };
+        let started = std::time::Instant::now();
+        let rounded: Vec<f32> = x.iter().copied().map(math::half).collect();
+        gpu.record_profile(|p| p.projection_cpu_ns = p.projection_cpu_ns.saturating_add(crate::vulkan::elapsed_ns(started)));
+        let before = gpu.dense_timing_snapshot();
+        let token = gpu.forward_greedy_head(plan, &rounded)?;
+        gpu.record_head_timing(before);
+        Ok(token)
+    }
     pub(crate) fn into_exl3(self) -> Result<Exl3Matrix> {
         match self.storage {
             Storage::Exl3(matrix) => Ok(matrix),

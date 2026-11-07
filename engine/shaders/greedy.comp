@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Mask { uint allowed[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { uint result[]; };
+layout(push_constant) uniform Params { uint count; uint offset; uint unused0; uint unused1; } p;
+shared float scores[128];
+shared uint ids[128];
+shared uint valid[128];
+shared uint invalid[128];
+#include "half_round.glsl"
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    float best = 0.0;
+    uint best_id = 0u;
+    uint has_best = 0u;
+    uint bad = 0u;
+    for (uint i = tid; i < p.count; i += 128u) {
+        float value = halfRound(x[i]);
+        if (isnan(value) || isinf(value)) { bad = 1u; continue; }
+        uint id = p.offset + i;
+        if (allowed[id] != 0u && (has_best == 0u || value > best || (value == best && id < best_id))) {
+            best = value; best_id = id; has_best = 1u;
+        }
+    }
+    scores[tid] = best; ids[tid] = best_id; valid[tid] = has_best; invalid[tid] = bad;
+    barrier();
+    for (uint stride = 64u; stride > 0u; stride /= 2u) {
+        if (tid < stride) {
+            uint other = tid + stride;
+            invalid[tid] |= invalid[other];
+            if (valid[other] != 0u && (valid[tid] == 0u || scores[other] > scores[tid] ||
+                (scores[other] == scores[tid] && ids[other] < ids[tid]))) {
+                scores[tid] = scores[other]; ids[tid] = ids[other]; valid[tid] = 1u;
+            }
+        }
+        barrier();
+    }
+    if (tid == 0u) {
+        result[0] = floatBitsToUint(scores[0]); result[1] = ids[0];
+        result[2] = invalid[0]; result[3] = valid[0];
+    }
+}

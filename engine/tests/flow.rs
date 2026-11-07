@@ -185,11 +185,13 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     mlxl3_android::vulkan::set_gpu_conv_layer(true);
     mlxl3_android::vulkan::set_fast_head(true);
     mlxl3_android::vulkan::set_experimental_kernels(true, true);
+    mlxl3_android::vulkan::set_gpu_greedy(true);
     assert!(mlxl3_android::vulkan::set_split_k(8));
     let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
     mlxl3_android::vulkan::set_gpu_conv_layer(false);
     mlxl3_android::vulkan::set_fast_head(false);
     mlxl3_android::vulkan::set_experimental_kernels(false, false);
+    mlxl3_android::vulkan::set_gpu_greedy(false);
     assert!(mlxl3_android::vulkan::set_split_k(4));
     let mut experimental = experimental.unwrap();
     for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {
@@ -205,6 +207,15 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             assert!((value - expected).abs() <= 0.001 + expected.abs() * 0.004);
         }
     }
+    let messages = [Message {
+        role: "user".into(),
+        content: "Hello".into(),
+    }];
+    let mut experimental_events = vec![];
+    experimental.generate(&messages, 4, &cancelled, &mut |event| {
+        experimental_events.push(event); Ok(())
+    }).unwrap();
+    assert_eq!(experimental_events.last().unwrap()["performance"]["generation"]["gpu_greedy"], true);
     drop(experimental);
     engine.model.reset();
     let first = engine.model.forward(3, true, &cancelled).unwrap().unwrap();
@@ -214,10 +225,6 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         first,
         engine.model.forward(3, true, &cancelled).unwrap().unwrap()
     );
-    let messages = [Message {
-        role: "user".into(),
-        content: "Hello".into(),
-    }];
     let mut events = vec![];
     engine
         .generate(&messages, 4, &cancelled, &mut |event| {
@@ -225,6 +232,10 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             Ok(())
         })
         .unwrap();
+    let text_events = |events: &[serde_json::Value]| events.iter()
+        .filter(|e| e["type"] == "text")
+        .map(|e| e["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(text_events(&experimental_events), text_events(&events));
     assert!(
         events
             .iter()

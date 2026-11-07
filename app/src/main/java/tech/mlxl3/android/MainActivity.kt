@@ -82,7 +82,8 @@ class MainActivity : ComponentActivity() {
                 model.savedModel, { picker.launch(null) }, model::loadSaved, model::newChat,
                 model::send, model::stop, model::dismissError, model.diagnostics, model.splitK, model::chooseSplitK,
                 model.fastHead, model::chooseFastHead, model.gpuConvLayer, model::chooseGpuConvLayer,
-                model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg)
+                model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg,
+                model.gpuGreedy, model::chooseGpuGreedy)
         }
     }
 }
@@ -102,7 +103,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  fastHead: Boolean = false, onFastHead: (Boolean) -> Unit = {},
                  gpuConvLayer: Boolean = false, onGpuConvLayer: (Boolean) -> Unit = {},
                  cooperativeK5: Boolean = false, onK5: (Boolean) -> Unit = {},
-                 specializedMcg: Boolean = false, onMcg: (Boolean) -> Unit = {}) {
+                 specializedMcg: Boolean = false, onMcg: (Boolean) -> Unit = {},
+                 gpuGreedy: Boolean = false, onGpuGreedy: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -144,6 +146,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 onClick = { menu = false; onK5(!cooperativeK5) })
                             DropdownMenuItem(text = { Text("MCG spécialisé : ${if (specializedMcg) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onMcg(!specializedMcg) })
+                            DropdownMenuItem(text = { Text("Sélection GPU : ${if (gpuGreedy) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
                             if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
                                 menu = false
                                 context.getSystemService(ClipboardManager::class.java)

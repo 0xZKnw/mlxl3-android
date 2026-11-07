@@ -53,6 +53,15 @@ pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setExperimentalKerne
     crate::vulkan::set_experimental_kernels(k5 != 0, mcg != 0);
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setGpuGreedy(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_gpu_greedy(enabled != 0);
+}
+
 fn emit(env: &mut JNIEnv, callback: &JObject, event: serde_json::Value) -> Result<()> {
     let text = env.new_string(event.to_string())?;
     env.call_method(

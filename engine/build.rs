@@ -11,6 +11,7 @@ fn main() {
         "dense",
         "dense_pair",
         "rms_residual",
+        "greedy",
         "reduce",
         "swiglu",
         "convolution",

@@ -40,10 +40,10 @@ CPU operator times, driver information and float/subgroup capabilities.
 
 The model menu includes experimental split-K 1, 2, 4 and 8, an optional
 paired dense-head kernel, optional GPU-resident convolution layers, and
-optional cooperative K5 and MCG-specialized kernels.
+optional cooperative K5 and MCG-specialized kernels, and GPU greedy selection.
 Changes apply **only after reloading the model**;
 the defaults are split-K 4, the reference dense head, CPU layer boundaries,
-and disabled experimental K5/MCG variants. The copied report
+and disabled experimental K5/MCG/greedy variants. The copied report
 records the effective split count, chosen head kernel, cooperative K4/K5
 selection and its startup parity check, plus separate gate/head device times.
 These timings overlap other reported scopes and must not be added together.
@@ -51,6 +51,8 @@ Different split counts, the paired head and GPU normalization may change
 floating-point results. Compare output quality and repeated end-to-end measurements on the
 target device before treating any option as an improvement. If a cooperative
 kernel fails its startup parity check, the engine falls back to the prior path.
+GPU greedy selection applies the FP16 boundary, checks all logits for non-finite
+values, applies the tokenizer vocabulary mask, and resolves ties by lowest token ID.
 Android system traces include `MLXL3 upload`, `MLXL3 record commands`,
 `MLXL3 queue submit`, `MLXL3 fence wait`, and `MLXL3 readback` slices. Capture
 them with CPU scheduling and frequency tracks in Perfetto to distinguish CPU

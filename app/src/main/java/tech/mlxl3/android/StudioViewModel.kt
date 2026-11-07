@@ -42,6 +42,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var gpuConvLayer by mutableStateOf(prefs.getBoolean("gpu_conv_layer", false)); private set
     var cooperativeK5 by mutableStateOf(prefs.getBoolean("cooperative_k5", false)); private set
     var specializedMcg by mutableStateOf(prefs.getBoolean("specialized_mcg", false)); private set
+    var gpuGreedy by mutableStateOf(prefs.getBoolean("gpu_greedy", false)); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -74,6 +75,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         specializedMcg = enabled
         prefs.edit().putBoolean("specialized_mcg", enabled).apply()
         status = "MCG spécialisé ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseGpuGreedy(enabled: Boolean) {
+        if (busy) return
+        gpuGreedy = enabled
+        prefs.edit().putBoolean("gpu_greedy", enabled).apply()
+        status = "Sélection GPU ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -136,6 +143,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setFastHead(fastHead)
         NativeEngine.setGpuConvLayer(gpuConvLayer)
         NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
+        NativeEngine.setGpuGreedy(gpuGreedy)
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -173,6 +181,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setFastHead(fastHead)
             NativeEngine.setGpuConvLayer(gpuConvLayer)
             NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
+            NativeEngine.setGpuGreedy(gpuGreedy)
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)
