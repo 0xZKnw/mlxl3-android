@@ -43,6 +43,16 @@ pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setGpuConvLayer(
     crate::vulkan::set_gpu_conv_layer(enabled != 0);
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setExperimentalKernels(
+    _env: JNIEnv,
+    _class: JClass,
+    k5: jboolean,
+    mcg: jboolean,
+) {
+    crate::vulkan::set_experimental_kernels(k5 != 0, mcg != 0);
+}
+
 fn emit(env: &mut JNIEnv, callback: &JObject, event: serde_json::Value) -> Result<()> {
     let text = env.new_string(event.to_string())?;
     env.call_method(

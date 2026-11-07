@@ -39,9 +39,11 @@ The copied report also contains per-shape costs, the eight slowest projections,
 CPU operator times, driver information and float/subgroup capabilities.
 
 The model menu includes experimental split-K 1, 2, 4 and 8, an optional
-paired dense-head kernel, and optional GPU-resident convolution layers.
+paired dense-head kernel, optional GPU-resident convolution layers, and
+optional cooperative K5 and MCG-specialized kernels.
 Changes apply **only after reloading the model**;
-the defaults are split-K 4 and the reference dense head. The copied report
+the defaults are split-K 4, the reference dense head, CPU layer boundaries,
+and disabled experimental K5/MCG variants. The copied report
 records the effective split count, chosen head kernel, cooperative K4/K5
 selection and its startup parity check, plus separate gate/head device times.
 These timings overlap other reported scopes and must not be added together.

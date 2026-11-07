@@ -6,6 +6,7 @@ object NativeEngine {
     external fun setSplitK(value: Int): Boolean
     external fun setFastHead(enabled: Boolean)
     external fun setGpuConvLayer(enabled: Boolean)
+    external fun setExperimentalKernels(k5: Boolean, mcg: Boolean)
     external fun load(path: String, callback: Callback): String
     external fun generate(messages: String, maxTokens: Int, callback: Callback): String
     external fun cancel()

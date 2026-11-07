@@ -40,6 +40,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var splitK by mutableStateOf(prefs.getInt("split_k", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
     var fastHead by mutableStateOf(prefs.getBoolean("fast_head", false)); private set
     var gpuConvLayer by mutableStateOf(prefs.getBoolean("gpu_conv_layer", false)); private set
+    var cooperativeK5 by mutableStateOf(prefs.getBoolean("cooperative_k5", false)); private set
+    var specializedMcg by mutableStateOf(prefs.getBoolean("specialized_mcg", false)); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -60,6 +62,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         gpuConvLayer = enabled
         prefs.edit().putBoolean("gpu_conv_layer", enabled).apply()
         status = "Couches convolution GPU ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
+    }
+    fun chooseK5(enabled: Boolean) {
+        if (busy) return
+        cooperativeK5 = enabled
+        prefs.edit().putBoolean("cooperative_k5", enabled).apply()
+        status = "Kernel K5 expérimental ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseMcg(enabled: Boolean) {
+        if (busy) return
+        specializedMcg = enabled
+        prefs.edit().putBoolean("specialized_mcg", enabled).apply()
+        status = "MCG spécialisé ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -121,6 +135,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
         NativeEngine.setFastHead(fastHead)
         NativeEngine.setGpuConvLayer(gpuConvLayer)
+        NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -157,6 +172,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
             NativeEngine.setFastHead(fastHead)
             NativeEngine.setGpuConvLayer(gpuConvLayer)
+            NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

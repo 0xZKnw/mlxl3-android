@@ -68,6 +68,8 @@ const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
 static REQUESTED_SPLIT_K: AtomicU32 = AtomicU32::new(4);
 static REQUESTED_FAST_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_CONV_LAYER: AtomicBool = AtomicBool::new(false);
+static REQUESTED_COOPERATIVE_K5: AtomicBool = AtomicBool::new(false);
+static REQUESTED_SPECIALIZED_MCG: AtomicBool = AtomicBool::new(false);
 
 pub fn set_fast_head(enabled: bool) {
     REQUESTED_FAST_HEAD.store(enabled, Ordering::Relaxed);
@@ -75,6 +77,11 @@ pub fn set_fast_head(enabled: bool) {
 
 pub fn set_gpu_conv_layer(enabled: bool) {
     REQUESTED_GPU_CONV_LAYER.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_experimental_kernels(k5: bool, mcg: bool) {
+    REQUESTED_COOPERATIVE_K5.store(k5, Ordering::Relaxed);
+    REQUESTED_SPECIALIZED_MCG.store(mcg, Ordering::Relaxed);
 }
 
 pub fn set_split_k(value: u32) -> bool {
@@ -399,6 +406,8 @@ pub struct Gpu {
     qmv_mcg: [vk::Pipeline; 8],
     mcg_cooperative: [bool; 8],
     mcg_attempted: [bool; 8],
+    enable_cooperative_k5: bool,
+    enable_specialized_mcg: bool,
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -674,6 +683,8 @@ impl Gpu {
             qmv_mcg: [vk::Pipeline::null(); 8],
             mcg_cooperative: [false; 8],
             mcg_attempted: [false; 8],
+            enable_cooperative_k5: REQUESTED_COOPERATIVE_K5.load(Ordering::Relaxed),
+            enable_specialized_mcg: REQUESTED_SPECIALIZED_MCG.load(Ordering::Relaxed),
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -1134,6 +1145,7 @@ impl Gpu {
             "cooperative_k4_self_test":if self.cooperative_k4_active {self.cooperative_k4_self_test} else if self.mcg_cooperative[3] {"passed_mcg"} else {self.cooperative_k4_self_test},
             "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
             "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
+            "experimental_k5_requested":self.enable_cooperative_k5,"specialized_mcg_requested":self.enable_specialized_mcg,
             "split_k":self.split_k,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
@@ -1291,8 +1303,8 @@ impl Gpu {
     fn stream_pipeline(&mut self, bits: u32, codebook: u32) -> Result<(vk::Pipeline, bool)> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
-        if codebook == 1
-            && (bits == 4 || bits == 5)
+        if self.enable_specialized_mcg && codebook == 1
+            && (bits == 4 || (bits == 5 && self.enable_cooperative_k5))
             && self.native_verified
             && self.allow_cooperative_k4
         {
@@ -1329,7 +1341,7 @@ impl Gpu {
             }
         }
         if self.qmv_stream[index] == vk::Pipeline::null() {
-            if (bits == 4 || bits == 5) && self.native_verified && self.allow_cooperative_k4 {
+            if (bits == 4 || (bits == 5 && self.enable_cooperative_k5)) && self.native_verified && self.allow_cooperative_k4 {
                 let bytes: &[u8] = if bits == 4 {
                     include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"))
                 } else {
