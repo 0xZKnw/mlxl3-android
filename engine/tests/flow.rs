@@ -201,6 +201,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(mlxl3_android::vulkan::set_layer_batch(4));
     mlxl3_android::vulkan::set_unroll2(true);
     mlxl3_android::vulkan::set_parallel_norm(true);
+    mlxl3_android::vulkan::set_fused_norm(true);
     mlxl3_android::vulkan::set_gpu_timestamps(false);
     assert!(mlxl3_android::vulkan::set_split_k(8));
     let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
@@ -214,9 +215,11 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(mlxl3_android::vulkan::set_layer_batch(1));
     mlxl3_android::vulkan::set_unroll2(false);
     mlxl3_android::vulkan::set_parallel_norm(false);
+    mlxl3_android::vulkan::set_fused_norm(false);
     mlxl3_android::vulkan::set_gpu_timestamps(true);
     assert!(mlxl3_android::vulkan::set_split_k(4));
     let mut experimental = experimental.unwrap();
+    assert_eq!(experimental.model.gpu.diagnostics()["fused_norm_active"], true);
     assert_eq!(
         experimental.model.gpu.diagnostics()["parallel_norm_active"],
         true

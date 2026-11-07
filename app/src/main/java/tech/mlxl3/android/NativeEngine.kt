@@ -17,6 +17,7 @@ object NativeEngine {
     external fun setWaveHead(enabled: Boolean)
     external fun setHeadRows(value: Int): Boolean
     external fun setGpuTimestamps(enabled: Boolean)
+    external fun setFusedNorm(enabled: Boolean)
     external fun setSubgroupNorm(enabled: Boolean)
     external fun setParallelNorm(enabled: Boolean)
     external fun load(path: String, callback: Callback): String

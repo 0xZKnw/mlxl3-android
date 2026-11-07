@@ -108,13 +108,15 @@ class StudioScreenTest {
     }
 
     @Test fun newKernelExperimentsCanBeToggledAndRestored() {
+        val fused = androidx.compose.runtime.mutableStateOf(false)
         val rms = androidx.compose.runtime.mutableStateOf(false)
         val exl3 = androidx.compose.runtime.mutableStateOf(false)
         compose.setContent {
             StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
                 {}, {}, {}, {}, {}, {}, subgroupNorm = rms.value,
                 onSubgroupNorm = { rms.value = it }, exl3Multiwave = exl3.value,
-                onExl3Multiwave = { exl3.value = it })
+                onExl3Multiwave = { exl3.value = it }, fusedNorm = fused.value,
+                onFusedNorm = { fused.value = it })
         }
         listOf("non", "oui").forEach { state ->
             compose.onNodeWithText("LFM3 1.7B").performClick()
@@ -123,6 +125,9 @@ class StudioScreenTest {
             compose.onNodeWithText("LFM3 1.7B").performClick()
             compose.onNodeWithText("EXL3 multiwave (exp.) : $state · recharger").performScrollTo().performClick()
             compose.runOnIdle { assertEquals(state == "non", exl3.value) }
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("Fusion RMSNorm (sans subgroup) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", fused.value) }
         }
     }
 

@@ -60,6 +60,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var layerBatch by mutableStateOf(initialPerformance.layerBatch); private set
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
+    var fusedNorm by mutableStateOf(prefs.getBoolean("fused_norm", false)); private set
     var subgroupNorm by mutableStateOf(prefs.getBoolean("subgroup_norm", false)); private set
     var exl3Multiwave by mutableStateOf(prefs.getBoolean("exl3_multiwave", false)); private set
     var waveHead by mutableStateOf(prefs.getBoolean("wave_head", false)); private set
@@ -139,6 +140,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         unroll2 = enabled
         prefs.edit { putBoolean("unroll2", enabled) }
         status = "Boucle K4/K5 expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseFusedNorm(enabled: Boolean) {
+        if (busy) return
+        fusedNorm = enabled
+        prefs.edit { putBoolean("fused_norm", enabled) }
+        status = "Fusion RMSNorm ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun chooseSubgroupNorm(enabled: Boolean) {
         if (busy) return
@@ -256,6 +263,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
         NativeEngine.setUnroll2(unroll2)
         NativeEngine.setSubgroupHead(subgroupHead)
+        NativeEngine.setFusedNorm(fusedNorm)
         NativeEngine.setSubgroupNorm(subgroupNorm)
         NativeEngine.setExl3Multiwave(exl3Multiwave)
         NativeEngine.setWaveHead(waveHead)
@@ -305,6 +313,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
             NativeEngine.setUnroll2(unroll2)
             NativeEngine.setSubgroupHead(subgroupHead)
+            NativeEngine.setFusedNorm(fusedNorm)
             NativeEngine.setSubgroupNorm(subgroupNorm)
             NativeEngine.setExl3Multiwave(exl3Multiwave)
             NativeEngine.setWaveHead(waveHead)

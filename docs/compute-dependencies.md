@@ -44,3 +44,23 @@ serial/parallel/subgroup reduction variant. Algebraic scale combination,
 dropping the intermediate FP16 round, or relying on workgroup barriers across
 multiple workgroups is invalid. The dependency patch deliberately leaves all
 normalization arithmetic and outputs unchanged.
+
+## Optional exact fused implementation
+
+`set_fused_norm(true)` now requests the dedicated `rms_fused` shader. It is not
+promoted as a speedup or default without S24 measurements. It requires validated
+parallel normalization and retains unfused commands as the fallback. Shapes
+larger than 2048 retain the unfused path. A startup check compares both outputs
+bit-for-bit against two existing parallel GPU dispatches, and also checks the
+CPU normalization reference, on counts 1/127/128/129/2048, zero, mixed signs,
+small numbers and FP16 extremes. One case uses different epsilons to ensure the
+two scales are independent. Startup failure leaves the ordinary pair active.
+
+The shader uses one 128-thread workgroup, about 8.5 KiB of shared memory,
+two parallel reductions in the same order as the reference, and explicit shared
+barriers. It writes the residual hidden vector AND normalized next input. The
+layer plans retain both weight buffers and unfused command buffers; graph
+assembly substitutes only the adjacent validated pair and profiling reads only
+the commands actually executed. The reduced full-model fixture enables this
+experiment and covers convolution, attention, reset and cancellation. The
+convolution fixture also compares fused and unfused modes across the ring cache.
