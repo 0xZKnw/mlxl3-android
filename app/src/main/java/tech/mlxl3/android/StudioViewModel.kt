@@ -38,8 +38,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val prefs = application.getSharedPreferences("studio", 0)
-    private val initialPerformance = PerformanceDefaults.forDevice(Build.MANUFACTURER, Build.MODEL)
-        .withPreferences(prefs.all)
+    private val devicePerformance = PerformanceDefaults.forDevice(Build.MANUFACTURER, Build.MODEL)
+    private val performanceMigration = devicePerformance.migrationPreferences(prefs.all)
+    private val initialPerformance = run {
+        if (performanceMigration.isNotEmpty()) {
+            // Persist settings and migration marker atomically before reading initial state.
+            prefs.edit(commit = true) {
+                performanceMigration.forEach { (key, value) -> putBoolean(key, value) }
+            }
+        }
+        devicePerformance.withPreferences(prefs.all)
+    }
     var splitK by mutableStateOf(initialPerformance.splitK); private set
     var fastHead by mutableStateOf(prefs.getBoolean("fast_head", false)); private set
     var gpuConvLayer by mutableStateOf(initialPerformance.gpuConvLayer); private set
@@ -54,9 +63,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var waveHead by mutableStateOf(prefs.getBoolean("wave_head", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
-    var gpuTimestamps by mutableStateOf(prefs.getBoolean("gpu_timestamps", true)); private set
-    var parallelNorm by mutableStateOf(prefs.getBoolean("parallel_norm", false)); private set
+    var gpuTimestamps by mutableStateOf(initialPerformance.gpuTimestamps); private set
+    var parallelNorm by mutableStateOf(initialPerformance.parallelNorm); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
+
+    init {
+        if (performanceMigration.isNotEmpty()) {
+            status = "Profil S24 mis à jour : RMSNorm parallèle activé, profilage désactivé · modifiable dans Réglages avancés"
+        }
+    }
 
     fun dismissError() { error = null }
     fun chooseSplitK(value: Int) {

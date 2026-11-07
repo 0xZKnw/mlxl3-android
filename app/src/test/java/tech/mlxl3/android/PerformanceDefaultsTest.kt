@@ -15,6 +15,8 @@ class PerformanceDefaultsTest {
         assertTrue(settings.gpuAttentionLayer)
         assertTrue(settings.cooperativeK5)
         assertTrue(settings.gpuGreedy)
+        assertTrue(settings.parallelNorm)
+        assertFalse(settings.gpuTimestamps)
     }
 
     @Test fun unmeasuredDevicesKeepPortableDefaults() {
@@ -36,6 +38,45 @@ class PerformanceDefaultsTest {
         assertFalse(settings.gpuAttentionLayer)
         assertFalse(settings.cooperativeK5)
         assertFalse(settings.gpuGreedy)
+    }
+
+    @Test fun s24MigrationReplacesOldChoicesOnlyOnce() {
+        val profile = PerformanceDefaults.forDevice("Samsung", "SM-S921B")
+        val old = mapOf<String, Any>("parallel_norm" to false, "gpu_timestamps" to true,
+            "wave_head" to true, "split_k" to 2)
+        val changes = profile.migrationPreferences(old)
+        assertEquals(setOf("parallel_norm", "gpu_timestamps",
+            PerformanceDefaults.S24_NORM_PROFILE_MIGRATION), changes.keys)
+        val upgraded = old + changes
+        val first = profile.withPreferences(upgraded)
+        assertTrue(first.parallelNorm)
+        assertFalse(first.gpuTimestamps)
+        assertEquals(2, first.splitK)
+        assertEquals(true, upgraded["wave_head"])
+        val later = upgraded + mapOf("parallel_norm" to false, "gpu_timestamps" to true)
+        assertTrue(profile.migrationPreferences(later).isEmpty())
+        assertFalse(profile.withPreferences(later).parallelNorm)
+        assertTrue(profile.withPreferences(later).gpuTimestamps)
+    }
+
+    @Test fun migrationDoesNotTouchOtherDevices() {
+        for ((maker, model) in listOf("samsung" to "SM-S921U", "samsung" to "SM-S926B",
+            "other" to "SM-S921B", "" to "")) {
+            val profile = PerformanceDefaults.forDevice(maker, model)
+            assertTrue(profile.migrationPreferences(emptyMap<String, Any>()).isEmpty())
+            assertTrue(profile.migrationPreferences(mapOf("parallel_norm" to false,
+                "gpu_timestamps" to true)).isEmpty())
+            assertFalse(profile.parallelNorm)
+            assertTrue(profile.gpuTimestamps)
+        }
+    }
+
+    @Test fun newS24InstallGetsMigrationMarkerAndMeasuredDefaults() {
+        val profile = PerformanceDefaults.forDevice("samsung", "SM-S921B")
+        val changes = profile.migrationPreferences(emptyMap<String, Any>())
+        assertEquals(true, changes[PerformanceDefaults.S24_NORM_PROFILE_MIGRATION])
+        assertTrue(profile.withPreferences(changes).parallelNorm)
+        assertFalse(profile.withPreferences(changes).gpuTimestamps)
     }
 
     @Test fun malformedValuesUseDeviceDefaultsWithoutChangingOtherChoices() {

@@ -39,3 +39,22 @@ The 128-thread workgroup assigns one output row to each subgroup. The 2048-wide 
 A startup test checks both F16 and BF16 weights against CPU f64 products (zero, mixed-sign and cancellation-heavy inputs, 17 rows including partial workgroups). Pipeline creation or numerical guard failures retain the existing head selection; unsupported devices do likewise. Lost devices abort instead of continuing. Reduction order differs: startup success does NOT establish full-checkpoint/token parity. Require real-checkpoint logits/greedy comparisons and repeated S24 wall-clock benchmarks before promotion. No speedup is claimed.
 
 The prior measured head was ~11.6 ms/token under full profiling. Times after disabling profiling cannot be inferred from those individual intervals. Compare wave head off/on with identical settings, profiling off, same inputs, repeated ABBA, and test real generation. Keep existing baseline and do not silently quantize the head.
+
+## S24 measured-default migration (PR8 follow-up)
+
+Only Samsung SM-S921B receives RMSNorm parallel requested by default and GPU
+profiling off. Other models retain serial RMSNorm and full profiling defaults.
+Native RMSNorm capability checks, numeric self-test and fallback remain unchanged.
+
+On first launch of this build, before model/settings initialization, the S24-only
+migration `s24_parallel_norm_profile_v1` atomically writes `parallel_norm=true`,
+`gpu_timestamps=false`, and its completed marker. This deliberately replaces
+older persisted false/full choices, as requested for the measured S24 profile.
+No other preference is changed. The initial status explicitly announces the two
+changes and points to Advanced settings. Subsequent launches never reapply this
+migration, so later user overrides (including false/full) survive reloads and
+updates. Clearing app data creates a fresh install and applies current defaults.
+An interrupted/failed persistence can retry on the next launch.
+
+Unit tests cover fresh installs, legacy false/full values, preservation of
+unrelated preferences, post-migration overrides, and unmeasured devices.
