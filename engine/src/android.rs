@@ -142,6 +142,15 @@ pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setSubgroupHead(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setWaveHead(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_wave_head(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setHeadRows(
     _env: JNIEnv,
     _class: JClass,

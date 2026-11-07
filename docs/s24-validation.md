@@ -32,3 +32,10 @@ Before a speed campaign:
 The UI runs a single foreground task and preserves its ViewModel during
 rotation. Android process termination unloads the model. This initial build
 has no background inference service or conversation database.
+## Experimental one-subgroup-per-row dense head
+
+The 128-thread workgroup assigns one output row to each subgroup. The 2048-wide head uses packed pairs and subgroupAdd, with no LDS reduction or workgroup barrier. This is a distinct alternative to four-row-per-thread dense_subgroup. It is opt-in and takes priority over legacy head settings only when the head input width is exactly 2048 and dispatch limits permit it.
+
+A startup test checks both F16 and BF16 weights against CPU f64 products (zero, mixed-sign and cancellation-heavy inputs, 17 rows including partial workgroups). Pipeline creation or numerical guard failures retain the existing head selection; unsupported devices do likewise. Lost devices abort instead of continuing. Reduction order differs: startup success does NOT establish full-checkpoint/token parity. Require real-checkpoint logits/greedy comparisons and repeated S24 wall-clock benchmarks before promotion. No speedup is claimed.
+
+The prior measured head was ~11.6 ms/token under full profiling. Times after disabling profiling cannot be inferred from those individual intervals. Compare wave head off/on with identical settings, profiling off, same inputs, repeated ABBA, and test real generation. Keep existing baseline and do not silently quantize the head.

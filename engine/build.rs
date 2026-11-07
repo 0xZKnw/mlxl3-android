@@ -11,6 +11,7 @@ fn main() {
         "dense",
         "dense_pair",
         "dense_subgroup",
+        "dense_wave",
         "dense_rows",
         "rms_residual",
         "rms_residual_parallel",
