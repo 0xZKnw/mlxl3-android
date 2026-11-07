@@ -59,6 +59,8 @@ for the 2048→7680 and 7680→2048 shapes. Tapping cycles through global, 1, 2,
 The experimental layer-batch setting cycles through 1, 2 and 4 resident layers
 per submission. It only combines adjacent layers whose GPU paths are enabled;
 cancellation is checked between batches. The default is 1.
+The optional K4/K5 two-tile loop is an experiment, disabled by default. It does
+not guarantee that the driver actually unrolls the loop or improves throughput.
 Android system traces include `MLXL3 upload`, `MLXL3 record commands`,
 `MLXL3 queue submit`, `MLXL3 fence wait`, and `MLXL3 readback` slices. Capture
 them with CPU scheduling and frequency tracks in Perfetto to distinguish CPU

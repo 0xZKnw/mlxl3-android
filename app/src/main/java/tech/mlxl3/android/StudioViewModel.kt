@@ -48,6 +48,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var ffnK4Split by mutableStateOf(prefs.getInt("ffn_k4_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var layerBatch by mutableStateOf(prefs.getInt("layer_batch", 1).takeIf { it in listOf(1, 2, 4) } ?: 1); private set
+    var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -108,6 +109,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         layerBatch = choices[(choices.indexOf(layerBatch) + 1) % choices.size]
         prefs.edit { putInt("layer_batch", layerBatch) }
         status = "Regroupement des couches mis à jour · rechargez le modèle"
+    }
+    fun chooseUnroll2(enabled: Boolean) {
+        if (busy) return
+        unroll2 = enabled
+        prefs.edit { putBoolean("unroll2", enabled) }
+        status = "Boucle K4/K5 expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -174,6 +181,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
         check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
         check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
+        NativeEngine.setUnroll2(unroll2)
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -215,6 +223,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
             check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
             check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
+            NativeEngine.setUnroll2(unroll2)
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

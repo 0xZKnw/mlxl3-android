@@ -67,7 +67,15 @@ void main() {
     uint begin = tiles * split / splits;
     uint end = tiles * (split + 1u) / splits;
     vec2 acc = vec2(0.0);
-    for (uint tile = begin; tile < end; ++tile) {
+#ifdef EXL3_UNROLL2
+    const uint tile_step = 2u;
+#else
+    const uint tile_step = 1u;
+#endif
+    for (uint base_tile = begin; base_tile < end; base_tile += tile_step) {
+      for (uint u = 0u; u < tile_step; ++u) {
+        uint tile = base_tile + u;
+        if (tile >= end) break;
         uint base = (tile * (p.cols / 16u) + gl_WorkGroupID.x) * WORDS;
 #ifdef EXL3_COOPERATIVE_K4
         // K4 has exactly 32 packed words per tile. This variant is selected
@@ -121,6 +129,7 @@ void main() {
         acc.y = fma(inputValues[2], codeword(stateAt(a, 6u), p.codebook), acc.y);
         acc.y = fma(inputValues[3], codeword(stateAt(a, 7u), p.codebook), acc.y);
 #endif
+      }
     }
 #ifdef EXL3_PARTIALS
     uint col = gl_WorkGroupID.x * 16u + lane / 4u;

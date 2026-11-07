@@ -76,6 +76,9 @@ static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
 static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
+static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
+
+pub fn set_unroll2(enabled: bool) { REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed); }
 
 pub fn set_layer_batch(value: u32) -> bool {
     if ![1, 2, 4].contains(&value) {
@@ -541,6 +544,7 @@ pub struct Gpu {
     mcg_attempted: [bool; 8],
     enable_cooperative_k5: bool,
     enable_specialized_mcg: bool,
+    enable_unroll2: bool,
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -838,6 +842,7 @@ impl Gpu {
             mcg_attempted: [false; 8],
             enable_cooperative_k5: REQUESTED_COOPERATIVE_K5.load(Ordering::Relaxed),
             enable_specialized_mcg: REQUESTED_SPECIALIZED_MCG.load(Ordering::Relaxed),
+            enable_unroll2: REQUESTED_UNROLL2.load(Ordering::Relaxed),
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -1333,6 +1338,8 @@ impl Gpu {
             "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
             "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
             "experimental_k5_requested":self.enable_cooperative_k5,"specialized_mcg_requested":self.enable_specialized_mcg,
+            "experimental_unroll2_requested":self.enable_unroll2,
+            "experimental_unroll2_active":self.enable_unroll2 && (self.cooperative_k4_active || self.cooperative_k5_active || self.mcg_cooperative.iter().any(|v| *v)),
             "split_k":self.split_k,
             "ffn_k4_split_override":self.ffn_k4_split,"ffn_k5_split_override":self.ffn_k5_split,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
@@ -1512,10 +1519,11 @@ impl Gpu {
         {
             if !self.mcg_attempted[index] {
                 self.mcg_attempted[index] = true;
-                let bytes: &[u8] = if bits == 4 {
-                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg.spv"))
-                } else {
-                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg.spv"))
+                let bytes: &[u8] = match (bits, self.enable_unroll2) {
+                    (4, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg.spv")),
+                    (4, true) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg_unroll2.spv")),
+                    (5, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg.spv")),
+                    _ => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg_unroll2.spv")),
                 };
                 if let Ok(pipeline) = self.pipeline_with_subgroup(bytes, None, true) {
                     let verified = self.verify_cooperative(bits, pipeline, true);
@@ -1547,10 +1555,11 @@ impl Gpu {
                 && self.native_verified
                 && self.allow_cooperative_k4
             {
-                let bytes: &[u8] = if bits == 4 {
-                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"))
-                } else {
-                    include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative.spv"))
+                let bytes: &[u8] = match (bits, self.enable_unroll2) {
+                    (4, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv")),
+                    (4, true) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative_unroll2.spv")),
+                    (5, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative.spv")),
+                    _ => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative_unroll2.spv")),
                 };
                 match self.pipeline_with_subgroup(bytes, None, true) {
                     Ok(pipeline) => {

@@ -11,6 +11,7 @@ object NativeEngine {
     external fun setGpuAttentionLayer(enabled: Boolean)
     external fun setFfnSplits(k4: Int, k5: Int): Boolean
     external fun setLayerBatch(value: Int): Boolean
+    external fun setUnroll2(enabled: Boolean)
     external fun load(path: String, callback: Callback): String
     external fun generate(messages: String, maxTokens: Int, callback: Callback): String
     external fun cancel()
