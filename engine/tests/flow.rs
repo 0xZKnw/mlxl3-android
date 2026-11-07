@@ -196,6 +196,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     mlxl3_android::vulkan::set_gpu_attention_layer(false);
     assert!(mlxl3_android::vulkan::set_split_k(4));
     let mut experimental = experimental.unwrap();
+    assert_eq!(experimental.model.diagnostics()["gpu_attention_layers"], 2);
     for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {
         let before = experimental.model.gpu.submission_count();
         let actual = experimental
@@ -203,10 +204,22 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
-        assert!(experimental.model.gpu.submission_count() - before < 9);
+        assert_eq!(experimental.model.gpu.submission_count() - before, 4);
         for (value, bits) in actual.iter().zip(&reference[index]) {
             let expected = f32::from_bits(*bits);
             assert!((value - expected).abs() <= 0.001 + expected.abs() * 0.004);
+        }
+    }
+    // Exercise full-attention growth and sliding-cache wrap around positions 255–257.
+    for position in 8..258usize {
+        let token = 3 + (position % 8) as u32;
+        let check = position >= 254;
+        let reference_logits = engine.model.forward(token, check, &cancelled).unwrap();
+        let actual_logits = experimental.model.forward(token, check, &cancelled).unwrap();
+        if check {
+            for (actual, expected) in actual_logits.unwrap().iter().zip(reference_logits.unwrap()) {
+                assert!((actual - expected).abs() <= 0.002 + expected.abs() * 0.01, "position {position}");
+            }
         }
     }
     let messages = [Message {

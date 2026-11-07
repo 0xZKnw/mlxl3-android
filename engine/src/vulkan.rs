@@ -123,9 +123,9 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
-const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 256;
+const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 320;
 const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
-const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 256;
+const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 320;
 
 fn projection_queries(index: usize) -> Option<u32> {
     (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
