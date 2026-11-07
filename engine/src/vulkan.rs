@@ -902,10 +902,9 @@ impl Gpu {
         if force_wave32 {
             extension_names.push(c"VK_EXT_subgroup_size_control".as_ptr());
         }
-        let mut enabled_sizes =
-            vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
-                .subgroup_size_control(true)
-                .compute_full_subgroups(size_features.compute_full_subgroups == vk::TRUE);
+        let mut enabled_sizes = vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
+            .subgroup_size_control(true)
+            .compute_full_subgroups(size_features.compute_full_subgroups == vk::TRUE);
         let mut device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queues);
         if force_wave32 {
             device_info = device_info.push_next(&mut enabled_sizes);
@@ -1011,9 +1010,9 @@ impl Gpu {
                 && subgroup
                     .supported_stages
                     .contains(vk::ShaderStageFlags::COMPUTE)
-                && subgroup.supported_operations.contains(
-                    vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::SHUFFLE,
-                ),
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::SHUFFLE),
             shuffle_hadamard_active: false,
             shuffle_hadamard_self_test: serde_json::json!({"status":"not_requested"}),
             prepared: 0,
@@ -1373,11 +1372,19 @@ impl Gpu {
                 let x: Vec<f32> = (0..count)
                     .map(|i| match case {
                         0 => {
-                            if i % 2 == 0 { 0.0 } else { -0.0 }
+                            if i % 2 == 0 {
+                                0.0
+                            } else {
+                                -0.0
+                            }
                         }
                         1 => ((i * 37 % 251) as f32 - 125.) / 113.,
                         _ => {
-                            if i % 2 == 0 { 0.999 } else { -1.001 }
+                            if i % 2 == 0 {
+                                0.999
+                            } else {
+                                -1.001
+                            }
                         }
                     })
                     .collect();
@@ -1393,9 +1400,11 @@ impl Gpu {
                 }
             }
         }
-        Ok(serde_json::json!({"status":"passed_bit_exact","checked_values":checked,
+        Ok(
+            serde_json::json!({"status":"passed_bit_exact","checked_values":checked,
             "reference":"baseline Vulkan Hadamard; signed scales, padding, phases 0/1/2, split 1/2/4/8",
-            "scope":"startup fixtures; not full-model parity"}))
+            "scope":"startup fixtures; not full-model parity"}),
+        )
     }
 
     fn configure_vector_head(&mut self) -> Result<()> {
@@ -4157,7 +4166,8 @@ impl Gpu {
             && rows.iter().all(|rows| {
                 rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize
             });
-        self.wave_head_active = !self.vector_head_active && self.dense_wave != vk::Pipeline::null()
+        self.wave_head_active = !self.vector_head_active
+            && self.dense_wave != vk::Pipeline::null()
             && input_len == 2048
             && rows.iter().all(|rows| {
                 rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize
@@ -5235,14 +5245,21 @@ mod tests {
             gpu.shuffle_hadamard_requested = true;
             gpu.configure_shuffle_hadamard().unwrap();
             if gpu.shuffle_hadamard_supported {
-                assert!(gpu.shuffle_hadamard_active, "{}", gpu.shuffle_hadamard_self_test);
+                assert!(
+                    gpu.shuffle_hadamard_active,
+                    "{}",
+                    gpu.shuffle_hadamard_self_test
+                );
                 assert_ne!(gpu.hadamard, baseline);
                 assert_eq!(gpu.shuffle_hadamard_self_test["checked_values"], 5376);
                 assert_eq!(gpu.shuffle_hadamard_self_test["status"], "passed_bit_exact");
             } else {
                 assert!(!gpu.shuffle_hadamard_active);
                 assert_eq!(gpu.hadamard, baseline);
-                assert_eq!(gpu.shuffle_hadamard_self_test["status"], "unsupported_subgroup");
+                assert_eq!(
+                    gpu.shuffle_hadamard_self_test["status"],
+                    "unsupported_subgroup"
+                );
             }
         }
     }
