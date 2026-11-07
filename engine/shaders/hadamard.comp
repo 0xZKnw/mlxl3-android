@@ -30,9 +30,13 @@ void main() {
     for (uint stride = 1u; stride < 128u; stride *= 2u) {
         precise float other = block[tid ^ stride];
         value = (tid & stride) == 0u ? value + other : other - value;
-        barrier();
-        block[tid] = value;
-        barrier();
+        // The final butterfly is consumed from the register below; no later
+        // invocation reads block, so its write and both barriers are redundant.
+        if (stride < 64u) {
+            barrier();
+            block[tid] = value;
+            barrier();
+        }
     }
     // Same f32 sqrt(128) and FP16 boundaries as the independent CPU reference.
     value = halfRound(value / uintBitsToFloat(0x413504f3u));
