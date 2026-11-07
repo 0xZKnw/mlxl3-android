@@ -52,6 +52,21 @@ class StudioScreenTest {
         }
     }
 
+    @Test fun gpuProfilingToggleCanBeChangedAndRestored() {
+        val enabled = androidx.compose.runtime.mutableStateOf(true)
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, gpuTimestamps = enabled.value,
+                onGpuTimestamps = { enabled.value = it })
+        }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Profilage GPU : complet · recharger").performScrollTo().performClick()
+        compose.runOnIdle { assertFalse(enabled.value) }
+        compose.onNodeWithText("LFM3 1.7B").performClick()
+        compose.onNodeWithText("Profilage GPU : désactivé · recharger").performScrollTo().performClick()
+        compose.runOnIdle { assertTrue(enabled.value) }
+    }
+
     @Test fun busyStateDisablesInputAndExposesCancellation() {
         compose.setContent { StudioScreen(emptyList(), true, false, "Chargement…", "", null, false, {}, {}, {}, {}, {}, {}) }
         compose.onNodeWithContentDescription("Arrêter la génération").assertIsEnabled()
