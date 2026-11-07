@@ -1,6 +1,6 @@
 use crate::{
     math,
-    vulkan::{AttentionLayerConfig, AttentionLayerPlan, ConvLayerPlan, ConvPlan, Gpu, MlpPlan},
+    vulkan::{AttentionLayerConfig, AttentionLayerPlan, ConvLayerPlan, ConvPlan, Gpu, LayerCopyPlan, MlpPlan, ResidentLayer},
     weights::{Linear, Weights},
 };
 use anyhow::{Context, Result, ensure};
@@ -176,11 +176,25 @@ struct Layer {
     gpu_conv_layer: Option<ConvLayerPlan>,
     gpu_attention_layer: Option<AttentionLayerPlan>,
 }
+
+impl Layer {
+    fn resident(&self) -> Option<ResidentLayer<'_>> {
+        match &self.operator {
+            Operator::Conv(conv) => self.gpu_conv_layer.as_ref().map(|plan| ResidentLayer::Conv(plan, &conv.plan, &self.mlp)),
+            Operator::Attention(attn) => Some(ResidentLayer::Attention(
+                self.gpu_attention_layer.as_ref()?,
+                [attn.q.exl3_ref()?, attn.k.exl3_ref()?, attn.v.exl3_ref()?, attn.output.exl3_ref()?],
+                attn.gate.gate_ref()?, &self.mlp,
+            )),
+        }
+    }
+}
 pub struct Model {
     pub config: Config,
     pub gpu: Gpu,
     weights: Weights,
     layers: Vec<Layer>,
+    layer_links: Vec<Option<LayerCopyPlan>>,
     norm: Vec<f32>,
     head: Linear,
     position: usize,
@@ -394,6 +408,16 @@ impl Model {
                 gpu_attention_layer,
             });
         }
+        let mut layer_links = Vec::new();
+        if gpu.layer_batch_size() > 1 {
+            for pair in layers.windows(2) {
+                let link = match (pair[0].resident(), pair[1].resident()) {
+                    (Some(source), Some(target)) => Some(gpu.prepare_layer_copy(&source, &target, h)?),
+                    _ => None,
+                };
+                layer_links.push(link);
+            }
+        }
         ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
         progress("Loading vocabulary projection…");
         let norm = weights.floats("model.embedding_norm.weight", &[h])?;
@@ -403,6 +427,7 @@ impl Model {
             gpu,
             weights,
             layers,
+            layer_links,
             norm,
             head,
             position: 0,
@@ -441,8 +466,24 @@ impl Model {
                 .embedding_ns
                 .saturating_add(crate::vulkan::elapsed_ns(started))
         });
-        for layer in &mut self.layers {
+        let mut index = 0;
+        while index < self.layers.len() {
             ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
+            if self.gpu.layer_batch_size() > 1 && self.layers[index].resident().is_some() {
+                let mut end = index + 1;
+                while end < self.layers.len() && end - index < self.gpu.layer_batch_size()
+                    && self.layer_links.get(end - 1).is_some_and(Option::is_some)
+                    && self.layers[end].resident().is_some() { end += 1; }
+                if end - index > 1 {
+                    let layers: Vec<_> = self.layers[index..end].iter().map(|l| l.resident().expect("resident layer checked")).collect();
+                    let links: Vec<_> = self.layer_links[index..end-1].iter().map(|l| l.as_ref().expect("resident link checked")).collect();
+                    hidden = self.gpu.forward_resident_batch(&layers, &links, &hidden, self.position)?;
+                    index = end;
+                    continue;
+                }
+            }
+            let layer = &mut self.layers[index];
+            index += 1;
             if let (Some(plan), Operator::Conv(conv)) = (&layer.gpu_conv_layer, &layer.operator) {
                 hidden = self.gpu.forward_conv_layer(
                     plan,

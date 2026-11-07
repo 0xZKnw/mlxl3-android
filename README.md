@@ -56,6 +56,9 @@ values, applies the tokenizer vocabulary mask, and resolves ties by lowest token
 The FFN K4 and K5 menu entries can override the global split count separately
 for the 2048→7680 and 7680→2048 shapes. Tapping cycles through global, 1, 2,
 4 and 8; reload the model to apply. The diagnostic reports effective choices.
+The experimental layer-batch setting cycles through 1, 2 and 4 resident layers
+per submission. It only combines adjacent layers whose GPU paths are enabled;
+cancellation is checked between batches. The default is 1.
 Android system traces include `MLXL3 upload`, `MLXL3 record commands`,
 `MLXL3 queue submit`, `MLXL3 fence wait`, and `MLXL3 readback` slices. Capture
 them with CPU scheduling and frequency tracks in Perfetto to distinguish CPU

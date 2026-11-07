@@ -84,7 +84,7 @@ class MainActivity : ComponentActivity() {
                 model.fastHead, model::chooseFastHead, model.gpuConvLayer, model::chooseGpuConvLayer,
                 model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg,
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
-                model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit)
+                model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch)
         }
     }
 }
@@ -107,7 +107,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  specializedMcg: Boolean = false, onMcg: (Boolean) -> Unit = {},
                  gpuGreedy: Boolean = false, onGpuGreedy: (Boolean) -> Unit = {},
                  gpuAttentionLayer: Boolean = false, onGpuAttentionLayer: (Boolean) -> Unit = {},
-                 ffnK4Split: Int = 0, ffnK5Split: Int = 0, onCycleFfnSplit: (Boolean) -> Unit = {}) {
+                 ffnK4Split: Int = 0, ffnK5Split: Int = 0, onCycleFfnSplit: (Boolean) -> Unit = {},
+                 layerBatch: Int = 1, onCycleLayerBatch: () -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -145,6 +146,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 onClick = { menu = false; onCycleFfnSplit(true) })
                             DropdownMenuItem(text = { Text("FFN K5 : ${if (ffnK5Split == 0) "global" else ffnK5Split} · changer / recharger") },
                                 onClick = { menu = false; onCycleFfnSplit(false) })
+                            DropdownMenuItem(text = { Text("Couches par lot : $layerBatch · changer / recharger") },
+                                onClick = { menu = false; onCycleLayerBatch() })
                             DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onFastHead(!fastHead) })
                             DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },

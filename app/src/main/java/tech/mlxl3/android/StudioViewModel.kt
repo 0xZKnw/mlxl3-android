@@ -47,6 +47,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var gpuAttentionLayer by mutableStateOf(prefs.getBoolean("gpu_attention_layer", false)); private set
     var ffnK4Split by mutableStateOf(prefs.getInt("ffn_k4_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
+    var layerBatch by mutableStateOf(prefs.getInt("layer_batch", 1).takeIf { it in listOf(1, 2, 4) } ?: 1); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -100,6 +101,13 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         if (k4) ffnK4Split = next else ffnK5Split = next
         prefs.edit { putInt(if (k4) "ffn_k4_split" else "ffn_k5_split", next) }
         status = "Réglage FFN mis à jour · rechargez le modèle"
+    }
+    fun cycleLayerBatch() {
+        if (busy) return
+        val choices = listOf(1, 2, 4)
+        layerBatch = choices[(choices.indexOf(layerBatch) + 1) % choices.size]
+        prefs.edit { putInt("layer_batch", layerBatch) }
+        status = "Regroupement des couches mis à jour · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -165,6 +173,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setGpuGreedy(gpuGreedy)
         NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
         check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
+        check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -205,6 +214,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setGpuGreedy(gpuGreedy)
             NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
             check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
+            check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

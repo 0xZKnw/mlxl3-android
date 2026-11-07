@@ -75,9 +75,18 @@ static REQUESTED_GPU_GREEDY: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
 static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
+static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
+
+pub fn set_layer_batch(value: u32) -> bool {
+    if ![1, 2, 4].contains(&value) { return false; }
+    REQUESTED_LAYER_BATCH.store(value, Ordering::Relaxed);
+    true
+}
 
 pub fn set_ffn_splits(k4: u32, k5: u32) -> bool {
-    if ![0, 1, 2, 4, 8].contains(&k4) || ![0, 1, 2, 4, 8].contains(&k5) { return false; }
+    if ![0, 1, 2, 4, 8].contains(&k4) || ![0, 1, 2, 4, 8].contains(&k5) {
+        return false;
+    }
     REQUESTED_FFN_K4_SPLIT.store(k4, Ordering::Relaxed);
     REQUESTED_FFN_K5_SPLIT.store(k5, Ordering::Relaxed);
     true
@@ -262,6 +271,26 @@ pub(crate) struct AttentionLayerConfig<'a> {
     pub theta: f32,
     pub fraction: f32,
 }
+
+pub(crate) enum ResidentLayer<'a> {
+    Conv(&'a ConvLayerPlan, &'a ConvPlan, &'a MlpPlan),
+    Attention(&'a AttentionLayerPlan, [&'a Exl3Matrix; 4], &'a DenseGatePlan, &'a MlpPlan),
+}
+
+impl ResidentLayer<'_> {
+    fn hidden(&self) -> &Buffer {
+        match self { Self::Conv(plan, _, _) => &plan.hidden, Self::Attention(plan, _, _, _) => &plan.hidden }
+    }
+}
+
+pub(crate) struct LayerCopyPlan {
+    command: vk::CommandBuffer,
+    query_first: u32,
+    source: vk::Buffer,
+    target: vk::Buffer,
+}
+
+enum OtherKind { Norm, Attention, Copy }
 
 pub(crate) struct DenseHeadPlan {
     chunks: Vec<(Buffer, usize)>,
@@ -530,9 +559,11 @@ pub struct Gpu {
     norm_rope: vk::Pipeline,
     kv_update: vk::Pipeline,
     attention: vk::Pipeline,
+    copy: vk::Pipeline,
     gpu_conv_layer: bool,
     gpu_greedy: bool,
     gpu_attention_layer: bool,
+    layer_batch: usize,
     partials: Option<Buffer>,
     input: Option<Buffer>,
     rotated: Option<Buffer>,
@@ -762,7 +793,12 @@ impl Gpu {
             .then(|| ash::amd::shader_info::Device::new(&device._instance.raw, &device.raw));
         let requested_split_k = REQUESTED_SPLIT_K.load(Ordering::Relaxed);
         let max_split = if props.limits.max_compute_work_group_count[1] >= 8
-            && props.limits.max_storage_buffer_range >= 32768 * 32 * 4 { 8 } else { 4 };
+            && props.limits.max_storage_buffer_range >= 32768 * 32 * 4
+        {
+            8
+        } else {
+            4
+        };
         let ffn_k4_split = REQUESTED_FFN_K4_SPLIT.load(Ordering::Relaxed);
         let ffn_k5_split = REQUESTED_FFN_K5_SPLIT.load(Ordering::Relaxed);
         let mut gpu = Self {
@@ -816,8 +852,16 @@ impl Gpu {
             } else {
                 4
             },
-            ffn_k4_split: if ffn_k4_split <= max_split { ffn_k4_split } else { 0 },
-            ffn_k5_split: if ffn_k5_split <= max_split { ffn_k5_split } else { 0 },
+            ffn_k4_split: if ffn_k4_split <= max_split {
+                ffn_k4_split
+            } else {
+                0
+            },
+            ffn_k5_split: if ffn_k5_split <= max_split {
+                ffn_k5_split
+            } else {
+                0
+            },
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
@@ -835,9 +879,11 @@ impl Gpu {
             norm_rope: vk::Pipeline::null(),
             kv_update: vk::Pipeline::null(),
             attention: vk::Pipeline::null(),
+            copy: vk::Pipeline::null(),
             gpu_conv_layer: REQUESTED_GPU_CONV_LAYER.load(Ordering::Relaxed),
             gpu_greedy: REQUESTED_GPU_GREEDY.load(Ordering::Relaxed),
             gpu_attention_layer: REQUESTED_GPU_ATTENTION_LAYER.load(Ordering::Relaxed),
+            layer_batch: REQUESTED_LAYER_BATCH.load(Ordering::Relaxed) as usize,
             partials: None,
             input: None,
             rotated: None,
@@ -985,7 +1031,15 @@ impl Gpu {
         gpu.norm_rope = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/norm_rope.spv")))?;
         gpu.kv_update = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/kv_update.spv")))?;
         gpu.attention = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/attention.spv")))?;
-        let partial_bytes = 32768 * 4 * gpu.split_k.max(gpu.ffn_k4_split).max(gpu.ffn_k5_split).max(4) as usize * 4;
+        gpu.copy = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/copy.spv")))?;
+        let partial_bytes = 32768
+            * 4
+            * gpu
+                .split_k
+                .max(gpu.ffn_k4_split)
+                .max(gpu.ffn_k5_split)
+                .max(4) as usize
+            * 4;
         gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
         gpu.hadamard = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/hadamard.spv")))?;
@@ -1257,6 +1311,7 @@ impl Gpu {
             "gpu_conv_layer_experimental":self.gpu_conv_layer,
             "gpu_greedy_requested":self.gpu_greedy,
             "gpu_attention_layer_experimental":self.gpu_attention_layer,
+            "gpu_layer_batch_size":self.layer_batch,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
@@ -1348,7 +1403,11 @@ impl Gpu {
             (7680, 2048, 5) => self.ffn_k5_split,
             _ => 0,
         };
-        if selected == 0 { self.split_k } else { selected }
+        if selected == 0 {
+            self.split_k
+        } else {
+            selected
+        }
     }
 
     pub(crate) fn dense_timing_snapshot(&self) -> (u64, u64) {
@@ -2185,6 +2244,93 @@ impl Gpu {
         self.gpu_attention_layer
     }
 
+    pub(crate) fn layer_batch_size(&self) -> usize { self.layer_batch }
+
+    pub(crate) fn prepare_layer_copy(&self, source: &ResidentLayer<'_>, target: &ResidentLayer<'_>, size: usize) -> Result<LayerCopyPlan> {
+        ensure!(size > 0 && size <= 32768 && source.hidden().raw != target.hidden().raw
+            && source.hidden().size >= size * 4 && target.hidden().size >= size * 4
+            && Arc::ptr_eq(&source.hidden().device, &self.device) && Arc::ptr_eq(&target.hidden().device, &self.device),
+            "Invalid resident layer link");
+        let weights = self.codebooks.as_ref().context("GPU codebooks unavailable")?;
+        let (command, query_first) = self.prepare_operator(Dispatch {
+            input: source.hidden(), weights, output: target.hidden(), aux: None,
+            params: [size as u32, 0, 0, 0], outputs: size,
+            groups: size.div_ceil(128) as u32, groups_y: 1, pipeline: self.copy, barrier_after: true,
+        })?;
+        Ok(LayerCopyPlan { command, query_first, source: source.hidden().raw, target: target.hidden().raw })
+    }
+
+    pub(crate) fn forward_resident_batch(
+        &self, layers: &[ResidentLayer<'_>], links: &[&LayerCopyPlan], x: &[f32], position: usize,
+    ) -> Result<Vec<f32>> {
+        ensure!((2..=4).contains(&layers.len()) && links.len() + 1 == layers.len() &&
+            position < 2048 && x.iter().all(|v| v.is_finite()), "Invalid resident layer batch");
+        for (i, link) in links.iter().enumerate() {
+            ensure!(link.source == layers[i].hidden().raw && link.target == layers[i+1].hidden().raw,
+                "Resident layer link mismatch");
+        }
+        let first = layers.first().context("Missing first layer")?;
+        ensure!(first.hidden().size >= x.len() * 4, "Invalid resident input shape");
+        let started = Instant::now();
+        let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        first.hidden().write(&bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        let mut commands = Vec::new();
+        for (i, layer) in layers.iter().enumerate() {
+            match layer {
+                ResidentLayer::Conv(plan, conv, mlp) => {
+                    ensure!(Arc::ptr_eq(&plan.device, &self.device) && plan.size == x.len() &&
+                        plan.conv_input == conv.input.command && plan.mlp_gate == mlp.gate.command,
+                        "Invalid convolution batch layer");
+                    conv.state.write(&(position as u32).to_ne_bytes())?;
+                    commands.extend_from_slice(&[plan.commands[0], conv.input.command, conv.convolve, conv.output.command,
+                        plan.commands[1], plan.commands[2], mlp.gate.command, mlp.up.command,
+                        mlp.activate, mlp.down.command, plan.commands[3]]);
+                }
+                ResidentLayer::Attention(plan, matrices, gate, mlp) => {
+                    let [q, k, v, output] = *matrices;
+                    ensure!(Arc::ptr_eq(&plan.device, &self.device) && plan.heads * plan.dim == x.len() &&
+                        plan.identities == [q.command, k.command, v.command, output.command, gate.command, mlp.gate.command],
+                        "Invalid attention batch layer");
+                    self.prepare_attention_state(plan, position)?;
+                    commands.extend_from_slice(&[plan.commands[0], q.command, k.command, v.command, plan.commands[1],
+                        plan.commands[2], plan.commands[3], plan.commands[4], plan.commands[5], output.command,
+                        plan.commands[6], plan.commands[7], mlp.gate.command, mlp.up.command,
+                        mlp.activate, mlp.down.command, plan.commands[8]]);
+                }
+            }
+            if i < links.len() { commands.push(links[i].command); }
+        }
+        self.submit_graph(&commands, Instant::now())?;
+        for layer in layers {
+            match layer {
+                ResidentLayer::Conv(plan, conv, mlp) => {
+                    for matrix in [&conv.input, &conv.output, &mlp.gate, &mlp.up, &mlp.down] {
+                        self.collect_timestamps(Some(matrix.query_first));
+                    }
+                    self.collect_interval(conv.convolve_query, Some(true));
+                    self.collect_interval(mlp.activate_query, Some(false));
+                    for query in plan.query_firsts { self.collect_other_interval(query, OtherKind::Norm); }
+                }
+                ResidentLayer::Attention(plan, matrices, _, mlp) => {
+                    let [q, k, v, output] = *matrices;
+                    for matrix in [q, k, v, output, &mlp.gate, &mlp.up, &mlp.down] {
+                        self.collect_timestamps(Some(matrix.query_first));
+                    }
+                    self.collect_gate_interval(plan.query_firsts[1]);
+                    for i in [2usize, 3, 4, 5] { self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention); }
+                    for i in [0usize, 6, 7, 8] { self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm); }
+                    self.collect_interval(mlp.activate_query, Some(false));
+                }
+            }
+        }
+        for link in links { self.collect_other_interval(link.query_first, OtherKind::Copy); }
+        let started = Instant::now();
+        let result = layers.last().context("Missing final layer")?.hidden().read_f32(x.len());
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        result
+    }
+
     pub(crate) fn prepare_attention_layer(
         &mut self,
         c: AttentionLayerConfig<'_>,
@@ -2424,33 +2570,7 @@ impl Gpu {
         })
     }
 
-    pub(crate) fn forward_attention_layer(
-        &self,
-        plan: &AttentionLayerPlan,
-        matrices: [&Exl3Matrix; 4],
-        gate: &DenseGatePlan,
-        mlp: &MlpPlan,
-        x: &[f32],
-        position: usize,
-    ) -> Result<Vec<f32>> {
-        let [q, k, v, output] = matrices;
-        ensure!(
-            Arc::ptr_eq(&plan.device, &self.device)
-                && position < 2048
-                && plan.identities
-                    == [
-                        q.command,
-                        k.command,
-                        v.command,
-                        output.command,
-                        gate.command,
-                        mlp.gate.command
-                    ]
-                && x.len() == plan.heads * plan.dim
-                && plan.kv_heads > 0
-                && x.iter().all(|v| v.is_finite()),
-            "Invalid resident attention input"
-        );
+    fn prepare_attention_state(&self, plan: &AttentionLayerPlan, position: usize) -> Result<()> {
         let mut q_data = vec![0f32; plan.dim * 2];
         let mut k_data = vec![0f32; plan.dim * 2];
         q_data[..plan.dim].copy_from_slice(&plan.q_weights);
@@ -2490,14 +2610,47 @@ impl Gpu {
             }
         });
         let started = Instant::now();
-        let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let q_bytes: Vec<u8> = q_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let k_bytes: Vec<u8> = k_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        plan.hidden.write(&hidden_bytes)?;
         plan.q_data.write(&q_bytes)?;
         plan.k_data.write(&k_bytes)?;
         plan.cache.write(&(position as u32).to_ne_bytes())?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        Ok(())
+    }
+
+    pub(crate) fn forward_attention_layer(
+        &self,
+        plan: &AttentionLayerPlan,
+        matrices: [&Exl3Matrix; 4],
+        gate: &DenseGatePlan,
+        mlp: &MlpPlan,
+        x: &[f32],
+        position: usize,
+    ) -> Result<Vec<f32>> {
+        let [q, k, v, output] = matrices;
+        ensure!(
+            Arc::ptr_eq(&plan.device, &self.device)
+                && position < 2048
+                && plan.identities
+                    == [
+                        q.command,
+                        k.command,
+                        v.command,
+                        output.command,
+                        gate.command,
+                        mlp.gate.command
+                    ]
+                && x.len() == plan.heads * plan.dim
+                && plan.kv_heads > 0
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid resident attention input"
+        );
+        let started = Instant::now();
+        let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        plan.hidden.write(&hidden_bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        self.prepare_attention_state(plan, position)?;
         self.submit_graph(
             &[
                 plan.commands[0],
@@ -2525,10 +2678,10 @@ impl Gpu {
         }
         self.collect_gate_interval(plan.query_firsts[1]);
         for i in [2usize, 3, 4, 5] {
-            self.collect_other_interval(plan.query_firsts[i], true);
+            self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention);
         }
         for i in [0usize, 6, 7, 8] {
-            self.collect_other_interval(plan.query_firsts[i], false);
+            self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm);
         }
         self.collect_interval(mlp.activate_query, Some(false));
         let started = Instant::now();
@@ -2654,7 +2807,7 @@ impl Gpu {
         self.collect_interval(conv.convolve_query, Some(true));
         self.collect_interval(mlp.activate_query, Some(false));
         for query in plan.query_firsts {
-            self.collect_other_interval(query, false);
+            self.collect_other_interval(query, OtherKind::Norm);
         }
         let started = Instant::now();
         let output = plan.hidden.read_f32(plan.size);
@@ -2662,7 +2815,7 @@ impl Gpu {
         output
     }
 
-    fn collect_other_interval(&self, query_first: u32, attention: bool) {
+    fn collect_other_interval(&self, query_first: u32, kind: OtherKind) {
         if self.queries == vk::QueryPool::null() {
             return;
         }
@@ -2685,16 +2838,19 @@ impl Gpu {
                             as u64;
                         p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
                         p.device_other_ns = p.device_other_ns.saturating_add(ns);
-                        if attention {
-                            p.device_attention_gpu_ns =
-                                p.device_attention_gpu_ns.saturating_add(ns);
-                            p.device_attention_gpu_samples =
-                                p.device_attention_gpu_samples.saturating_add(1);
-                        } else {
-                            p.device_norm_residual_ns =
-                                p.device_norm_residual_ns.saturating_add(ns);
-                            p.device_norm_residual_samples =
-                                p.device_norm_residual_samples.saturating_add(1);
+                        match kind {
+                            OtherKind::Attention => {
+                                p.device_attention_gpu_ns = p.device_attention_gpu_ns.saturating_add(ns);
+                                p.device_attention_gpu_samples = p.device_attention_gpu_samples.saturating_add(1);
+                            }
+                            OtherKind::Norm => {
+                                p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
+                                p.device_norm_residual_samples = p.device_norm_residual_samples.saturating_add(1);
+                            }
+                            OtherKind::Copy => {
+                                p.device_layer_copy_ns = p.device_layer_copy_ns.saturating_add(ns);
+                                p.device_layer_copy_samples = p.device_layer_copy_samples.saturating_add(1);
+                            }
                         }
                         p.device_samples = p.device_samples.saturating_add(1);
                     }
@@ -3427,6 +3583,7 @@ impl Drop for Gpu {
             d.destroy_pipeline(self.norm_rope, None);
             d.destroy_pipeline(self.kv_update, None);
             d.destroy_pipeline(self.attention, None);
+            d.destroy_pipeline(self.copy, None);
             d.destroy_pipeline(self.hadamard, None);
             d.destroy_query_pool(self.queries, None);
             d.destroy_pipeline_layout(self.layout, None);

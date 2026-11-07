@@ -15,6 +15,7 @@ fn main() {
         "norm_rope",
         "kv_update",
         "attention",
+        "copy",
         "reduce",
         "swiglu",
         "convolution",

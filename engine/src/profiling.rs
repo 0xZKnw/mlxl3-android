@@ -101,6 +101,8 @@ pub struct Profile {
     pub device_norm_residual_samples: u64,
     pub device_attention_gpu_ns: u64,
     pub device_attention_gpu_samples: u64,
+    pub device_layer_copy_ns: u64,
+    pub device_layer_copy_samples: u64,
     pub device_samples: u64,
     pub device_exl3_samples: u64,
     pub device_exl3_input_ns: u64,
