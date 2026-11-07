@@ -180,6 +180,26 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         assert!(last.iter().all(|v| v.is_finite()));
         assert!(last.iter().any(|v| v.abs() > 0.01));
     }
+    // Exercise the experimental combination through the complete reduced model,
+    // not just isolated shaders. Reset global defaults immediately after load.
+    mlxl3_android::vulkan::set_gpu_conv_layer(true);
+    mlxl3_android::vulkan::set_fast_head(true);
+    assert!(mlxl3_android::vulkan::set_split_k(8));
+    let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
+    mlxl3_android::vulkan::set_gpu_conv_layer(false);
+    mlxl3_android::vulkan::set_fast_head(false);
+    assert!(mlxl3_android::vulkan::set_split_k(4));
+    let mut experimental = experimental.unwrap();
+    for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {
+        let before = experimental.model.gpu.submission_count();
+        let actual = experimental.model.forward(token, true, &cancelled).unwrap().unwrap();
+        assert!(experimental.model.gpu.submission_count() - before < 9);
+        for (value, bits) in actual.iter().zip(&reference[index]) {
+            let expected = f32::from_bits(*bits);
+            assert!((value - expected).abs() <= 0.001 + expected.abs() * 0.004);
+        }
+    }
+    drop(experimental);
     engine.model.reset();
     let first = engine.model.forward(3, true, &cancelled).unwrap().unwrap();
     assert_ne!(first, last);
