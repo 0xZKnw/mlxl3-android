@@ -53,6 +53,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
+    var parallelNorm by mutableStateOf(prefs.getBoolean("parallel_norm", false)); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -133,6 +134,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         prefs.edit { putInt("head_rows", headRows) }
         status = "Lignes de la tête mises à jour · rechargez le modèle"
     }
+    fun chooseParallelNorm(enabled: Boolean) {
+        if (busy) return
+        parallelNorm = enabled
+        prefs.edit { putBoolean("parallel_norm", enabled) }
+        status = "Normalisations parallèles ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
+    }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
     private fun environment(): JSONObject = runCatching {
@@ -207,6 +214,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setUnroll2(unroll2)
         NativeEngine.setSubgroupHead(subgroupHead)
         check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
+        NativeEngine.setParallelNorm(parallelNorm)
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -251,6 +259,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setUnroll2(unroll2)
             NativeEngine.setSubgroupHead(subgroupHead)
             check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
+            NativeEngine.setParallelNorm(parallelNorm)
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)
