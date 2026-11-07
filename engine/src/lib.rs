@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[cfg(target_os = "android")]
 mod android;
 pub mod codec;
@@ -134,7 +136,10 @@ impl Engine {
         let result = (|| {
             let started = Instant::now();
             let prefill_submissions = self.model.gpu.submission_count();
-            enum Next { Token(u32), Logits(Vec<f32>) }
+            enum Next {
+                Token(u32),
+                Logits(Vec<f32>),
+            }
             let mut next = None;
             for (i, token) in prompt.iter().enumerate() {
                 ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
@@ -147,7 +152,9 @@ impl Engine {
                 next = if i + 1 == prompt.len() && self.gpu_greedy {
                     Some(Next::Token(self.model.forward_gpu_greedy(*token, cancel)?))
                 } else {
-                    self.model.forward(*token, i + 1 == prompt.len(), cancel)?.map(Next::Logits)
+                    self.model
+                        .forward(*token, i + 1 == prompt.len(), cancel)?
+                        .map(Next::Logits)
                 };
                 self.model.gpu.record_profile(|p| {
                     p.model_ns = p.model_ns.saturating_add(vulkan::elapsed_ns(evaluated))
@@ -185,7 +192,11 @@ impl Engine {
                     next = if self.gpu_greedy {
                         Next::Token(self.model.forward_gpu_greedy(token, cancel)?)
                     } else {
-                        Next::Logits(self.model.forward(token, true, cancel)?.context("Missing decode logits")?)
+                        Next::Logits(
+                            self.model
+                                .forward(token, true, cancel)?
+                                .context("Missing decode logits")?,
+                        )
                     };
                     self.model.gpu.record_profile(|p| {
                         p.model_ns = p.model_ns.saturating_add(vulkan::elapsed_ns(evaluated))

@@ -184,10 +184,16 @@ impl Linear {
 
     pub(crate) fn forward_gpu_greedy(&self, gpu: &mut Gpu, x: &[f32]) -> Result<u32> {
         ensure!(x.len() == self.input, "Linear input shape mismatch");
-        let Storage::Head(plan) = &self.storage else { anyhow::bail!("GPU greedy requires a dense head") };
+        let Storage::Head(plan) = &self.storage else {
+            anyhow::bail!("GPU greedy requires a dense head")
+        };
         let started = std::time::Instant::now();
         let rounded: Vec<f32> = x.iter().copied().map(math::half).collect();
-        gpu.record_profile(|p| p.projection_cpu_ns = p.projection_cpu_ns.saturating_add(crate::vulkan::elapsed_ns(started)));
+        gpu.record_profile(|p| {
+            p.projection_cpu_ns = p
+                .projection_cpu_ns
+                .saturating_add(crate::vulkan::elapsed_ns(started))
+        });
         let before = gpu.dense_timing_snapshot();
         let token = gpu.forward_greedy_head(plan, &rounded)?;
         gpu.record_head_timing(before);

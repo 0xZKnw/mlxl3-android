@@ -461,7 +461,12 @@ impl Model {
         Ok(hidden)
     }
 
-    pub fn forward(&mut self, token: u32, logits: bool, cancel: &AtomicBool) -> Result<Option<Vec<f32>>> {
+    pub fn forward(
+        &mut self,
+        token: u32,
+        logits: bool,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Vec<f32>>> {
         let hidden = self.advance(token, cancel)?;
         if logits {
             let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
@@ -481,10 +486,11 @@ impl Model {
         let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
         let started = std::time::Instant::now();
         let result = self.head.forward_gpu_greedy(&mut self.gpu, &hidden)?;
-        self.gpu.record_profile(|p| p.head_ns = p.head_ns.saturating_add(crate::vulkan::elapsed_ns(started)));
+        self.gpu.record_profile(|p| {
+            p.head_ns = p.head_ns.saturating_add(crate::vulkan::elapsed_ns(started))
+        });
         Ok(result)
     }
-
 }
 
 #[cfg(test)]

@@ -385,7 +385,10 @@ impl Buffer {
     }
 
     fn read_u32(&self, count: usize) -> Result<Vec<u32>> {
-        ensure!(count.checked_mul(4).is_some_and(|n| n <= self.size), "GPU buffer read exceeds allocation");
+        ensure!(
+            count.checked_mul(4).is_some_and(|n| n <= self.size),
+            "GPU buffer read exceeds allocation"
+        );
         let mut output = vec![0u32; count];
         self.with_mapping(|ptr| unsafe {
             std::ptr::copy_nonoverlapping(ptr.cast::<u32>(), output.as_mut_ptr(), count);
@@ -2416,45 +2419,104 @@ impl Gpu {
         Ok(result)
     }
 
-    pub(crate) fn prepare_greedy_head(&mut self, plan: &mut DenseHeadPlan, vocabulary: &[u32]) -> Result<()> {
-        ensure!(!vocabulary.is_empty() && vocabulary.iter().all(|id| (*id as usize) < plan.total), "Invalid vocabulary");
+    pub(crate) fn prepare_greedy_head(
+        &mut self,
+        plan: &mut DenseHeadPlan,
+        vocabulary: &[u32],
+    ) -> Result<()> {
+        ensure!(
+            !vocabulary.is_empty() && vocabulary.iter().all(|id| (*id as usize) < plan.total),
+            "Invalid vocabulary"
+        );
         let mut mask = vec![0u32; plan.total];
-        for &id in vocabulary { mask[id as usize] = 1; }
+        for &id in vocabulary {
+            mask[id as usize] = 1;
+        }
         let mask_bytes: Vec<u8> = mask.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let mask = self.buffer(&mask_bytes)?;
-        let results = (0..plan.chunks.len()).map(|_| self.mapped_buffer(16)).collect::<Result<Vec<_>>>()?;
+        let results = (0..plan.chunks.len())
+            .map(|_| self.mapped_buffer(16))
+            .collect::<Result<Vec<_>>>()?;
         let layouts = vec![self.set_layout; plan.chunks.len() * 2];
-        let command = unsafe { self.device.raw.allocate_command_buffers(
-            &vk::CommandBufferAllocateInfo::default().command_pool(self.pool)
-                .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1),
-        )? }[0];
-        let sets = unsafe { self.device.raw.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.descriptor_pool).set_layouts(&layouts),
-        )? };
+        let command = unsafe {
+            self.device.raw.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?
+        }[0];
+        let sets = unsafe {
+            self.device.raw.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.descriptor_pool)
+                    .set_layouts(&layouts),
+            )?
+        };
         let input = self.input.as_ref().context("GPU input unavailable")?;
         let mut jobs = Vec::with_capacity(plan.chunks.len() * 2);
         for (i, ((weights, rows), output)) in plan.chunks.iter().zip(&plan.outputs).enumerate() {
-            jobs.push(Dispatch { input, weights, output, params: [plan.input_len as u32, *rows as u32, plan.dtype, 0],
-                outputs: *rows, groups: dense_groups(*rows).context("Invalid head shape")?, groups_y: 1,
-                pipeline: if self.fast_head { self.dense_pair } else { self.dense },
-                barrier_after: i + 1 == plan.chunks.len() });
+            jobs.push(Dispatch {
+                input,
+                weights,
+                output,
+                params: [plan.input_len as u32, *rows as u32, plan.dtype, 0],
+                outputs: *rows,
+                groups: dense_groups(*rows).context("Invalid head shape")?,
+                groups_y: 1,
+                pipeline: if self.fast_head {
+                    self.dense_pair
+                } else {
+                    self.dense
+                },
+                barrier_after: i + 1 == plan.chunks.len(),
+            });
         }
         let mut offset = 0usize;
         for (((_, rows), logits), result) in plan.chunks.iter().zip(&plan.outputs).zip(&results) {
-            jobs.push(Dispatch { input: logits, weights: &mask, output: result,
-                params: [*rows as u32, offset as u32, 0, 0], outputs: 1, groups: 1, groups_y: 1,
-                pipeline: self.greedy, barrier_after: false });
+            jobs.push(Dispatch {
+                input: logits,
+                weights: &mask,
+                output: result,
+                params: [*rows as u32, offset as u32, 0, 0],
+                outputs: 1,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.greedy,
+                barrier_after: false,
+            });
             offset += rows;
         }
-        self.record_jobs(command, &sets, &jobs, vk::CommandBufferUsageFlags::empty(), None)?;
-        plan.greedy = Some(GreedyPlan { _mask: mask, results, command });
+        self.record_jobs(
+            command,
+            &sets,
+            &jobs,
+            vk::CommandBufferUsageFlags::empty(),
+            None,
+        )?;
+        plan.greedy = Some(GreedyPlan {
+            _mask: mask,
+            results,
+            command,
+        });
         Ok(())
     }
 
     pub(crate) fn forward_greedy_head(&self, plan: &DenseHeadPlan, x: &[f32]) -> Result<u32> {
-        ensure!(x.len() == plan.input_len && x.iter().all(|v| v.is_finite()), "Invalid dense head input");
-        ensure!(plan.chunks.iter().all(|(w, _)| Arc::ptr_eq(&w.device, &self.device)), "Dense head belongs to another GPU");
-        let greedy = plan.greedy.as_ref().context("GPU vocabulary not prepared")?;
+        ensure!(
+            x.len() == plan.input_len && x.iter().all(|v| v.is_finite()),
+            "Invalid dense head input"
+        );
+        ensure!(
+            plan.chunks
+                .iter()
+                .all(|(w, _)| Arc::ptr_eq(&w.device, &self.device)),
+            "Dense head belongs to another GPU"
+        );
+        let greedy = plan
+            .greedy
+            .as_ref()
+            .context("GPU vocabulary not prepared")?;
         self.upload(x)?;
         self.submit(&[greedy.command], Instant::now())?;
         self.collect_timestamps(None);
@@ -2465,8 +2527,13 @@ impl Gpu {
             ensure!(values[2] == 0, "Non-finite head output");
             if values[3] != 0 {
                 let candidate = (f32::from_bits(values[0]), values[1]);
-                ensure!(candidate.0.is_finite() && (candidate.1 as usize) < plan.total, "Invalid GPU greedy result");
-                if best.is_none_or(|(score, id)| candidate.0 > score || (candidate.0 == score && candidate.1 < id)) {
+                ensure!(
+                    candidate.0.is_finite() && (candidate.1 as usize) < plan.total,
+                    "Invalid GPU greedy result"
+                );
+                if best.is_none_or(|(score, id)| {
+                    candidate.0 > score || (candidate.0 == score && candidate.1 < id)
+                }) {
                     best = Some(candidate);
                 }
             }
@@ -2892,14 +2959,29 @@ mod tests {
     #[ignore = "requires Vulkan; greedy mask, ties and nonfinite checks"]
     fn resident_gpu_greedy_matches_cpu_and_rejects_nonfinite() {
         let mut gpu = Gpu::new().unwrap();
-        let bytes = |values: &[f32]| values.iter().flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes()).collect::<Vec<_>>();
-        let chunks = vec![(gpu.buffer(&bytes(&[1., 2., 2.])).unwrap(), 3),
-            (gpu.buffer(&bytes(&[3., 0.])).unwrap(), 2)];
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let chunks = vec![
+            (gpu.buffer(&bytes(&[1., 2., 2.])).unwrap(), 3),
+            (gpu.buffer(&bytes(&[3., 0.])).unwrap(), 2),
+        ];
         let mut plan = gpu.prepare_dense_head(chunks, 1, 0).unwrap();
         let vocabulary = [1u32, 2u32];
         gpu.prepare_greedy_head(&mut plan, &vocabulary).unwrap();
-        let logits: Vec<f32> = gpu.forward_dense_head(&plan, &[1.]).unwrap().into_iter().map(crate::math::half).collect();
-        assert_eq!(gpu.forward_greedy_head(&plan, &[1.]).unwrap(), crate::math::greedy_in_vocabulary(&logits, &vocabulary).unwrap());
+        let logits: Vec<f32> = gpu
+            .forward_dense_head(&plan, &[1.])
+            .unwrap()
+            .into_iter()
+            .map(crate::math::half)
+            .collect();
+        assert_eq!(
+            gpu.forward_greedy_head(&plan, &[1.]).unwrap(),
+            crate::math::greedy_in_vocabulary(&logits, &vocabulary).unwrap()
+        );
         assert_eq!(gpu.forward_greedy_head(&plan, &[1.]).unwrap(), 1);
         let chunks = vec![(gpu.buffer(&bytes(&[65504., 1.])).unwrap(), 2)];
         let mut plan = gpu.prepare_dense_head(chunks, 1, 0).unwrap();

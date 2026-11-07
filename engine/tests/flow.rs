@@ -212,10 +212,16 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         content: "Hello".into(),
     }];
     let mut experimental_events = vec![];
-    experimental.generate(&messages, 4, &cancelled, &mut |event| {
-        experimental_events.push(event); Ok(())
-    }).unwrap();
-    assert_eq!(experimental_events.last().unwrap()["performance"]["generation"]["gpu_greedy"], true);
+    experimental
+        .generate(&messages, 4, &cancelled, &mut |event| {
+            experimental_events.push(event);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        experimental_events.last().unwrap()["performance"]["generation"]["gpu_greedy"],
+        true
+    );
     drop(experimental);
     engine.model.reset();
     let first = engine.model.forward(3, true, &cancelled).unwrap().unwrap();
@@ -232,9 +238,13 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             Ok(())
         })
         .unwrap();
-    let text_events = |events: &[serde_json::Value]| events.iter()
-        .filter(|e| e["type"] == "text")
-        .map(|e| e["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let text_events = |events: &[serde_json::Value]| {
+        events
+            .iter()
+            .filter(|e| e["type"] == "text")
+            .map(|e| e["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
     assert_eq!(text_events(&experimental_events), text_events(&events));
     assert!(
         events
