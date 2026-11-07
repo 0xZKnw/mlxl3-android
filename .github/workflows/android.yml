@@ -124,6 +124,7 @@ jobs:
           sudo apt-get install -y --no-upgrade --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
       - name: EXL3 projection and complete reduced-model tests
         run: |
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::multiwave_shared -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::native_codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1

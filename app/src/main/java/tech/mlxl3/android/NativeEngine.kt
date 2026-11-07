@@ -11,11 +11,13 @@ object NativeEngine {
     external fun setGpuAttentionLayer(enabled: Boolean)
     external fun setFfnSplits(k4: Int, k5: Int): Boolean
     external fun setLayerBatch(value: Int): Boolean
+    external fun setExl3Multiwave(enabled: Boolean)
     external fun setUnroll2(enabled: Boolean)
     external fun setSubgroupHead(enabled: Boolean)
     external fun setWaveHead(enabled: Boolean)
     external fun setHeadRows(value: Int): Boolean
     external fun setGpuTimestamps(enabled: Boolean)
+    external fun setSubgroupNorm(enabled: Boolean)
     external fun setParallelNorm(enabled: Boolean)
     external fun load(path: String, callback: Callback): String
     external fun benchmark(callback: Callback): String

@@ -76,6 +76,7 @@ static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
 static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
+static REQUESTED_EXL3_MULTIWAVE: AtomicBool = AtomicBool::new(false);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_WAVE_HEAD: AtomicBool = AtomicBool::new(false);
@@ -85,6 +86,13 @@ static REQUESTED_GPU_TIMESTAMPS: AtomicBool = AtomicBool::new(true);
 /// Applies when the next model is loaded. Wall-clock timings remain available.
 pub fn set_gpu_timestamps(enabled: bool) {
     REQUESTED_GPU_TIMESTAMPS.store(enabled, Ordering::Relaxed);
+}
+
+static REQUESTED_SUBGROUP_NORM: AtomicBool = AtomicBool::new(false);
+
+/// Experimental; applies at the next model load, guarded by a numerical self-test.
+pub fn set_subgroup_norm(enabled: bool) {
+    REQUESTED_SUBGROUP_NORM.store(enabled, Ordering::Relaxed);
 }
 
 static REQUESTED_PARALLEL_NORM: AtomicBool = AtomicBool::new(false);
@@ -110,12 +118,19 @@ pub fn set_subgroup_head(enabled: bool) {
     REQUESTED_SUBGROUP_HEAD.store(enabled, Ordering::Relaxed);
 }
 
+/// Experimental four-wave shared-activation kernel. Applies on model reload.
+pub fn set_exl3_multiwave(enabled: bool) {
+    REQUESTED_EXL3_MULTIWAVE.store(enabled, Ordering::Relaxed);
+}
+
 pub fn set_unroll2(enabled: bool) {
     REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed);
 }
 
+/// Larger batches retain intermediate hidden states on the GPU. Opt-in until
+/// measured on the target device; cancellation is checked between batches.
 pub fn set_layer_batch(value: u32) -> bool {
-    if ![1, 2, 4].contains(&value) {
+    if ![1, 2, 4, 8, 12, 24].contains(&value) {
         return false;
     }
     REQUESTED_LAYER_BATCH.store(value, Ordering::Relaxed);
@@ -581,6 +596,9 @@ pub struct Gpu {
     enable_cooperative_k5: bool,
     enable_specialized_mcg: bool,
     enable_unroll2: bool,
+    enable_multiwave: bool,
+    multiwave: [vk::Pipeline; 2],
+    multiwave_checked: [bool; 2],
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -619,6 +637,10 @@ pub struct Gpu {
     convolution: vk::Pipeline,
     rms_residual: vk::Pipeline,
     gpu_timestamps_requested: bool,
+    subgroup_norm_requested: bool,
+    subgroup_norm_supported: bool,
+    subgroup_norm_active: bool,
+    subgroup_norm_self_test: serde_json::Value,
     parallel_norm_requested: bool,
     parallel_norm_active: bool,
     parallel_norm_self_test: serde_json::Value,
@@ -899,6 +921,9 @@ impl Gpu {
             enable_cooperative_k5: REQUESTED_COOPERATIVE_K5.load(Ordering::Relaxed),
             enable_specialized_mcg: REQUESTED_SPECIALIZED_MCG.load(Ordering::Relaxed),
             enable_unroll2: REQUESTED_UNROLL2.load(Ordering::Relaxed),
+            enable_multiwave: REQUESTED_EXL3_MULTIWAVE.load(Ordering::Relaxed),
+            multiwave: [vk::Pipeline::null(); 2],
+            multiwave_checked: [false; 2],
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -983,6 +1008,12 @@ impl Gpu {
             convolution: vk::Pipeline::null(),
             rms_residual: vk::Pipeline::null(),
             gpu_timestamps_requested: gpu_timestamps,
+            subgroup_norm_requested: REQUESTED_SUBGROUP_NORM.load(Ordering::Relaxed),
+            subgroup_norm_supported: subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup.supported_operations.contains(
+                    vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::ARITHMETIC),
+            subgroup_norm_active: false,
+            subgroup_norm_self_test: serde_json::json!({"status":"not_requested"}),
             parallel_norm_requested: REQUESTED_PARALLEL_NORM.load(Ordering::Relaxed),
             parallel_norm_active: false,
             parallel_norm_self_test: serde_json::json!({"status":"not_requested"}),
@@ -1199,6 +1230,7 @@ impl Gpu {
             gpu.submissions.set(0);
         }
         gpu.configure_parallel_norm()?;
+        gpu.configure_subgroup_norm()?;
         gpu.configure_wave_head()?;
         // Startup checks must not enter prefill/decode counters.
         gpu.take_profile();
@@ -1316,6 +1348,49 @@ impl Gpu {
             "reference":"CPU f64 dot products; F16/BF16 weights",
             "tolerance":"2e-5 + 2e-6 * sum(abs(x*w)); not full-model parity"}),
         )
+    }
+
+    fn configure_subgroup_norm(&mut self) -> Result<()> {
+        if !self.subgroup_norm_requested {
+            return Ok(());
+        }
+        // Keep the already validated parallel/serial pipeline on any failure.
+        if !self.subgroup_norm_supported {
+            self.subgroup_norm_self_test = serde_json::json!({"status":"unsupported_subgroup"});
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate = match self.pipeline(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/rms_residual_subgroup.spv"
+        ))) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                self.subgroup_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+                return Ok(());
+            }
+        };
+        self.capture_stats("rms_residual_subgroup".into(), candidate);
+        match self.check_parallel_norm(candidate) {
+            Ok(report) => {
+                unsafe { self.device.raw.destroy_pipeline(self.rms_residual, None) };
+                self.rms_residual = candidate;
+                self.subgroup_norm_active = true;
+                self.parallel_norm_active = false;
+                self.subgroup_norm_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.subgroup_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.subgroup_norm_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
     }
 
     fn configure_parallel_norm(&mut self) -> Result<()> {
@@ -1655,6 +1730,10 @@ impl Gpu {
             "gpu_greedy_requested":self.gpu_greedy,
             "gpu_attention_layer_experimental":self.gpu_attention_layer,
             "gpu_layer_batch_size":self.layer_batch,
+            "subgroup_norm_requested":self.subgroup_norm_requested,
+            "subgroup_norm_supported":self.subgroup_norm_supported,
+            "subgroup_norm_active":self.subgroup_norm_active,
+            "subgroup_norm_self_test":self.subgroup_norm_self_test,
             "parallel_norm_requested":self.parallel_norm_requested,
             "parallel_norm_active":self.parallel_norm_active,
             "parallel_norm_self_test":self.parallel_norm_self_test,
@@ -1669,6 +1748,10 @@ impl Gpu {
             "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
             "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
             "experimental_k5_requested":self.enable_cooperative_k5,"specialized_mcg_requested":self.enable_specialized_mcg,
+            "exl3_multiwave_requested":self.enable_multiwave,
+            "exl3_multiwave_active_bitrates":self.multiwave.iter().enumerate()
+                .filter(|(_, p)| **p != vk::Pipeline::null()).map(|(i, _)| i + 4).collect::<Vec<_>>(),
+            "exl3_multiwave_self_test":"bit-exact partials against native wave32; not full-model parity",
             "experimental_unroll2_requested":self.enable_unroll2,
             "experimental_unroll2_active":self.enable_unroll2 && (self.cooperative_k4_active || self.cooperative_k5_active || self.mcg_cooperative.iter().any(|v| *v)),
             "split_k":self.split_k,
@@ -1837,6 +1920,78 @@ impl Gpu {
         })();
         if !self.device.abandoned.load(Ordering::Relaxed) {
             unsafe { self.device.raw.destroy_pipeline(reference, None) };
+        }
+        result
+    }
+
+    fn multiwave_pipeline(&mut self, bits: u32) -> Result<Option<vk::Pipeline>> {
+        if !self.enable_multiwave || ![4, 5].contains(&bits)
+            || !self.native_verified || !self.allow_cooperative_k4
+            || self.properties.limits.max_compute_shared_memory_size < 64
+        { return Ok(None); }
+        let index = (bits - 4) as usize;
+        if !self.multiwave_checked[index] {
+            self.multiwave_checked[index] = true;
+            let bytes: &[u8] = if bits == 4 {
+                include_bytes!(concat!(env!("OUT_DIR"), "/qmv_multiwave_4.spv"))
+            } else { include_bytes!(concat!(env!("OUT_DIR"), "/qmv_multiwave_5.spv")) };
+            match self.pipeline_with_subgroup(bytes, None, true) {
+                Ok(candidate) => {
+                    match self.verify_multiwave(bits, candidate) {
+                        Ok(true) => { self.multiwave[index] = candidate;
+                            self.capture_stats("exl3_multiwave_shared".into(), candidate); }
+                        result => {
+                            if self.device.abandoned.load(Ordering::Relaxed) {
+                                bail!("GPU abandoned during multiwave verification");
+                            }
+                            unsafe { self.device.raw.destroy_pipeline(candidate, None); }
+                            self.native_pipeline_errors.push(format!("multiwave K{bits} verification failed: {result:?}; baseline fallback"));
+                        }
+                    }
+                }
+                Err(err) => self.native_pipeline_errors.push(format!("multiwave K{bits}: {err}; baseline fallback")),
+            }
+        }
+        Ok((self.multiwave[index] != vk::Pipeline::null()).then_some(self.multiwave[index]))
+    }
+
+    fn verify_multiwave(&mut self, bits: u32, candidate: vk::Pipeline) -> Result<bool> {
+        let bytes: &[u8] = if bits == 4 {
+            include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv"))
+        } else { include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv")) };
+        let reference = self.pipeline_with_subgroup(bytes, None, true)?;
+        let result = (|| -> Result<bool> {
+            // Includes inactive tail waves, all codebooks, and every supported split.
+            for (rows, cols) in [(128usize, 48usize), (256, 128)] {
+                let states: Vec<u16> = (0..rows * cols)
+                    .map(|i| (i.wrapping_mul(181).wrapping_add(i / 13 * 911 + 37)) as u16).collect();
+                let packed = codec::pack(&states, bits as usize)?;
+                let weights = self.buffer(&packed.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>())?;
+                let x: Vec<f32> = (0..rows).map(|i| ((i * 13 % 17) as f32 - 8.) / 64.).collect();
+                for codebook in 0..3 {
+                    for splits in [1u32, 2, 4, 8] {
+                        if splits > self.properties.limits.max_compute_work_group_count[1] { continue; }
+                        let mut results = Vec::new();
+                        for (pipeline, groups) in [(reference, cols / 16), (candidate, (cols / 16).div_ceil(4))] {
+                            let output = self.output.as_ref().context("GPU output unavailable")?;
+                            self.execute(&x, &[Dispatch {
+                                input: self.input.as_ref().context("GPU input unavailable")?,
+                                weights: &weights, output,
+                                params: [rows as u32, cols as u32, bits | (splits << 8), codebook],
+                                outputs: cols * 4 * splits as usize,
+                                groups: groups as u32, groups_y: splits, pipeline,
+                                aux: None, barrier_after: false,
+                            }])?;
+                            results.push(output.read_f32(cols * 4 * splits as usize)?);
+                        }
+                        if !results[0].iter().zip(&results[1]).all(|(a,b)| a.to_bits() == b.to_bits()) { return Ok(false); }
+                    }
+                }
+            }
+            Ok(true)
+        })();
+        if !self.device.abandoned.load(Ordering::Relaxed) {
+            unsafe { self.device.raw.destroy_pipeline(reference, None); }
         }
         result
     }
@@ -2048,7 +2203,9 @@ impl Gpu {
                 && shape.cols / 16 <= self.max_groups as usize,
             "EXL3 dispatch exceeds GPU limit"
         );
-        let (pipeline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
+        let (baseline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
+        let multiwave = self.multiwave_pipeline(shape.bits)?;
+        let pipeline = multiwave.unwrap_or(baseline);
         let split_count = self.split_for_shape(shape.input, shape.output, shape.bits);
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
@@ -2091,7 +2248,7 @@ impl Gpu {
                     shape.codebook,
                 ],
                 outputs: shape.cols,
-                groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
+                groups: if multiwave.is_some() { (shape.cols / 16).div_ceil(4) as u32 } else { exl3_groups(shape.cols).context("Invalid EXL3 groups")? },
                 groups_y: if split { split_count } else { 1 },
                 pipeline,
                 aux: None,
@@ -2147,7 +2304,9 @@ impl Gpu {
             bits: shape.bits,
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
-            kernel: if split {
+            kernel: if multiwave.is_some() {
+                if shape.bits == 4 { "wave32_multiwave4_shared_k4" } else { "wave32_multiwave4_shared_k5" }
+            } else if split {
                 let cooperative =
                     if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
                         shape.bits + 10
@@ -2664,7 +2823,7 @@ impl Gpu {
         position: usize,
     ) -> Result<Vec<f32>> {
         ensure!(
-            (2..=4).contains(&layers.len())
+            (2..=24).contains(&layers.len())
                 && links.len() + 1 == layers.len()
                 && position < 2048
                 && x.iter().all(|v| v.is_finite()),
@@ -3852,14 +4011,19 @@ impl Gpu {
                     0,
                 );
             }
-            // Scratch is shared between prepared command buffers in the same submission.
+            // All device accesses recorded here are compute shader accesses, including
+            // layer copies. Keep this entry dependency even for independent-looking
+            // projections: their scratch aliases across prepared command buffers.
+            // It covers RAW/WAW visibility and WAR execution ordering. Host writes
+            // are coherent and made available by queue submission; host reads have
+            // a separate COMPUTE_SHADER -> HOST barrier at the end of the batch.
             let scratch = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
             d.cmd_pipeline_barrier(
                 command,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &scratch,
                 &[],
@@ -3911,7 +4075,11 @@ impl Gpu {
                 let push = std::slice::from_raw_parts(job.params.as_ptr().cast::<u8>(), 16);
                 d.cmd_push_constants(command, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
                 d.cmd_dispatch(command, job.groups, job.groups_y, 1);
-                if job.barrier_after {
+                // Only intra-command consumers need a trailing dependency here.
+                // The next command begins with the same compute dependency, while
+                // a final command is followed by the batch's HOST_READ dependency.
+                // Do not remove barriers between EXL3 phases or head/argmax jobs.
+                if job.barrier_after && index + 1 < jobs.len() {
                     let barriers = [vk::MemoryBarrier::default()
                         .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                         .dst_access_mask(
@@ -4062,6 +4230,9 @@ impl Drop for Gpu {
         unsafe {
             let d = &self.device.raw;
             d.destroy_pipeline(self.qmv, None);
+            for pipeline in self.multiwave {
+                d.destroy_pipeline(pipeline, None);
+            }
             for pipeline in self.qmv_stream {
                 d.destroy_pipeline(pipeline, None);
             }
@@ -4110,6 +4281,84 @@ mod tests {
         assert_eq!(profile.device_samples, 0);
         assert_eq!(profile.device_compute_ns, 0);
         assert_eq!(profile.device_queue_ns, 0);
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; chained RAW/WAR/WAW and host-read dependencies"]
+    fn resident_chained_norm_dependencies_preserve_half_boundaries() {
+        for timestamps in [false, true] {
+            let gpu = Gpu::new_with_options(true, timestamps).unwrap();
+            let count = 2048usize;
+            let values = |seed: usize| -> Vec<f32> {
+                (0..count)
+                    .map(|i| ((i * seed % 71) as f32 - 35.) / 64.)
+                    .collect()
+            };
+            let bytes = |x: &[f32]| -> Vec<u8> {
+                x.iter().flat_map(|v| v.to_ne_bytes()).collect()
+            };
+            let x = values(13);
+            let base = values(7);
+            let post_weights = values(17);
+            let pre_weights = values(23);
+            let source = gpu.buffer(&bytes(&x)).unwrap();
+            let hidden = gpu.buffer(&bytes(&base)).unwrap();
+            let output = gpu.mapped_buffer(count * 4).unwrap();
+            let post = gpu.buffer(&bytes(&post_weights)).unwrap();
+            let pre = gpu.buffer(&bytes(&pre_weights)).unwrap();
+            let prepare = |input, weights, output, pipeline, residual| {
+                gpu.prepare_operator(Dispatch {
+                    input,
+                    weights,
+                    output,
+                    params: [count as u32, residual, 1e-5f32.to_bits(), 0],
+                    outputs: count,
+                    groups: if pipeline == gpu.copy { 16 } else { 1 },
+                    groups_y: 1,
+                    pipeline,
+                    aux: None,
+                    barrier_after: true,
+                })
+                .unwrap()
+                .0
+            };
+            let commands = [
+                prepare(&source, &post, &hidden, gpu.rms_residual, 1),
+                prepare(&hidden, &pre, &output, gpu.rms_residual, 0),
+                prepare(&output, &pre, &source, gpu.copy, 0),
+            ];
+            let mut expected_source = x;
+            let mut expected_hidden = base;
+            // Reuse the exact same command buffers and storage. The final copy
+            // overwrites the first operator's input, exercising WAR as well as
+            // next-iteration RAW and repeated residual WAW dependencies.
+            for _ in 0..4 {
+                let normalized =
+                    crate::math::rms_norm(&expected_source, &post_weights, 1e-5).unwrap();
+                for (hidden, norm) in expected_hidden.iter_mut().zip(normalized) {
+                    *hidden += norm;
+                }
+                expected_source =
+                    crate::math::rms_norm(&expected_hidden, &pre_weights, 1e-5).unwrap();
+                gpu.submit_graph(&commands, Instant::now()).unwrap();
+                for (actual, expected) in source
+                    .read_f32(count)
+                    .unwrap()
+                    .iter()
+                    .zip(&expected_source)
+                {
+                    assert!((actual - expected).abs() <= 2e-6 + expected.abs() * 0.001);
+                }
+                for (actual, expected) in hidden
+                    .read_f32(count)
+                    .unwrap()
+                    .iter()
+                    .zip(&expected_hidden)
+                {
+                    assert!((actual - expected).abs() <= 2e-5 + expected.abs() * 0.001);
+                }
+            }
+        }
     }
 
     #[test]
@@ -4205,6 +4454,132 @@ mod tests {
         assert_eq!(gpu.diagnostics()["parallel_norm_active"], false);
         unsafe { gpu.device.raw.destroy_pipeline(parallel, None) };
         eprintln!("parallel RMSNorm: {checked} f64 comparisons; max abs error {max_oracle_error}");
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; parallel RMSNorm with independent f64 oracle"]
+    fn resident_subgroup_norm_matches_f64_and_preserves_residual() {
+        let mut gpu = Gpu::new().unwrap();
+        if !gpu.subgroup_norm_supported { return; }
+        let parallel = gpu
+            .pipeline(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/rms_residual_subgroup.spv"
+            )))
+            .unwrap();
+        let mut max_oracle_error = 0f32;
+        let mut checked = 0usize;
+        for count in [1usize, 127, 128, 129, 2047, 2048] {
+            let weights: Vec<f32> = (0..count)
+                .map(|i| ((i * 13 % 31) as f32 - 15.) / 7.)
+                .collect();
+            let bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let weights_buffer = gpu.buffer(&bytes).unwrap();
+            for case in 0..6 {
+                let x: Vec<f32> = (0..count)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => 1.,
+                        2 => ((i * 37 % 257) as f32 - 128.) / 31.,
+                        3 => {
+                            if i % 127 == 0 {
+                                -65504.
+                            } else {
+                                0.0001
+                            }
+                        }
+                        4 => ((i % 17) as f32 - 8.) * 0.00001,
+                        _ => {
+                            if i % 2 == 0 {
+                                65504.
+                            } else {
+                                -65504.
+                            }
+                        }
+                    })
+                    .collect();
+                for eps in [1e-5f32, 0.01] {
+                    // Independent high-precision reference, then the checkpoint's
+                    // FP16 weight and normalized-output boundaries.
+                    let squares: f64 = x.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    let scale = (squares / count as f64 + f64::from(eps)).sqrt().recip();
+                    let expected_norm: Vec<f32> = x
+                        .iter()
+                        .zip(&weights)
+                        .map(|(&v, &w)| {
+                            crate::math::half(
+                                (f64::from(v) * scale * f64::from(crate::math::half(w))) as f32,
+                            )
+                        })
+                        .collect();
+                    for residual in [0u32, 1] {
+                        let base: Vec<f32> =
+                            (0..count).map(|i| (i % 19) as f32 / 7. - 1.).collect();
+                        let bytes: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
+                        gpu.output.as_ref().unwrap().write(&bytes).unwrap();
+                        let actual = gpu
+                            .compute_groups(
+                                parallel,
+                                &weights_buffer,
+                                &x,
+                                [count as u32, residual, eps.to_bits(), 0],
+                                count,
+                                1,
+                            )
+                            .unwrap();
+                        for (i, (&value, &norm)) in actual.iter().zip(&expected_norm).enumerate() {
+                            let expected = if residual == 0 { norm } else { base[i] + norm };
+                            let error = (value - expected).abs();
+                            assert!(
+                                error <= 2e-6 + norm.abs() * 0.001,
+                                "count={count} case={case} eps={eps} residual={residual} i={i}: {value} vs {expected}"
+                            );
+                            max_oracle_error = max_oracle_error.max(error);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            gpu.check_parallel_norm(parallel).unwrap()["checked_values"],
+            13056
+        );
+        // A shader returning the input must be rejected by the startup guard.
+        assert!(gpu.check_parallel_norm(gpu.copy).is_err());
+        assert_eq!(gpu.diagnostics()["parallel_norm_active"], false);
+        unsafe { gpu.device.raw.destroy_pipeline(parallel, None) };
+        eprintln!("parallel RMSNorm: {checked} f64 comparisons; max abs error {max_oracle_error}");
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; validates RMS subgroup selection and fallback"]
+    fn resident_subgroup_norm_selection_and_fallback() {
+        for profiling in [false, true] {
+            let mut gpu = Gpu::new_with_options(true, profiling).unwrap();
+            // Explicit per-instance flags avoid mutating process-wide test settings.
+            gpu.parallel_norm_requested = true;
+            gpu.configure_parallel_norm().unwrap();
+            assert!(gpu.parallel_norm_active);
+            let fallback = gpu.rms_residual;
+            let supported = gpu.subgroup_norm_supported;
+            gpu.subgroup_norm_requested = true;
+            gpu.subgroup_norm_supported = false;
+            gpu.configure_subgroup_norm().unwrap();
+            assert_eq!(gpu.rms_residual, fallback);
+            assert!(gpu.parallel_norm_active);
+            assert!(!gpu.subgroup_norm_active);
+            assert_eq!(gpu.subgroup_norm_self_test["status"], "unsupported_subgroup");
+            gpu.subgroup_norm_supported = supported;
+            if supported {
+                gpu.configure_subgroup_norm().unwrap();
+                assert!(gpu.subgroup_norm_active, "{}", gpu.subgroup_norm_self_test);
+                assert!(!gpu.parallel_norm_active);
+                assert_eq!(gpu.subgroup_norm_self_test["status"], "passed");
+                assert!(gpu.check_parallel_norm(gpu.copy).is_err());
+            }
+            assert_eq!(gpu.diagnostics()["subgroup_norm_active"], supported);
+        }
     }
 
     #[test]
@@ -4886,6 +5261,23 @@ mod tests {
         assert!(actual.iter().any(|v| v.abs() > 0.01));
         assert!(!fallback.native_kernels.iter().any(|v| *v));
     }
+    #[test]
+    #[ignore = "requires Vulkan wave32 shuffle and native FP16"]
+    fn multiwave_shared_activation_matches_reference_and_falls_back() {
+        let mut gpu = Gpu::new().unwrap();
+        gpu.enable_multiwave = true;
+        if gpu.native_verified && gpu.allow_cooperative_k4 {
+            for bits in [4, 5] {
+                assert!(gpu.multiwave_pipeline(bits).unwrap().is_some(), "{:?}", gpu.native_pipeline_errors);
+            }
+        }
+        gpu.allow_cooperative_k4 = false;
+        assert!(gpu.multiwave_pipeline(4).unwrap().is_none());
+        gpu.enable_multiwave = false;
+        assert!(gpu.multiwave_pipeline(5).unwrap().is_none());
+        assert!(gpu.multiwave_pipeline(6).unwrap().is_none());
+    }
+
     #[test]
     fn memory_selection_preserves_requirements_and_prefers_local() {
         assert_eq!(choose_memory_type(&[6, 7, 7], 7), Some(1));

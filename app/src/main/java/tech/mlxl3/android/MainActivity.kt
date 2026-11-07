@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
                 model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
-                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps, model.waveHead, model::chooseWaveHead)
+                model.headRows, model::cycleHeadRows, model.parallelNorm, model::chooseParallelNorm, model.gpuTimestamps, model::chooseGpuTimestamps, model.waveHead, model::chooseWaveHead, model.subgroupNorm, model::chooseSubgroupNorm, model.exl3Multiwave, model::chooseExl3Multiwave)
         }
     }
 }
@@ -116,7 +116,9 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  headRows: Int = 4, onCycleHeadRows: () -> Unit = {},
                  parallelNorm: Boolean = false, onParallelNorm: (Boolean) -> Unit = {},
                  gpuTimestamps: Boolean = true, onGpuTimestamps: (Boolean) -> Unit = {},
-                 waveHead: Boolean = false, onWaveHead: (Boolean) -> Unit = {}) {
+                 waveHead: Boolean = false, onWaveHead: (Boolean) -> Unit = {},
+                 subgroupNorm: Boolean = false, onSubgroupNorm: (Boolean) -> Unit = {},
+                 exl3Multiwave: Boolean = false, onExl3Multiwave: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -156,6 +158,12 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                             })
                             if (!advancedMenu) {
                                 Text("Expériences à comparer", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Quiet)
+                                DropdownMenuItem(text = { Text("RMSNorm subgroup (exp.) : ${if (subgroupNorm) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onSubgroupNorm(!subgroupNorm) })
+                                DropdownMenuItem(text = { Text("EXL3 multiwave (exp.) : ${if (exl3Multiwave) "oui" else "non"} · recharger") },
+                                    onClick = { menu = false; onExl3Multiwave(!exl3Multiwave) })
+                                DropdownMenuItem(text = { Text("Lot GPU (exp.) : $layerBatch couches · recharger") },
+                                    onClick = { menu = false; onCycleLayerBatch() })
                                 DropdownMenuItem(text = { Text("Tête une wave/ligne (exp.) : ${if (waveHead) "oui" else "non"} · recharger") },
                                     onClick = { menu = false; onWaveHead(!waveHead) })
                                 DropdownMenuItem(text = { Text("Réglages avancés et retour arrière") },

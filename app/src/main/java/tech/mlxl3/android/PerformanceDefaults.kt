@@ -17,7 +17,7 @@ internal data class PerformanceDefaults(
     fun withPreferences(values: Map<String, *>): PerformanceDefaults = copy(
         splitK = (values["split_k"] as? Int)?.takeIf { it in listOf(1, 2, 4, 8) } ?: splitK,
         ffnK4Split = (values["ffn_k4_split"] as? Int)?.takeIf { it in listOf(0, 1, 2, 4, 8) } ?: ffnK4Split,
-        layerBatch = (values["layer_batch"] as? Int)?.takeIf { it in listOf(1, 2, 4) } ?: layerBatch,
+        layerBatch = (values["layer_batch"] as? Int)?.takeIf { it in listOf(1, 2, 4, 8, 12, 24) } ?: layerBatch,
         gpuConvLayer = values["gpu_conv_layer"] as? Boolean ?: gpuConvLayer,
         gpuAttentionLayer = values["gpu_attention_layer"] as? Boolean ?: gpuAttentionLayer,
         cooperativeK5 = values["cooperative_k5"] as? Boolean ?: cooperativeK5,

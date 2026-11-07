@@ -107,6 +107,25 @@ class StudioScreenTest {
         compose.runOnIdle { assertFalse(enabled.value) }
     }
 
+    @Test fun newKernelExperimentsCanBeToggledAndRestored() {
+        val rms = androidx.compose.runtime.mutableStateOf(false)
+        val exl3 = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, subgroupNorm = rms.value,
+                onSubgroupNorm = { rms.value = it }, exl3Multiwave = exl3.value,
+                onExl3Multiwave = { exl3.value = it })
+        }
+        listOf("non", "oui").forEach { state ->
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("RMSNorm subgroup (exp.) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", rms.value) }
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("EXL3 multiwave (exp.) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", exl3.value) }
+        }
+    }
+
     @Test fun busyStateDisablesInputAndExposesCancellation() {
         compose.setContent { StudioScreen(emptyList(), true, false, "Chargement…", "", null, false, {}, {}, {}, {}, {}, {}) }
         compose.onNodeWithContentDescription("Arrêter la génération").assertIsEnabled()

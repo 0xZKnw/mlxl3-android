@@ -9,7 +9,7 @@
 #endif
 // Register-window trellis decoding: see engine/NOTICE for the upstream algorithm.
 // Split K into four logical 32-lane partitions; the partials variant dispatches them independently.
-#ifdef EXL3_PARTIALS
+#if defined(EXL3_PARTIALS) && !defined(EXL3_MULTI_WAVE)
 layout(local_size_x = 32) in;
 #else
 layout(local_size_x = 128) in;
@@ -31,6 +31,10 @@ layout(push_constant) uniform Params { uint rows; uint cols; uint bits; uint cod
 #ifndef EXL3_PARTIALS
 shared vec2 partial[128];
 #endif
+#ifdef EXL3_MULTI_WAVE
+// Four output tiles share the same 16-value activation tile.
+shared float activation[16];
+#endif
 #include "exl3.glsl"
 
 uint stateAt(uvec3 a, uint j) {
@@ -44,6 +48,11 @@ uint stateAt(uvec3 a, uint j) {
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint lane = tid % 32u;
+#ifdef EXL3_MULTI_WAVE
+    uint output_tile = gl_WorkGroupID.x * 4u + tid / 32u;
+#else
+    uint output_tile = gl_WorkGroupID.x;
+#endif
 #ifdef EXL3_PARTIALS
     uint split = gl_WorkGroupID.y;
 #else
@@ -76,7 +85,13 @@ void main() {
       for (uint u = 0u; u < tile_step; ++u) {
         uint tile = base_tile + u;
         if (tile >= end) break;
-        uint base = (tile * (p.cols / 16u) + gl_WorkGroupID.x) * WORDS;
+#ifdef EXL3_MULTI_WAVE
+        // All invocations participate, including tail output waves.
+        if (tid < 16u) activation[tid] = x[tile * 16u + tid];
+        barrier();
+#endif
+        // Clamp inactive tail waves so subgroup shuffles stay uniform and valid.
+        uint base = (tile * (p.cols / 16u) + min(output_tile, p.cols / 16u - 1u)) * WORDS;
 #ifdef EXL3_COOPERATIVE_K4
         // K4 has exactly 32 packed words per tile. This variant is selected
         // only for a full, shuffle-capable subgroup of 32 invocations.
@@ -112,8 +127,14 @@ void main() {
         uvec3 a = uvec3((w0 << shift) | ((w1 >> 1u) >> (31u - shift)),
                        ALIGNED > 1u ? (w1 << shift) | ((w2 >> 1u) >> (31u - shift)) : 0u,
                        ALIGNED > 2u ? (w2 << shift) | ((w3 >> 1u) >> (31u - shift)) : 0u);
+#ifdef EXL3_MULTI_WAVE
+        vec4 inputValues = vec4(activation[row], activation[row + 1u],
+                               activation[row + 8u], activation[row + 9u]);
+        barrier(); // No wave may overwrite shared inputs before all have read them.
+#else
         vec4 inputValues = vec4(x[tile * 16u + row], x[tile * 16u + row + 1u],
                                x[tile * 16u + row + 8u], x[tile * 16u + row + 9u]);
+#endif
 #ifdef EXL3_NATIVE
         acc = fma(vec2(inputValues[0]), codewordPair(stateAt(a, 0u), stateAt(a, 4u), QMV_CODEBOOK), acc);
         acc = fma(vec2(inputValues[1]), codewordPair(stateAt(a, 1u), stateAt(a, 5u), QMV_CODEBOOK), acc);
@@ -132,7 +153,8 @@ void main() {
       }
     }
 #ifdef EXL3_PARTIALS
-    uint col = gl_WorkGroupID.x * 16u + lane / 4u;
+    if (output_tile >= p.cols / 16u) return;
+    uint col = output_tile * 16u + lane / 4u;
     y[(split * p.cols + col) * 4u + lane % 4u] = acc.x;
     y[(split * p.cols + col + 8u) * 4u + lane % 4u] = acc.y;
 #else

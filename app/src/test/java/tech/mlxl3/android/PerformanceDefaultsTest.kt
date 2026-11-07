@@ -81,7 +81,7 @@ class PerformanceDefaultsTest {
 
     @Test fun malformedValuesUseDeviceDefaultsWithoutChangingOtherChoices() {
         val settings = PerformanceDefaults.forDevice("samsung", "SM-S921B").withPreferences(mapOf(
-            "split_k" to 3, "ffn_k4_split" to "8", "layer_batch" to 8,
+            "split_k" to 3, "ffn_k4_split" to "8", "layer_batch" to 3,
             "gpu_greedy" to false, "gpu_conv_layer" to "true",
         ))
         assertEquals(8, settings.splitK)
@@ -90,4 +90,15 @@ class PerformanceDefaultsTest {
         assertFalse(settings.gpuGreedy)
         assertTrue(settings.gpuConvLayer)
     }
+    @Test fun experimentalLayerBatchesPersistWithoutChangingMeasuredDefault() {
+        val profile = PerformanceDefaults.forDevice("samsung", "SM-S921B")
+        assertEquals(4, profile.layerBatch)
+        for (batch in listOf(1, 2, 4, 8, 12, 24)) {
+            assertEquals(batch, profile.withPreferences(mapOf("layer_batch" to batch)).layerBatch)
+        }
+        for (batch in listOf(0, 3, 16, 25, Int.MAX_VALUE)) {
+            assertEquals(4, profile.withPreferences(mapOf("layer_batch" to batch)).layerBatch)
+        }
+    }
+
 }
