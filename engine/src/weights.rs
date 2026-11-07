@@ -175,11 +175,19 @@ pub struct Linear {
 }
 impl Linear {
     pub(crate) fn exl3_ref(&self) -> Option<&Exl3Matrix> {
-        if let Storage::Exl3(matrix) = &self.storage { Some(matrix) } else { None }
+        if let Storage::Exl3(matrix) = &self.storage {
+            Some(matrix)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn gate_ref(&self) -> Option<&DenseGatePlan> {
-        if let Storage::Gate(plan) = &self.storage { Some(plan) } else { None }
+        if let Storage::Gate(plan) = &self.storage {
+            Some(plan)
+        } else {
+            None
+        }
     }
     pub(crate) fn prepare_gpu_greedy(&mut self, gpu: &mut Gpu, vocabulary: &[u32]) -> Result<bool> {
         if let Storage::Head(plan) = &mut self.storage {

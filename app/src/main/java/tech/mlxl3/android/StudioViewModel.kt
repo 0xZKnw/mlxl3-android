@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.documentfile.provider.DocumentFile
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,43 +51,43 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun chooseSplitK(value: Int) {
         if (busy || value !in listOf(1, 2, 4, 8)) return
         splitK = value
-        prefs.edit().putInt("split_k", value).apply()
+        prefs.edit { putInt("split_k", value) }
         status = "Split-K $value sélectionné · rechargez le modèle"
     }
     fun chooseFastHead(enabled: Boolean) {
         if (busy) return
         fastHead = enabled
-        prefs.edit().putBoolean("fast_head", enabled).apply()
+        prefs.edit { putBoolean("fast_head", enabled) }
         status = "Tête expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun chooseGpuConvLayer(enabled: Boolean) {
         if (busy) return
         gpuConvLayer = enabled
-        prefs.edit().putBoolean("gpu_conv_layer", enabled).apply()
+        prefs.edit { putBoolean("gpu_conv_layer", enabled) }
         status = "Couches convolution GPU ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
     }
     fun chooseK5(enabled: Boolean) {
         if (busy) return
         cooperativeK5 = enabled
-        prefs.edit().putBoolean("cooperative_k5", enabled).apply()
+        prefs.edit { putBoolean("cooperative_k5", enabled) }
         status = "Kernel K5 expérimental ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
     }
     fun chooseMcg(enabled: Boolean) {
         if (busy) return
         specializedMcg = enabled
-        prefs.edit().putBoolean("specialized_mcg", enabled).apply()
+        prefs.edit { putBoolean("specialized_mcg", enabled) }
         status = "MCG spécialisé ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
     }
     fun chooseGpuGreedy(enabled: Boolean) {
         if (busy) return
         gpuGreedy = enabled
-        prefs.edit().putBoolean("gpu_greedy", enabled).apply()
+        prefs.edit { putBoolean("gpu_greedy", enabled) }
         status = "Sélection GPU ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun chooseGpuAttentionLayer(enabled: Boolean) {
         if (busy) return
         gpuAttentionLayer = enabled
-        prefs.edit().putBoolean("gpu_attention_layer", enabled).apply()
+        prefs.edit { putBoolean("gpu_attention_layer", enabled) }
         status = "Couches attention GPU ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }

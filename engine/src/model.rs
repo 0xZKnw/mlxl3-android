@@ -346,19 +346,43 @@ impl Model {
             };
             let gpu_attention_layer = if gpu.gpu_attention_layer_enabled() {
                 if let Operator::Attention(attn) = &operator
-                    && let (Some(q), Some(k), Some(v), Some(output), Some(gate)) =
-                        (attn.q.exl3_ref(), attn.k.exl3_ref(), attn.v.exl3_ref(), attn.output.exl3_ref(), attn.gate.gate_ref())
+                    && let (Some(q), Some(k), Some(v), Some(output), Some(gate)) = (
+                        attn.q.exl3_ref(),
+                        attn.k.exl3_ref(),
+                        attn.v.exl3_ref(),
+                        attn.output.exl3_ref(),
+                        attn.gate.gate_ref(),
+                    )
                 {
                     Some(gpu.prepare_attention_layer(AttentionLayerConfig {
-                        q, k, v, output, gate, mlp: &mlp,
-                        norms: [&operator_norm, &post_operator_norm, &ffn_norm, &post_ffn_norm],
-                        q_norm: &attn.q_norm, k_norm: &attn.k_norm,
-                        heads: config.num_attention_heads, kv_heads: config.num_key_value_heads,
-                        dim: config.head_dim, window: attn.window, eps: config.norm_eps,
-                        theta: attn.rope.rope_theta, fraction: attn.rope.partial_rotary_factor,
+                        q,
+                        k,
+                        v,
+                        output,
+                        gate,
+                        mlp: &mlp,
+                        norms: [
+                            &operator_norm,
+                            &post_operator_norm,
+                            &ffn_norm,
+                            &post_ffn_norm,
+                        ],
+                        q_norm: &attn.q_norm,
+                        k_norm: &attn.k_norm,
+                        heads: config.num_attention_heads,
+                        kv_heads: config.num_key_value_heads,
+                        dim: config.head_dim,
+                        window: attn.window,
+                        eps: config.norm_eps,
+                        theta: attn.rope.rope_theta,
+                        fraction: attn.rope.partial_rotary_factor,
                     })?)
-                } else { None }
-            } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             layers.push(Layer {
                 operator,
                 operator_norm,
@@ -429,13 +453,22 @@ impl Model {
                 )?;
                 continue;
             }
-            if let (Some(plan), Operator::Attention(attn)) = (&layer.gpu_attention_layer, &layer.operator) {
+            if let (Some(plan), Operator::Attention(attn)) =
+                (&layer.gpu_attention_layer, &layer.operator)
+            {
                 let q = attn.q.exl3_ref().context("Missing resident Q")?;
                 let k = attn.k.exl3_ref().context("Missing resident K")?;
                 let v = attn.v.exl3_ref().context("Missing resident V")?;
                 let output = attn.output.exl3_ref().context("Missing resident output")?;
                 let gate = attn.gate.gate_ref().context("Missing resident gate")?;
-                hidden = self.gpu.forward_attention_layer(plan, [q, k, v, output], gate, &layer.mlp, &hidden, self.position)?;
+                hidden = self.gpu.forward_attention_layer(
+                    plan,
+                    [q, k, v, output],
+                    gate,
+                    &layer.mlp,
+                    &hidden,
+                    self.position,
+                )?;
                 continue;
             }
             let normalized = normalize(

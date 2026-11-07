@@ -225,7 +225,9 @@ pub(crate) struct AttentionLayerPlan {
 }
 
 impl AttentionLayerPlan {
-    pub(crate) fn cache_bytes(&self) -> usize { self.cache.size }
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.cache.size
+    }
 }
 
 pub(crate) struct AttentionLayerConfig<'a> {
@@ -2148,61 +2150,242 @@ impl Gpu {
         self.gpu_attention_layer
     }
 
-    pub(crate) fn prepare_attention_layer(&mut self, c: AttentionLayerConfig<'_>) -> Result<AttentionLayerPlan> {
-        let size = c.heads.checked_mul(c.dim).context("Attention size overflow")?;
+    pub(crate) fn prepare_attention_layer(
+        &mut self,
+        c: AttentionLayerConfig<'_>,
+    ) -> Result<AttentionLayerPlan> {
+        let size = c
+            .heads
+            .checked_mul(c.dim)
+            .context("Attention size overflow")?;
         let kv_size = c.kv_heads.checked_mul(c.dim).context("KV size overflow")?;
         let active = (c.fraction * c.dim as f32) as usize / 2;
-        ensure!(self.properties.limits.max_compute_shared_memory_size >= 8192 && c.dim == 128 && c.heads > 0 && c.kv_heads > 0 && c.heads.is_multiple_of(c.kv_heads)
-            && (1..=2048).contains(&c.window) && (1..=64).contains(&active)
-            && c.theta.is_finite() && c.theta > 0. && c.eps.is_finite() && c.eps > 0.
-            && c.q.shape.input == size && c.q.shape.output == size
-            && c.k.shape.input == size && c.k.shape.output == kv_size
-            && c.v.shape.input == size && c.v.shape.output == kv_size
-            && c.output.shape.input == size && c.output.shape.output == size
-            && c.gate.input_len == size && c.gate.outputs == c.heads
-            && c.mlp.gate.shape.input == size && c.mlp.down.shape.output == size
-            && c.norms.iter().all(|v| v.len() == size && v.iter().all(|x| x.is_finite()))
-            && c.q_norm.len() == c.dim && c.k_norm.len() == c.dim
-            && c.q_norm.iter().chain(c.k_norm).all(|x| x.is_finite()), "Invalid resident attention configuration");
-        ensure!([c.q, c.k, c.v, c.output, &c.mlp.gate, &c.mlp.up, &c.mlp.down]
-            .iter().all(|m| Arc::ptr_eq(&m.weights.device, &self.device))
-            && Arc::ptr_eq(&c.gate.device, &self.device), "Attention belongs to another GPU");
-        let state_len = c.window.checked_mul(kv_size).and_then(|n| n.checked_mul(2)).and_then(|n| n.checked_add(1)).context("KV cache size overflow")?;
+        ensure!(
+            self.properties.limits.max_compute_shared_memory_size >= 8192
+                && c.dim == 128
+                && c.heads > 0
+                && c.kv_heads > 0
+                && c.heads.is_multiple_of(c.kv_heads)
+                && (1..=2048).contains(&c.window)
+                && (1..=64).contains(&active)
+                && c.theta.is_finite()
+                && c.theta > 0.
+                && c.eps.is_finite()
+                && c.eps > 0.
+                && c.q.shape.input == size
+                && c.q.shape.output == size
+                && c.k.shape.input == size
+                && c.k.shape.output == kv_size
+                && c.v.shape.input == size
+                && c.v.shape.output == kv_size
+                && c.output.shape.input == size
+                && c.output.shape.output == size
+                && c.gate.input_len == size
+                && c.gate.outputs == c.heads
+                && c.mlp.gate.shape.input == size
+                && c.mlp.down.shape.output == size
+                && c.norms
+                    .iter()
+                    .all(|v| v.len() == size && v.iter().all(|x| x.is_finite()))
+                && c.q_norm.len() == c.dim
+                && c.k_norm.len() == c.dim
+                && c.q_norm.iter().chain(c.k_norm).all(|x| x.is_finite()),
+            "Invalid resident attention configuration"
+        );
+        ensure!(
+            [c.q, c.k, c.v, c.output, &c.mlp.gate, &c.mlp.up, &c.mlp.down]
+                .iter()
+                .all(|m| Arc::ptr_eq(&m.weights.device, &self.device))
+                && Arc::ptr_eq(&c.gate.device, &self.device),
+            "Attention belongs to another GPU"
+        );
+        let state_len = c
+            .window
+            .checked_mul(kv_size)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| n.checked_add(1))
+            .context("KV cache size overflow")?;
         let hidden = self.mapped_buffer(size * 4)?;
         let cache = self.mapped_buffer(state_len * 4)?;
         let q_data = self.mapped_buffer(c.dim * 2 * 4)?;
         let k_data = self.mapped_buffer(c.dim * 2 * 4)?;
         let q_output = self.mapped_buffer(size * 4)?;
         let k_output = self.mapped_buffer(kv_size * 4)?;
-        let norm_weights = c.norms.iter().map(|norm| {
-            let bytes: Vec<u8> = norm.iter().map(|v| crate::math::half(*v)).flat_map(|v| v.to_ne_bytes()).collect();
-            self.buffer(&bytes)
-        }).collect::<Result<Vec<_>>>()?;
+        let norm_weights = c
+            .norms
+            .iter()
+            .map(|norm| {
+                let bytes: Vec<u8> = norm
+                    .iter()
+                    .map(|v| crate::math::half(*v))
+                    .flat_map(|v| v.to_ne_bytes())
+                    .collect();
+                self.buffer(&bytes)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let input = self.input.as_ref().context("GPU input unavailable")?;
-        let gate_output = self.gate_output.as_ref().context("Gate output unavailable")?;
+        let gate_output = self
+            .gate_output
+            .as_ref()
+            .context("Gate output unavailable")?;
         let specs = [
-            Dispatch { input: &hidden, weights: &norm_weights[0], output: input, aux: None, params: [size as u32, 0, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
-            Dispatch { input, weights: &c.gate._weights, output: gate_output, aux: None, params: [size as u32, c.heads as u32, c.gate.dtype, 0], outputs: c.heads, groups: dense_groups(c.heads).context("Invalid gate size")?, groups_y: 1, pipeline: self.dense, barrier_after: true },
-            Dispatch { input: &c.q.output, weights: &q_data, output: &q_output, aux: None, params: [c.dim as u32, c.heads as u32, active as u32, c.eps.to_bits()], outputs: size, groups: c.heads as u32, groups_y: 1, pipeline: self.norm_rope, barrier_after: true },
-            Dispatch { input: &c.k.output, weights: &k_data, output: &k_output, aux: None, params: [c.dim as u32, c.kv_heads as u32, active as u32, c.eps.to_bits()], outputs: kv_size, groups: c.kv_heads as u32, groups_y: 1, pipeline: self.norm_rope, barrier_after: true },
-            Dispatch { input: &k_output, weights: &c.v.output, output: &cache, aux: None, params: [kv_size as u32, c.window as u32, 0, 0], outputs: kv_size, groups: kv_size.div_ceil(128) as u32, groups_y: 1, pipeline: self.kv_update, barrier_after: true },
-            Dispatch { input: &q_output, weights: &cache, output: input, aux: Some(gate_output), params: [c.heads as u32, c.kv_heads as u32, c.dim as u32, c.window as u32], outputs: size, groups: c.heads as u32, groups_y: 1, pipeline: self.attention, barrier_after: true },
-            Dispatch { input: &c.output.output, weights: &norm_weights[1], output: &hidden, aux: None, params: [size as u32, 1, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
-            Dispatch { input: &hidden, weights: &norm_weights[2], output: input, aux: None, params: [size as u32, 0, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
-            Dispatch { input: &c.mlp.down.output, weights: &norm_weights[3], output: &hidden, aux: None, params: [size as u32, 1, c.eps.to_bits(), 0], outputs: size, groups: 1, groups_y: 1, pipeline: self.rms_residual, barrier_after: true },
+            Dispatch {
+                input: &hidden,
+                weights: &norm_weights[0],
+                output: input,
+                aux: None,
+                params: [size as u32, 0, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+            Dispatch {
+                input,
+                weights: &c.gate._weights,
+                output: gate_output,
+                aux: None,
+                params: [size as u32, c.heads as u32, c.gate.dtype, 0],
+                outputs: c.heads,
+                groups: dense_groups(c.heads).context("Invalid gate size")?,
+                groups_y: 1,
+                pipeline: self.dense,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.q.output,
+                weights: &q_data,
+                output: &q_output,
+                aux: None,
+                params: [c.dim as u32, c.heads as u32, active as u32, c.eps.to_bits()],
+                outputs: size,
+                groups: c.heads as u32,
+                groups_y: 1,
+                pipeline: self.norm_rope,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.k.output,
+                weights: &k_data,
+                output: &k_output,
+                aux: None,
+                params: [
+                    c.dim as u32,
+                    c.kv_heads as u32,
+                    active as u32,
+                    c.eps.to_bits(),
+                ],
+                outputs: kv_size,
+                groups: c.kv_heads as u32,
+                groups_y: 1,
+                pipeline: self.norm_rope,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &k_output,
+                weights: &c.v.output,
+                output: &cache,
+                aux: None,
+                params: [kv_size as u32, c.window as u32, 0, 0],
+                outputs: kv_size,
+                groups: kv_size.div_ceil(128) as u32,
+                groups_y: 1,
+                pipeline: self.kv_update,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &q_output,
+                weights: &cache,
+                output: input,
+                aux: Some(gate_output),
+                params: [
+                    c.heads as u32,
+                    c.kv_heads as u32,
+                    c.dim as u32,
+                    c.window as u32,
+                ],
+                outputs: size,
+                groups: c.heads as u32,
+                groups_y: 1,
+                pipeline: self.attention,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.output.output,
+                weights: &norm_weights[1],
+                output: &hidden,
+                aux: None,
+                params: [size as u32, 1, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &hidden,
+                weights: &norm_weights[2],
+                output: input,
+                aux: None,
+                params: [size as u32, 0, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.mlp.down.output,
+                weights: &norm_weights[3],
+                output: &hidden,
+                aux: None,
+                params: [size as u32, 1, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
         ];
         let mut commands = Vec::new();
         let mut query_firsts = Vec::new();
-        for spec in specs { let (command, query) = self.prepare_operator(spec)?; commands.push(command); query_firsts.push(query); }
+        for spec in specs {
+            let (command, query) = self.prepare_operator(spec)?;
+            commands.push(command);
+            query_firsts.push(query);
+        }
         let mut buffers = norm_weights;
-        buffers.push(q_output); buffers.push(k_output);
+        buffers.push(q_output);
+        buffers.push(k_output);
         Ok(AttentionLayerPlan {
-            device: self.device.clone(), hidden, cache, q_data, k_data, _buffers: buffers,
-            commands: commands.try_into().map_err(|_| anyhow::anyhow!("Invalid attention command count"))?,
-            query_firsts: query_firsts.try_into().map_err(|_| anyhow::anyhow!("Invalid attention query count"))?,
-            identities: [c.q.command, c.k.command, c.v.command, c.output.command, c.gate.command, c.mlp.gate.command],
-            q_weights: c.q_norm.to_vec(), k_weights: c.k_norm.to_vec(), heads: c.heads, kv_heads: c.kv_heads,
-            dim: c.dim, active, theta: c.theta,
+            device: self.device.clone(),
+            hidden,
+            cache,
+            q_data,
+            k_data,
+            _buffers: buffers,
+            commands: commands
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid attention command count"))?,
+            query_firsts: query_firsts
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid attention query count"))?,
+            identities: [
+                c.q.command,
+                c.k.command,
+                c.v.command,
+                c.output.command,
+                c.gate.command,
+                c.mlp.gate.command,
+            ],
+            q_weights: c.q_norm.to_vec(),
+            k_weights: c.k_norm.to_vec(),
+            heads: c.heads,
+            kv_heads: c.kv_heads,
+            dim: c.dim,
+            active,
+            theta: c.theta,
         })
     }
 
@@ -2216,10 +2399,23 @@ impl Gpu {
         position: usize,
     ) -> Result<Vec<f32>> {
         let [q, k, v, output] = matrices;
-        ensure!(Arc::ptr_eq(&plan.device, &self.device) && position < 2048 &&
-            plan.identities == [q.command, k.command, v.command, output.command, gate.command, mlp.gate.command] &&
-            x.len() == plan.heads * plan.dim && plan.kv_heads > 0 && x.iter().all(|v| v.is_finite()),
-            "Invalid resident attention input");
+        ensure!(
+            Arc::ptr_eq(&plan.device, &self.device)
+                && position < 2048
+                && plan.identities
+                    == [
+                        q.command,
+                        k.command,
+                        v.command,
+                        output.command,
+                        gate.command,
+                        mlp.gate.command
+                    ]
+                && x.len() == plan.heads * plan.dim
+                && plan.kv_heads > 0
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid resident attention input"
+        );
         let mut q_data = vec![0f32; plan.dim * 2];
         let mut k_data = vec![0f32; plan.dim * 2];
         q_data[..plan.dim].copy_from_slice(&plan.q_weights);
@@ -2227,8 +2423,10 @@ impl Gpu {
         for j in 0..plan.active {
             let angle = position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
             let (sin, cos) = angle.sin_cos();
-            q_data[plan.dim + 2*j] = sin; q_data[plan.dim + 2*j+1] = cos;
-            k_data[plan.dim + 2*j] = sin; k_data[plan.dim + 2*j+1] = cos;
+            q_data[plan.dim + 2 * j] = sin;
+            q_data[plan.dim + 2 * j + 1] = cos;
+            k_data[plan.dim + 2 * j] = sin;
+            k_data[plan.dim + 2 * j + 1] = cos;
         }
         let started = Instant::now();
         let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -2239,18 +2437,38 @@ impl Gpu {
         plan.k_data.write(&k_bytes)?;
         plan.cache.write(&(position as u32).to_ne_bytes())?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
-        self.submit_graph(&[
-            plan.commands[0], q.command, k.command, v.command, plan.commands[1],
-            plan.commands[2], plan.commands[3], plan.commands[4], plan.commands[5],
-            output.command, plan.commands[6], plan.commands[7], mlp.gate.command,
-            mlp.up.command, mlp.activate, mlp.down.command, plan.commands[8],
-        ], Instant::now())?;
+        self.submit_graph(
+            &[
+                plan.commands[0],
+                q.command,
+                k.command,
+                v.command,
+                plan.commands[1],
+                plan.commands[2],
+                plan.commands[3],
+                plan.commands[4],
+                plan.commands[5],
+                output.command,
+                plan.commands[6],
+                plan.commands[7],
+                mlp.gate.command,
+                mlp.up.command,
+                mlp.activate,
+                mlp.down.command,
+                plan.commands[8],
+            ],
+            Instant::now(),
+        )?;
         for matrix in [q, k, v, output, &mlp.gate, &mlp.up, &mlp.down] {
             self.collect_timestamps(Some(matrix.query_first));
         }
         self.collect_gate_interval(plan.query_firsts[1]);
-        for i in [2usize, 3, 4, 5] { self.collect_other_interval(plan.query_firsts[i], true); }
-        for i in [0usize, 6, 7, 8] { self.collect_other_interval(plan.query_firsts[i], false); }
+        for i in [2usize, 3, 4, 5] {
+            self.collect_other_interval(plan.query_firsts[i], true);
+        }
+        for i in [0usize, 6, 7, 8] {
+            self.collect_other_interval(plan.query_firsts[i], false);
+        }
         self.collect_interval(mlp.activate_query, Some(false));
         let started = Instant::now();
         let result = plan.hidden.read_f32(plan.heads * plan.dim);
@@ -2407,11 +2625,15 @@ impl Gpu {
                         p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
                         p.device_other_ns = p.device_other_ns.saturating_add(ns);
                         if attention {
-                            p.device_attention_gpu_ns = p.device_attention_gpu_ns.saturating_add(ns);
-                            p.device_attention_gpu_samples = p.device_attention_gpu_samples.saturating_add(1);
+                            p.device_attention_gpu_ns =
+                                p.device_attention_gpu_ns.saturating_add(ns);
+                            p.device_attention_gpu_samples =
+                                p.device_attention_gpu_samples.saturating_add(1);
                         } else {
-                            p.device_norm_residual_ns = p.device_norm_residual_ns.saturating_add(ns);
-                            p.device_norm_residual_samples = p.device_norm_residual_samples.saturating_add(1);
+                            p.device_norm_residual_ns =
+                                p.device_norm_residual_ns.saturating_add(ns);
+                            p.device_norm_residual_samples =
+                                p.device_norm_residual_samples.saturating_add(1);
                         }
                         p.device_samples = p.device_samples.saturating_add(1);
                     }
@@ -2940,7 +3162,13 @@ impl Gpu {
                 );
             }
             for (index, job) in jobs.iter().enumerate() {
-                let infos = [job.input, job.weights, job.output, job.aux.unwrap_or(codebooks)].map(|buffer| {
+                let infos = [
+                    job.input,
+                    job.weights,
+                    job.output,
+                    job.aux.unwrap_or(codebooks),
+                ]
+                .map(|buffer| {
                     [vk::DescriptorBufferInfo::default()
                         .buffer(buffer.raw)
                         .range(buffer.size as u64)]
