@@ -949,12 +949,24 @@ impl Gpu {
             dense_rows: vk::Pipeline::null(),
             dense_wave: vk::Pipeline::null(),
             wave_head_requested: REQUESTED_WAVE_HEAD.load(Ordering::Relaxed),
-            wave_head_rows: if subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
-                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::ARITHMETIC)
-                && subgroup.subgroup_size > 0 && subgroup.subgroup_size <= 128
-                && 128u32.is_multiple_of(subgroup.subgroup_size) {
-                128 / if force_wave32 { 32 } else { subgroup.subgroup_size }
-            } else { 0 },
+            wave_head_rows: if subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::ARITHMETIC)
+                && subgroup.subgroup_size > 0
+                && subgroup.subgroup_size <= 128
+                && 128u32.is_multiple_of(subgroup.subgroup_size)
+            {
+                128 / if force_wave32 {
+                    32
+                } else {
+                    subgroup.subgroup_size
+                }
+            } else {
+                0
+            },
             wave_head_active: false,
             wave_head_self_test: serde_json::json!({"status":"not_requested"}),
             fast_head: REQUESTED_FAST_HEAD.load(Ordering::Relaxed),
@@ -1195,17 +1207,23 @@ impl Gpu {
     }
 
     fn configure_wave_head(&mut self) -> Result<()> {
-        if !self.wave_head_requested { return Ok(()); }
+        if !self.wave_head_requested {
+            return Ok(());
+        }
         if self.wave_head_rows == 0 {
             self.wave_head_self_test = serde_json::json!({"status":"unsupported_subgroup"});
             return Ok(());
         }
         let started = Instant::now();
         let candidate = match self.pipeline_with_subgroup(
-            include_bytes!(concat!(env!("OUT_DIR"), "/dense_wave.spv")), None, true) {
+            include_bytes!(concat!(env!("OUT_DIR"), "/dense_wave.spv")),
+            None,
+            true,
+        ) {
             Ok(pipeline) => pipeline,
             Err(err) => {
-                self.wave_head_self_test = serde_json::json!({"status":"fallback","error":err.to_string()});
+                self.wave_head_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
                 return Ok(());
             }
         };
@@ -1216,9 +1234,12 @@ impl Gpu {
                 self.wave_head_self_test = report;
             }
             Err(err) => {
-                if self.device.abandoned.load(Ordering::Relaxed) { return Err(err); }
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
                 unsafe { self.device.raw.destroy_pipeline(candidate, None) };
-                self.wave_head_self_test = serde_json::json!({"status":"fallback","error":err.to_string()});
+                self.wave_head_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
             }
         }
         self.wave_head_self_test["elapsed_ns"] = elapsed_ns(started).into();
@@ -1229,40 +1250,72 @@ impl Gpu {
         let mut checked = 0usize;
         let mut max_abs_error = 0f64;
         for dtype in 0..=1 {
-            let weights: Vec<f32> = (0..2048 * 17).map(|i| {
-                let v = ((i * 37 % 251) as f32 - 125.) / 97.;
-                if dtype == 0 { half::f16::from_f32(v).to_f32() }
-                else { half::bf16::from_f32(v).to_f32() }
-            }).collect();
-            let bytes: Vec<u8> = weights.iter().flat_map(|&v| {
-                (if dtype == 0 { half::f16::from_f32(v).to_bits() }
-                else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
-            }).collect();
+            let weights: Vec<f32> = (0..2048 * 17)
+                .map(|i| {
+                    let v = ((i * 37 % 251) as f32 - 125.) / 97.;
+                    if dtype == 0 {
+                        half::f16::from_f32(v).to_f32()
+                    } else {
+                        half::bf16::from_f32(v).to_f32()
+                    }
+                })
+                .collect();
+            let bytes: Vec<u8> = weights
+                .iter()
+                .flat_map(|&v| {
+                    (if dtype == 0 {
+                        half::f16::from_f32(v).to_bits()
+                    } else {
+                        half::bf16::from_f32(v).to_bits()
+                    })
+                    .to_le_bytes()
+                })
+                .collect();
             let buffer = self.buffer(&bytes)?;
             for case in 0..3 {
-                let x: Vec<f32> = (0..2048).map(|i| match case {
-                    0 => 0.,
-                    1 => ((i * 13 % 127) as f32 - 63.) / 113.,
-                    _ => if i % 2 == 0 { 0.999 } else { -1.001 },
-                }).collect();
-                let actual = self.compute_groups(pipeline, &buffer, &x, [2048, 17, dtype, 0],
-                    17, 17u32.div_ceil(self.wave_head_rows))?;
+                let x: Vec<f32> = (0..2048)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => ((i * 13 % 127) as f32 - 63.) / 113.,
+                        _ => {
+                            if i % 2 == 0 {
+                                0.999
+                            } else {
+                                -1.001
+                            }
+                        }
+                    })
+                    .collect();
+                let actual = self.compute_groups(
+                    pipeline,
+                    &buffer,
+                    &x,
+                    [2048, 17, dtype, 0],
+                    17,
+                    17u32.div_ceil(self.wave_head_rows),
+                )?;
                 for (row, &value) in actual.iter().enumerate() {
-                    let products = weights[row * 2048..(row + 1) * 2048].iter()
-                        .zip(&x).map(|(&w, &x)| f64::from(w) * f64::from(x));
+                    let products = weights[row * 2048..(row + 1) * 2048]
+                        .iter()
+                        .zip(&x)
+                        .map(|(&w, &x)| f64::from(w) * f64::from(x));
                     let expected: f64 = products.clone().sum();
                     let sum_abs: f64 = products.map(f64::abs).sum();
                     let error = (f64::from(value) - expected).abs();
-                    ensure!(value.is_finite() && error <= 2e-5 + 2e-6 * sum_abs,
-                        "Wave head mismatch {dtype}/{case}/{row}: {value} != {expected}");
+                    ensure!(
+                        value.is_finite() && error <= 2e-5 + 2e-6 * sum_abs,
+                        "Wave head mismatch {dtype}/{case}/{row}: {value} != {expected}"
+                    );
                     max_abs_error = max_abs_error.max(error);
                     checked += 1;
                 }
             }
         }
-        Ok(serde_json::json!({"status":"passed","checked_values":checked,"max_abs_error":max_abs_error,
+        Ok(
+            serde_json::json!({"status":"passed","checked_values":checked,"max_abs_error":max_abs_error,
             "reference":"CPU f64 dot products; F16/BF16 weights",
-            "tolerance":"2e-5 + 2e-6 * sum(abs(x*w)); not full-model parity"}))
+            "tolerance":"2e-5 + 2e-6 * sum(abs(x*w)); not full-model parity"}),
+        )
     }
 
     fn configure_parallel_norm(&mut self) -> Result<()> {
@@ -3385,8 +3438,14 @@ impl Gpu {
         }
         self.wave_head_active = self.dense_wave != vk::Pipeline::null()
             && input_len == 2048
-            && rows.iter().all(|rows| rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize);
-        let rows_per_group = if self.wave_head_active { self.wave_head_rows } else { self.head_rows };
+            && rows.iter().all(|rows| {
+                rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize
+            });
+        let rows_per_group = if self.wave_head_active {
+            self.wave_head_rows
+        } else {
+            self.head_rows
+        };
         let pipeline = if self.wave_head_active {
             self.dense_wave
         } else if rows_per_group != 4 {
@@ -4167,22 +4226,36 @@ mod tests {
             assert!(gpu.check_wave_head(gpu.copy).is_err());
             for dtype in 0..=1 {
                 let bytes = |count: usize, bias: usize| -> Vec<u8> {
-                    (0..count).flat_map(|i| {
-                        let v = ((i * 17 + bias) % 113) as f32 / 128. - 0.25;
-                        (if dtype == 0 { half::f16::from_f32(v).to_bits() }
-                        else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
-                    }).collect()
+                    (0..count)
+                        .flat_map(|i| {
+                            let v = ((i * 17 + bias) % 113) as f32 / 128. - 0.25;
+                            (if dtype == 0 {
+                                half::f16::from_f32(v).to_bits()
+                            } else {
+                                half::bf16::from_f32(v).to_bits()
+                            })
+                            .to_le_bytes()
+                        })
+                        .collect()
                 };
-                let chunks = vec![(gpu.buffer(&bytes(2048 * 5, 3)).unwrap(), 5),
-                    (gpu.buffer(&bytes(2048 * 7, 9)).unwrap(), 7)];
-                let x: Vec<f32> = (0..2048).map(|i| ((i * 19 % 79) as f32 - 39.) / 64.).collect();
+                let chunks = vec![
+                    (gpu.buffer(&bytes(2048 * 5, 3)).unwrap(), 5),
+                    (gpu.buffer(&bytes(2048 * 7, 9)).unwrap(), 7),
+                ];
+                let x: Vec<f32> = (0..2048)
+                    .map(|i| ((i * 19 % 79) as f32 - 39.) / 64.)
+                    .collect();
                 let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
                 let mut plan = gpu.prepare_dense_head(chunks, 2048, dtype).unwrap();
                 assert!(gpu.wave_head_active);
                 let actual = gpu.forward_dense_head(&plan, &x).unwrap();
                 assert_eq!(actual.len(), 12);
-                assert!(actual.iter().zip(&reference).all(|(a,b)|
-                    a.is_finite() && (a-b).abs() <= 0.0001 + b.abs() * 0.0005));
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| a.is_finite() && (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
                 let vocabulary = [1u32, 3, 4, 5, 9, 11];
                 gpu.prepare_greedy_head(&mut plan, &vocabulary).unwrap();
                 let reference: Vec<_> = reference.into_iter().map(crate::math::half).collect();
