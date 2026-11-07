@@ -1,0 +1,56 @@
+#version 450
+layout(local_size_x = 128) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float x[]; };
+// The two weight vectors remain separate mathematically, packed consecutively.
+layout(set=0,binding=1,std430) readonly buffer Weights { float weight[]; };
+layout(set=0,binding=2,std430) buffer Hidden { float hidden[]; };
+layout(set=0,binding=3,std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint count; uint eps1_bits; uint eps2_bits; uint unused; } p;
+shared float partial[128];
+shared float residual[2048];
+shared float scale;
+#include "half_round.glsl"
+
+void reduceScale(float sum, uint eps_bits) {
+    uint tid = gl_LocalInvocationID.x;
+    partial[tid] = sum;
+    barrier();
+    for (uint stride = 64; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            precise float pair = partial[tid] + partial[tid + stride];
+            partial[tid] = pair;
+        }
+        barrier();
+    }
+    if (tid == 0) scale = 1.0 / sqrt(partial[0] / float(p.count) + uintBitsToFloat(eps_bits));
+    barrier();
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    precise float sum = 0.0;
+    for (uint i = tid; i < p.count; i += 128) {
+        precise float product = x[i] * x[i];
+        sum = sum + product;
+    }
+    reduceScale(sum, p.eps1_bits);
+    for (uint i = tid; i < p.count; i += 128) {
+        precise float normalized = halfRound(x[i] * scale * halfRound(weight[i]));
+        precise float value = hidden[i] + normalized;
+        residual[i] = value;
+        hidden[i] = value;
+    }
+    // Every invocation must finish reading scale1 before any writes scale2.
+    // Shared residual storage provides the inter-invocation communication.
+    barrier();
+    sum = 0.0;
+    for (uint i = tid; i < p.count; i += 128) {
+        precise float product = residual[i] * residual[i];
+        sum = sum + product;
+    }
+    reduceScale(sum, p.eps2_bits);
+    for (uint i = tid; i < p.count; i += 128) {
+        precise float normalized = halfRound(residual[i] * scale * halfRound(weight[p.count + i]));
+        y[i] = normalized;
+    }
+}

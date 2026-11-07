@@ -47,9 +47,7 @@ impl Fixture {
     }
 }
 
-#[test]
-#[ignore = "requires Vulkan; reduced nonzero LFM3 fixture, no real weights"]
-fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
+fn reduced_fixture(layer_count: usize) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let mut f = Fixture {
         metadata: BTreeMap::new(),
@@ -73,7 +71,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         })
         .collect();
     f.floats("lm_head.weight", &[16, 128], &head);
-    for layer in 0..3 {
+    for layer in 0..layer_count {
         let p = format!("model.layers.{layer}");
         for norm in [
             "operator_norm",
@@ -86,7 +84,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         for name in ["w1", "w2", "w3"] {
             f.exl3(&format!("{p}.feed_forward.{name}"), 128, 128);
         }
-        if layer == 0 {
+        if layer % 3 == 0 {
             f.exl3(&format!("{p}.conv.in_proj"), 128, 384);
             f.exl3(&format!("{p}.conv.out_proj"), 128, 128);
             f.floats(
@@ -122,12 +120,16 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         ("hidden_size", json!(128)),
         ("intermediate_size", json!(128)),
         ("vocab_size", json!(16)),
-        ("num_hidden_layers", json!(3)),
+        ("num_hidden_layers", json!(layer_count)),
         ("num_attention_heads", json!(1)),
         ("num_key_value_heads", json!(1)),
         (
             "layer_types",
-            json!(["conv", "full_attention", "sliding_attention"]),
+            json!(
+                (0..layer_count)
+                    .map(|i| ["conv", "full_attention", "sliding_attention"][i % 3])
+                    .collect::<Vec<_>>()
+            ),
         ),
         ("sliding_window", json!(2)),
         ("bos_token_id", json!(0)),
@@ -155,6 +157,13 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     tokenizer
         .save(dir.path().join("tokenizer.json"), false)
         .unwrap();
+    dir
+}
+
+#[test]
+#[ignore = "requires Vulkan; reduced nonzero LFM3 fixture, no real weights"]
+fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
+    let dir = reduced_fixture(3);
     let cancelled = AtomicBool::new(false);
     let mut engine = Engine::load(dir.path(), &cancelled, &mut |_| {}).unwrap();
     // Captured from the sequential 38f2d17 engine; allow cross-driver FP32 reduction noise.
@@ -192,6 +201,7 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(mlxl3_android::vulkan::set_layer_batch(4));
     mlxl3_android::vulkan::set_unroll2(true);
     mlxl3_android::vulkan::set_parallel_norm(true);
+    mlxl3_android::vulkan::set_fused_norm(true);
     mlxl3_android::vulkan::set_gpu_timestamps(false);
     assert!(mlxl3_android::vulkan::set_split_k(8));
     let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
@@ -205,9 +215,14 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(mlxl3_android::vulkan::set_layer_batch(1));
     mlxl3_android::vulkan::set_unroll2(false);
     mlxl3_android::vulkan::set_parallel_norm(false);
+    mlxl3_android::vulkan::set_fused_norm(false);
     mlxl3_android::vulkan::set_gpu_timestamps(true);
     assert!(mlxl3_android::vulkan::set_split_k(4));
     let mut experimental = experimental.unwrap();
+    assert_eq!(
+        experimental.model.gpu.diagnostics()["fused_norm_active"],
+        true
+    );
     assert_eq!(
         experimental.model.gpu.diagnostics()["parallel_norm_active"],
         true
@@ -418,4 +433,79 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .generate(&messages, 4, &cancelled, &mut |_| Ok(()))
             .is_err()
     );
+}
+
+#[test]
+#[ignore = "requires Vulkan; 24/23-layer reduced fixture, no real weights"]
+fn resident_large_batches_match_four_layer_graph_with_reset_and_cancel() {
+    // CI runs this under synchronization validation as well as ordinary lavapipe.
+    // 24 layers exercise the whole-model graph; 23 exercise a short final batch.
+    let cancel = AtomicBool::new(false);
+    for layer_count in [24usize, 23] {
+        let dir = reduced_fixture(layer_count);
+        mlxl3_android::vulkan::set_gpu_conv_layer(true);
+        mlxl3_android::vulkan::set_gpu_attention_layer(true);
+        assert!(mlxl3_android::vulkan::set_layer_batch(4));
+        let baseline = Engine::load(dir.path(), &cancel, &mut |_| {});
+        mlxl3_android::vulkan::set_gpu_conv_layer(false);
+        mlxl3_android::vulkan::set_gpu_attention_layer(false);
+        assert!(mlxl3_android::vulkan::set_layer_batch(1));
+        let mut baseline = baseline.unwrap();
+        let tokens = [3, 4, 5, 6];
+        let expected: Vec<_> = tokens
+            .iter()
+            .map(|token| {
+                baseline
+                    .model
+                    .forward(*token, true, &cancel)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        drop(baseline);
+        for batch in [8u32, 12, 24] {
+            mlxl3_android::vulkan::set_gpu_conv_layer(true);
+            mlxl3_android::vulkan::set_gpu_attention_layer(true);
+            assert!(mlxl3_android::vulkan::set_layer_batch(batch));
+            // Cover both instrumented and production graph submission paths.
+            mlxl3_android::vulkan::set_gpu_timestamps(batch != 12);
+            let candidate = Engine::load(dir.path(), &cancel, &mut |_| {});
+            mlxl3_android::vulkan::set_gpu_conv_layer(false);
+            mlxl3_android::vulkan::set_gpu_attention_layer(false);
+            assert!(mlxl3_android::vulkan::set_layer_batch(1));
+            mlxl3_android::vulkan::set_gpu_timestamps(true);
+            let mut candidate = candidate.unwrap();
+            assert_eq!(
+                candidate.model.gpu.diagnostics()["gpu_layer_batch_size"],
+                batch
+            );
+            for pass in 0..2 {
+                candidate.model.reset();
+                for (index, token) in tokens.iter().enumerate() {
+                    let before = candidate.model.gpu.submission_count();
+                    let actual = candidate
+                        .model
+                        .forward(*token, true, &cancel)
+                        .unwrap()
+                        .unwrap();
+                    // One submission per resident batch, plus the output head.
+                    assert_eq!(
+                        candidate.model.gpu.submission_count() - before,
+                        layer_count.div_ceil(batch as usize) as u64 + 1
+                    );
+                    for (actual, expected) in actual.iter().zip(&expected[index]) {
+                        assert!(
+                            (actual - expected).abs() <= 0.001 + expected.abs() * 0.004,
+                            "layers={layer_count}, batch={batch}, pass={pass}, token={index}"
+                        );
+                    }
+                }
+            }
+            cancel.store(true, Ordering::Relaxed);
+            let before = candidate.model.gpu.submission_count();
+            assert!(candidate.model.forward(3, true, &cancel).is_err());
+            assert_eq!(candidate.model.gpu.submission_count(), before);
+            cancel.store(false, Ordering::Relaxed);
+        }
+    }
 }

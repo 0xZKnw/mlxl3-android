@@ -52,14 +52,38 @@ jobs:
           scripts/build-native.sh
       - name: Test, lint and assemble installable APK
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
-      - name: APK checksum
-        run: sha256sum app/build/outputs/apk/debug/app-debug.apk > app/build/outputs/apk/debug/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - name: Prepare direct APK and checksum
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/MLXL3-Android-${GITHUB_SHA}.apk"
+          (cd dist && sha256sum "MLXL3-Android-${GITHUB_SHA}.apk" > SHA256SUMS)
+      - name: Upload installable APK without ZIP
+        id: apk_download
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: MLXL3-Android-${{ github.sha }}
+          path: dist/MLXL3-Android-${{ github.sha }}.apk
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Direct APK download link
+        env:
+          APK_URL: ${{ steps.apk_download.outputs.artifact-url }}
+          APK_DIGEST: ${{ steps.apk_download.outputs.artifact-digest }}
+        run: |
+          {
+            echo '## Installable Android APK'
+            printf '[Download APK (no ZIP)](%s)\n\n' "$APK_URL"
+            echo 'Open in a browser signed into GitHub. The link keeps the normal Actions access rules and expires with the artifact after 14 days.'
+            echo
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'SHA-256: `%s`\n' "$APK_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload checksums and instrumentation test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-and-checksum-${{ github.sha }}
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/debug/SHA256SUMS
+            dist/SHA256SUMS
             app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
           retention-days: 14
@@ -100,6 +124,7 @@ jobs:
           sudo apt-get install -y --no-upgrade --no-install-recommends glslc libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
       - name: EXL3 projection and complete reduced-model tests
         run: |
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::multiwave_shared -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::native_codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
@@ -118,6 +143,7 @@ jobs:
         run: |
           dpkg-query -W vulkan-validationlayers
           {
+            cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::multiwave_shared -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::resident_ -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1

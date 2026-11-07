@@ -104,8 +104,14 @@ or model downloader.
 ## Install and load a model
 
 1. Open [Actions](https://github.com/0xZKnw/mlxl3-android/actions/workflows/android.yml),
-   select a successful **Android APK** run and download its `MLXL3-Android-…`
-   artifact. Install `app-debug.apk` on an ARM64 Android phone.
+   select a successful **Android APK** run and use **Download APK (no ZIP)** in
+   its summary, or download the `MLXL3-Android-<commit>.apk` artifact. The installable
+   APK is uploaded as a single file, not wrapped in a ZIP. Open the link in a
+   browser signed into GitHub; it retains Actions access rules and expires after
+   14 days. Android/GitHub link associations may still open the GitHub app: use
+   the browser's open/download action in that case. Install the APK on an ARM64
+   Android phone. Checksums and the instrumentation-test APK are a separate ZIP,
+   not the app to install. Older runs still have their original ZIP artifacts.
 2. Download a complete `4bpw` variant folder from
    [LFM3-1.7B-EXL3](https://huggingface.co/0xzknw/LFM3-1.7B-EXL3).
    It must contain `config.json`, `tokenizer.json` and every `.safetensors` shard.

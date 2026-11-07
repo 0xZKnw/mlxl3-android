@@ -38,8 +38,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val prefs = application.getSharedPreferences("studio", 0)
-    private val initialPerformance = PerformanceDefaults.forDevice(Build.MANUFACTURER, Build.MODEL)
-        .withPreferences(prefs.all)
+    private val devicePerformance = PerformanceDefaults.forDevice(Build.MANUFACTURER, Build.MODEL)
+    private val performanceMigration = devicePerformance.migrationPreferences(prefs.all)
+    private val initialPerformance = run {
+        if (performanceMigration.isNotEmpty()) {
+            // Persist settings and migration marker atomically before reading initial state.
+            prefs.edit(commit = true) {
+                performanceMigration.forEach { (key, value) -> putBoolean(key, value) }
+            }
+        }
+        devicePerformance.withPreferences(prefs.all)
+    }
     var splitK by mutableStateOf(initialPerformance.splitK); private set
     var fastHead by mutableStateOf(prefs.getBoolean("fast_head", false)); private set
     var gpuConvLayer by mutableStateOf(initialPerformance.gpuConvLayer); private set
@@ -51,11 +60,21 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var layerBatch by mutableStateOf(initialPerformance.layerBatch); private set
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
+    var fusedNorm by mutableStateOf(prefs.getBoolean("fused_norm", false)); private set
+    var subgroupNorm by mutableStateOf(prefs.getBoolean("subgroup_norm", false)); private set
+    var exl3Multiwave by mutableStateOf(prefs.getBoolean("exl3_multiwave", false)); private set
+    var waveHead by mutableStateOf(prefs.getBoolean("wave_head", false)); private set
     var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
     var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
-    var gpuTimestamps by mutableStateOf(prefs.getBoolean("gpu_timestamps", true)); private set
-    var parallelNorm by mutableStateOf(prefs.getBoolean("parallel_norm", false)); private set
+    var gpuTimestamps by mutableStateOf(initialPerformance.gpuTimestamps); private set
+    var parallelNorm by mutableStateOf(initialPerformance.parallelNorm); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
+
+    init {
+        if (performanceMigration.isNotEmpty()) {
+            status = "Profil S24 mis à jour : RMSNorm parallèle activé, profilage désactivé · modifiable dans Réglages avancés"
+        }
+    }
 
     fun dismissError() { error = null }
     fun chooseSplitK(value: Int) {
@@ -111,7 +130,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun cycleLayerBatch() {
         if (busy) return
-        val choices = listOf(1, 2, 4)
+        val choices = listOf(1, 2, 4, 8, 12, 24)
         layerBatch = choices[(choices.indexOf(layerBatch) + 1) % choices.size]
         prefs.edit { putInt("layer_batch", layerBatch) }
         status = "Regroupement des couches mis à jour · rechargez le modèle"
@@ -121,6 +140,30 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         unroll2 = enabled
         prefs.edit { putBoolean("unroll2", enabled) }
         status = "Boucle K4/K5 expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseFusedNorm(enabled: Boolean) {
+        if (busy) return
+        fusedNorm = enabled
+        prefs.edit { putBoolean("fused_norm", enabled) }
+        status = "Fusion RMSNorm ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseSubgroupNorm(enabled: Boolean) {
+        if (busy) return
+        subgroupNorm = enabled
+        prefs.edit { putBoolean("subgroup_norm", enabled) }
+        status = "RMSNorm subgroup ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseExl3Multiwave(enabled: Boolean) {
+        if (busy) return
+        exl3Multiwave = enabled
+        prefs.edit { putBoolean("exl3_multiwave", enabled) }
+        status = "EXL3 multiwave ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseWaveHead(enabled: Boolean) {
+        if (busy) return
+        waveHead = enabled
+        prefs.edit { putBoolean("wave_head", enabled) }
+        status = "Tête une wave/ligne ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
     }
     fun chooseSubgroupHead(enabled: Boolean) {
         if (busy) return
@@ -220,6 +263,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
         NativeEngine.setUnroll2(unroll2)
         NativeEngine.setSubgroupHead(subgroupHead)
+        NativeEngine.setFusedNorm(fusedNorm)
+        NativeEngine.setSubgroupNorm(subgroupNorm)
+        NativeEngine.setExl3Multiwave(exl3Multiwave)
+        NativeEngine.setWaveHead(waveHead)
         check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
         NativeEngine.setGpuTimestamps(gpuTimestamps)
         NativeEngine.setParallelNorm(parallelNorm)
@@ -266,6 +313,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
             NativeEngine.setUnroll2(unroll2)
             NativeEngine.setSubgroupHead(subgroupHead)
+            NativeEngine.setFusedNorm(fusedNorm)
+            NativeEngine.setSubgroupNorm(subgroupNorm)
+            NativeEngine.setExl3Multiwave(exl3Multiwave)
+            NativeEngine.setWaveHead(waveHead)
             check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
             NativeEngine.setGpuTimestamps(gpuTimestamps)
             NativeEngine.setParallelNorm(parallelNorm)

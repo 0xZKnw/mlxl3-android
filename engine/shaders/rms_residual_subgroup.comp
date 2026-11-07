@@ -1,0 +1,37 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { float weight[]; };
+layout(set = 0, binding = 2, std430) buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint count; uint residual; uint eps_bits; uint unused; } p;
+// One slot per possible subgroup: safe for every legal subgroup size, no
+// required-subgroup-size extension or assumption of wave32/wave64.
+shared float partial[128];
+shared float scale;
+#include "half_round.glsl"
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    precise float sum = 0.0;
+    for (uint i = tid; i < p.count; i += 128u) {
+        precise float product = x[i] * x[i];
+        sum = sum + product;
+    }
+    float subgroupSum = subgroupAdd(sum);
+    if (subgroupElect()) partial[gl_SubgroupID] = subgroupSum;
+    barrier();
+    if (tid == 0u) {
+        precise float total = 0.0;
+        for (uint group = 0u; group < gl_NumSubgroups; ++group)
+            total = total + partial[group];
+        scale = 1.0 / sqrt(total / float(p.count) + uintBitsToFloat(p.eps_bits));
+    }
+    barrier();
+    for (uint i = tid; i < p.count; i += 128u) {
+        precise float normalized = halfRound(x[i] * scale * halfRound(weight[i]));
+        y[i] = p.residual == 0u ? normalized : y[i] + normalized;
+    }
+}

@@ -11,9 +11,12 @@ fn main() {
         "dense",
         "dense_pair",
         "dense_subgroup",
+        "dense_wave",
         "dense_rows",
         "rms_residual",
         "rms_residual_parallel",
+        "rms_residual_subgroup",
+        "rms_fused",
         "greedy",
         "norm_rope",
         "kv_update",
@@ -95,6 +98,23 @@ fn main() {
         assert!(status.success(), "wave32 shader compilation failed");
     }
     for bits in [4, 5] {
+        let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+                "-DEXL3_PARTIALS=1",
+                "-DEXL3_MULTI_WAVE=1",
+            ])
+            .arg(format!("-DEXL3_BITS={bits}"))
+            .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"))
+            .arg("shaders/qmv_stream.comp")
+            .arg("-o")
+            .arg(out.join(format!("qmv_multiwave_{bits}.spv")))
+            .status()
+            .expect("glslc");
+        assert!(status.success(), "multiwave shader compilation failed");
         let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
             .args([
                 "--target-env=vulkan1.1",

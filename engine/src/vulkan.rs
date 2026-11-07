@@ -76,14 +76,30 @@ static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
 static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
+static REQUESTED_EXL3_MULTIWAVE: AtomicBool = AtomicBool::new(false);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_WAVE_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
 static REQUESTED_GPU_TIMESTAMPS: AtomicBool = AtomicBool::new(true);
 
 /// Applies when the next model is loaded. Wall-clock timings remain available.
 pub fn set_gpu_timestamps(enabled: bool) {
     REQUESTED_GPU_TIMESTAMPS.store(enabled, Ordering::Relaxed);
+}
+
+static REQUESTED_SUBGROUP_NORM: AtomicBool = AtomicBool::new(false);
+
+/// Experimental; applies at the next model load, guarded by a numerical self-test.
+pub fn set_subgroup_norm(enabled: bool) {
+    REQUESTED_SUBGROUP_NORM.store(enabled, Ordering::Relaxed);
+}
+
+static REQUESTED_FUSED_NORM: AtomicBool = AtomicBool::new(false);
+
+/// Fuse only the adjacent post-RMS/residual and pre-RMS dispatches, after parity.
+pub fn set_fused_norm(enabled: bool) {
+    REQUESTED_FUSED_NORM.store(enabled, Ordering::Relaxed);
 }
 
 static REQUESTED_PARALLEL_NORM: AtomicBool = AtomicBool::new(false);
@@ -100,16 +116,28 @@ pub fn set_head_rows(value: u32) -> bool {
     true
 }
 
+/// Opt-in 2048-wide dense head, guarded at startup. Applies on model reload.
+pub fn set_wave_head(enabled: bool) {
+    REQUESTED_WAVE_HEAD.store(enabled, Ordering::Relaxed);
+}
+
 pub fn set_subgroup_head(enabled: bool) {
     REQUESTED_SUBGROUP_HEAD.store(enabled, Ordering::Relaxed);
+}
+
+/// Experimental four-wave shared-activation kernel. Applies on model reload.
+pub fn set_exl3_multiwave(enabled: bool) {
+    REQUESTED_EXL3_MULTIWAVE.store(enabled, Ordering::Relaxed);
 }
 
 pub fn set_unroll2(enabled: bool) {
     REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed);
 }
 
+/// Larger batches retain intermediate hidden states on the GPU. Opt-in until
+/// measured on the target device; cancellation is checked between batches.
 pub fn set_layer_batch(value: u32) -> bool {
-    if ![1, 2, 4].contains(&value) {
+    if ![1, 2, 4, 8, 12, 24].contains(&value) {
         return false;
     }
     REQUESTED_LAYER_BATCH.store(value, Ordering::Relaxed);
@@ -250,10 +278,17 @@ pub(crate) struct ConvPlan {
     convolve_query: u32,
 }
 
+struct FusedNormPair {
+    _weights: Buffer,
+    command: vk::CommandBuffer,
+    query_first: u32,
+}
+
 pub(crate) struct ConvLayerPlan {
     device: Arc<Device>,
     hidden: Buffer,
     _weights: Vec<Buffer>,
+    fused_norm: Option<FusedNormPair>,
     commands: [vk::CommandBuffer; 4],
     query_firsts: [u32; 4],
     conv_input: vk::CommandBuffer,
@@ -268,6 +303,7 @@ pub(crate) struct AttentionLayerPlan {
     q_data: Buffer,
     k_data: Buffer,
     _buffers: Vec<Buffer>,
+    fused_norm: Option<FusedNormPair>,
     commands: [vk::CommandBuffer; 9],
     query_firsts: [u32; 9],
     identities: [vk::CommandBuffer; 6],
@@ -575,6 +611,9 @@ pub struct Gpu {
     enable_cooperative_k5: bool,
     enable_specialized_mcg: bool,
     enable_unroll2: bool,
+    enable_multiwave: bool,
+    multiwave: [vk::Pipeline; 2],
+    multiwave_checked: [bool; 2],
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -600,6 +639,11 @@ pub struct Gpu {
     dense_pair: vk::Pipeline,
     dense_subgroup: vk::Pipeline,
     dense_rows: vk::Pipeline,
+    dense_wave: vk::Pipeline,
+    wave_head_requested: bool,
+    wave_head_rows: u32,
+    wave_head_active: bool,
+    wave_head_self_test: serde_json::Value,
     fast_head: bool,
     subgroup_head: bool,
     head_rows: u32,
@@ -607,7 +651,14 @@ pub struct Gpu {
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
     rms_residual: vk::Pipeline,
+    rms_fused: vk::Pipeline,
+    fused_norm_requested: bool,
+    fused_norm_self_test: serde_json::Value,
     gpu_timestamps_requested: bool,
+    subgroup_norm_requested: bool,
+    subgroup_norm_supported: bool,
+    subgroup_norm_active: bool,
+    subgroup_norm_self_test: serde_json::Value,
     parallel_norm_requested: bool,
     parallel_norm_active: bool,
     parallel_norm_self_test: serde_json::Value,
@@ -888,6 +939,9 @@ impl Gpu {
             enable_cooperative_k5: REQUESTED_COOPERATIVE_K5.load(Ordering::Relaxed),
             enable_specialized_mcg: REQUESTED_SPECIALIZED_MCG.load(Ordering::Relaxed),
             enable_unroll2: REQUESTED_UNROLL2.load(Ordering::Relaxed),
+            enable_multiwave: REQUESTED_EXL3_MULTIWAVE.load(Ordering::Relaxed),
+            multiwave: [vk::Pipeline::null(); 2],
+            multiwave_checked: [false; 2],
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -936,6 +990,28 @@ impl Gpu {
             dense_pair: vk::Pipeline::null(),
             dense_subgroup: vk::Pipeline::null(),
             dense_rows: vk::Pipeline::null(),
+            dense_wave: vk::Pipeline::null(),
+            wave_head_requested: REQUESTED_WAVE_HEAD.load(Ordering::Relaxed),
+            wave_head_rows: if subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::ARITHMETIC)
+                && subgroup.subgroup_size > 0
+                && subgroup.subgroup_size <= 128
+                && 128u32.is_multiple_of(subgroup.subgroup_size)
+            {
+                128 / if force_wave32 {
+                    32
+                } else {
+                    subgroup.subgroup_size
+                }
+            } else {
+                0
+            },
+            wave_head_active: false,
+            wave_head_self_test: serde_json::json!({"status":"not_requested"}),
             fast_head: REQUESTED_FAST_HEAD.load(Ordering::Relaxed),
             subgroup_head: REQUESTED_SUBGROUP_HEAD.load(Ordering::Relaxed)
                 && subgroup
@@ -949,7 +1025,19 @@ impl Gpu {
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
             rms_residual: vk::Pipeline::null(),
+            rms_fused: vk::Pipeline::null(),
+            fused_norm_requested: REQUESTED_FUSED_NORM.load(Ordering::Relaxed),
+            fused_norm_self_test: serde_json::json!({"status":"not_requested"}),
             gpu_timestamps_requested: gpu_timestamps,
+            subgroup_norm_requested: REQUESTED_SUBGROUP_NORM.load(Ordering::Relaxed),
+            subgroup_norm_supported: subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup.supported_operations.contains(
+                    vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::ARITHMETIC,
+                ),
+            subgroup_norm_active: false,
+            subgroup_norm_self_test: serde_json::json!({"status":"not_requested"}),
             parallel_norm_requested: REQUESTED_PARALLEL_NORM.load(Ordering::Relaxed),
             parallel_norm_active: false,
             parallel_norm_self_test: serde_json::json!({"status":"not_requested"}),
@@ -1166,10 +1254,168 @@ impl Gpu {
             gpu.submissions.set(0);
         }
         gpu.configure_parallel_norm()?;
+        gpu.configure_subgroup_norm()?;
+        gpu.configure_fused_norm()?;
+        gpu.configure_wave_head()?;
         // Startup checks must not enter prefill/decode counters.
         gpu.take_profile();
         gpu.submissions.set(0);
         Ok(gpu)
+    }
+
+    fn configure_wave_head(&mut self) -> Result<()> {
+        if !self.wave_head_requested {
+            return Ok(());
+        }
+        if self.wave_head_rows == 0 {
+            self.wave_head_self_test = serde_json::json!({"status":"unsupported_subgroup"});
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate = match self.pipeline_with_subgroup(
+            include_bytes!(concat!(env!("OUT_DIR"), "/dense_wave.spv")),
+            None,
+            true,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                self.wave_head_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+                return Ok(());
+            }
+        };
+        self.capture_stats("dense_one_subgroup_per_row".into(), candidate);
+        match self.check_wave_head(candidate) {
+            Ok(report) => {
+                self.dense_wave = candidate;
+                self.wave_head_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.wave_head_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.wave_head_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
+    }
+
+    fn check_wave_head(&mut self, pipeline: vk::Pipeline) -> Result<serde_json::Value> {
+        let mut checked = 0usize;
+        let mut max_abs_error = 0f64;
+        for dtype in 0..=1 {
+            let weights: Vec<f32> = (0..2048 * 17)
+                .map(|i| {
+                    let v = ((i * 37 % 251) as f32 - 125.) / 97.;
+                    if dtype == 0 {
+                        half::f16::from_f32(v).to_f32()
+                    } else {
+                        half::bf16::from_f32(v).to_f32()
+                    }
+                })
+                .collect();
+            let bytes: Vec<u8> = weights
+                .iter()
+                .flat_map(|&v| {
+                    (if dtype == 0 {
+                        half::f16::from_f32(v).to_bits()
+                    } else {
+                        half::bf16::from_f32(v).to_bits()
+                    })
+                    .to_le_bytes()
+                })
+                .collect();
+            let buffer = self.buffer(&bytes)?;
+            for case in 0..3 {
+                let x: Vec<f32> = (0..2048)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => ((i * 13 % 127) as f32 - 63.) / 113.,
+                        _ => {
+                            if i % 2 == 0 {
+                                0.999
+                            } else {
+                                -1.001
+                            }
+                        }
+                    })
+                    .collect();
+                let actual = self.compute_groups(
+                    pipeline,
+                    &buffer,
+                    &x,
+                    [2048, 17, dtype, 0],
+                    17,
+                    17u32.div_ceil(self.wave_head_rows),
+                )?;
+                for (row, &value) in actual.iter().enumerate() {
+                    let products = weights[row * 2048..(row + 1) * 2048]
+                        .iter()
+                        .zip(&x)
+                        .map(|(&w, &x)| f64::from(w) * f64::from(x));
+                    let expected: f64 = products.clone().sum();
+                    let sum_abs: f64 = products.map(f64::abs).sum();
+                    let error = (f64::from(value) - expected).abs();
+                    ensure!(
+                        value.is_finite() && error <= 2e-5 + 2e-6 * sum_abs,
+                        "Wave head mismatch {dtype}/{case}/{row}: {value} != {expected}"
+                    );
+                    max_abs_error = max_abs_error.max(error);
+                    checked += 1;
+                }
+            }
+        }
+        Ok(
+            serde_json::json!({"status":"passed","checked_values":checked,"max_abs_error":max_abs_error,
+            "reference":"CPU f64 dot products; F16/BF16 weights",
+            "tolerance":"2e-5 + 2e-6 * sum(abs(x*w)); not full-model parity"}),
+        )
+    }
+
+    fn configure_subgroup_norm(&mut self) -> Result<()> {
+        if !self.subgroup_norm_requested {
+            return Ok(());
+        }
+        // Keep the already validated parallel/serial pipeline on any failure.
+        if !self.subgroup_norm_supported {
+            self.subgroup_norm_self_test = serde_json::json!({"status":"unsupported_subgroup"});
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate = match self.pipeline(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/rms_residual_subgroup.spv"
+        ))) {
+            Ok(pipeline) => pipeline,
+            Err(err) => {
+                self.subgroup_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+                return Ok(());
+            }
+        };
+        self.capture_stats("rms_residual_subgroup".into(), candidate);
+        match self.check_parallel_norm(candidate) {
+            Ok(report) => {
+                unsafe { self.device.raw.destroy_pipeline(self.rms_residual, None) };
+                self.rms_residual = candidate;
+                self.subgroup_norm_active = true;
+                self.parallel_norm_active = false;
+                self.subgroup_norm_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.subgroup_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.subgroup_norm_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
     }
 
     fn configure_parallel_norm(&mut self) -> Result<()> {
@@ -1208,6 +1454,257 @@ impl Gpu {
         }
         self.parallel_norm_self_test["elapsed_ns"] = elapsed_ns(started).into();
         Ok(())
+    }
+
+    fn configure_fused_norm(&mut self) -> Result<()> {
+        if !self.fused_norm_requested {
+            return Ok(());
+        }
+        // This variant uses the existing 128-lane parallel reduction tree.
+        if !self.parallel_norm_active {
+            self.fused_norm_self_test = serde_json::json!({
+                "status":"fallback", "reason":"requires validated parallel RMSNorm"
+            });
+            return Ok(());
+        }
+        let started = Instant::now();
+        let candidate =
+            match self.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/rms_fused.spv"))) {
+                Ok(pipeline) => pipeline,
+                Err(err) => {
+                    self.fused_norm_self_test =
+                        serde_json::json!({"status":"fallback","error":err.to_string()});
+                    return Ok(());
+                }
+            };
+        self.capture_stats("rms_fused_parallel_pair".into(), candidate);
+        match self.check_fused_norm(candidate) {
+            Ok(report) => {
+                self.rms_fused = candidate;
+                self.fused_norm_self_test = report;
+            }
+            Err(err) => {
+                if self.device.abandoned.load(Ordering::Relaxed) {
+                    return Err(err);
+                }
+                unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                self.fused_norm_self_test =
+                    serde_json::json!({"status":"fallback","error":err.to_string()});
+            }
+        }
+        self.fused_norm_self_test["elapsed_ns"] = elapsed_ns(started).into();
+        Ok(())
+    }
+
+    fn prepare_fused_norm_pair(
+        &mut self,
+        input: &Buffer,
+        hidden: &Buffer,
+        post: &[f32],
+        pre: &[f32],
+        eps: f32,
+    ) -> Result<Option<FusedNormPair>> {
+        if self.rms_fused == vk::Pipeline::null() || post.len() > 2048 {
+            return Ok(None);
+        }
+        ensure!(
+            !post.is_empty() && pre.len() == post.len() && eps.is_finite() && eps > 0.,
+            "Invalid fused RMSNorm pair"
+        );
+        let values: Vec<_> = post
+            .iter()
+            .chain(pre)
+            .map(|v| crate::math::half(*v))
+            .collect();
+        ensure!(
+            values.iter().all(|v| v.is_finite()),
+            "Invalid fused RMSNorm weights"
+        );
+        let bytes: Vec<_> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let weights = self.buffer(&bytes)?;
+        let output = self.input.as_ref().context("GPU input unavailable")?;
+        ensure!(
+            input.raw != hidden.raw && input.raw != output.raw && hidden.raw != output.raw,
+            "Fused RMSNorm buffers must not alias"
+        );
+        let (command, query_first) = self.prepare_operator(Dispatch {
+            input,
+            weights: &weights,
+            output: hidden,
+            aux: Some(output),
+            params: [post.len() as u32, eps.to_bits(), eps.to_bits(), 0],
+            outputs: post.len(),
+            groups: 1,
+            groups_y: 1,
+            pipeline: self.rms_fused,
+            barrier_after: true,
+        })?;
+        Ok(Some(FusedNormPair {
+            _weights: weights,
+            command,
+            query_first,
+        }))
+    }
+
+    fn replace_norm_pair(
+        commands: &mut Vec<vk::CommandBuffer>,
+        first: vk::CommandBuffer,
+        second: vk::CommandBuffer,
+        fused: Option<&FusedNormPair>,
+    ) -> Result<()> {
+        if let Some(fused) = fused {
+            // Commands are unique per plan; replace only the adjacent pair.
+            let index = commands
+                .windows(2)
+                .position(|pair| pair == [first, second])
+                .context("Missing adjacent normalization pair")?;
+            commands[index] = fused.command;
+            commands.remove(index + 1);
+        }
+        Ok(())
+    }
+
+    fn collect_norm_pair_intervals(
+        &self,
+        queries: &[u32],
+        first: usize,
+        fused: Option<&FusedNormPair>,
+    ) {
+        for (index, &query) in queries.iter().enumerate() {
+            if let Some(fused) = fused {
+                if index == first {
+                    self.collect_other_interval(fused.query_first, OtherKind::Norm);
+                    continue;
+                }
+                if index == first + 1 {
+                    continue;
+                }
+            }
+            self.collect_other_interval(query, OtherKind::Norm);
+        }
+    }
+
+    fn check_fused_norm(&mut self, pipeline: vk::Pipeline) -> Result<serde_json::Value> {
+        let bytes = |x: &[f32]| -> Vec<u8> { x.iter().flat_map(|v| v.to_ne_bytes()).collect() };
+        let mut checked = 0usize;
+        let mut max_error = 0f32;
+        for count in [1usize, 127, 128, 129, 2048] {
+            let post: Vec<f32> = (0..count).map(|i| 0.5 + (i % 17) as f32 / 16.).collect();
+            let pre: Vec<f32> = (0..count).map(|i| 0.25 + (i % 13) as f32 / 8.).collect();
+            let mut joined = post.clone();
+            joined.extend_from_slice(&pre);
+            let weights = self.buffer(&bytes(&joined))?;
+            let post_buffer = self.buffer(&bytes(&post))?;
+            let pre_buffer = self.buffer(&bytes(&pre))?;
+            let input = self.mapped_buffer(count * 4)?;
+            let hidden = self.mapped_buffer(count * 4)?;
+            let output = self.mapped_buffer(count * 4)?;
+            let reference_hidden = self.mapped_buffer(count * 4)?;
+            let reference_output = self.mapped_buffer(count * 4)?;
+            let make = |input, weights, output, aux, pipeline, params| {
+                self.prepare_operator(Dispatch {
+                    input,
+                    weights,
+                    output,
+                    aux,
+                    pipeline,
+                    params,
+                    outputs: count,
+                    groups: 1,
+                    groups_y: 1,
+                    barrier_after: true,
+                })
+                .map(|pair| pair.0)
+            };
+            let eps = 1e-5f32;
+            let eps2 = if count == 129 { 0.003f32 } else { eps };
+            let fused = make(
+                &input,
+                &weights,
+                &hidden,
+                Some(&output),
+                pipeline,
+                [count as u32, eps.to_bits(), eps2.to_bits(), 0],
+            )?;
+            let reference = [
+                make(
+                    &input,
+                    &post_buffer,
+                    &reference_hidden,
+                    None,
+                    self.rms_residual,
+                    [count as u32, 1, eps.to_bits(), 0],
+                )?,
+                make(
+                    &reference_hidden,
+                    &pre_buffer,
+                    &reference_output,
+                    None,
+                    self.rms_residual,
+                    [count as u32, 0, eps2.to_bits(), 0],
+                )?,
+            ];
+            for case in 0..5 {
+                let x: Vec<f32> = (0..count)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => ((i * 37 % 257) as f32 - 128.) / 31.,
+                        2 => {
+                            if i % 127 == 0 {
+                                65504.
+                            } else {
+                                0.0001
+                            }
+                        }
+                        3 => ((i % 17) as f32 - 8.) * 0.00001,
+                        _ => {
+                            if i % 2 == 0 {
+                                65504.
+                            } else {
+                                -65504.
+                            }
+                        }
+                    })
+                    .collect();
+                let base: Vec<f32> = (0..count).map(|i| (i % 19) as f32 / 8. - 1.).collect();
+                input.write(&bytes(&x))?;
+                hidden.write(&bytes(&base))?;
+                reference_hidden.write(&bytes(&base))?;
+                self.submit_graph(&reference, Instant::now())?;
+                self.submit_graph(&[fused], Instant::now())?;
+                let expected_norm = crate::math::rms_norm(&x, &post, eps)?;
+                let expected_hidden: Vec<f32> =
+                    base.iter().zip(expected_norm).map(|(a, b)| a + b).collect();
+                let expected_output = crate::math::rms_norm(&expected_hidden, &pre, eps2)?;
+                for (actual_buffer, reference_buffer, expected) in [
+                    (&hidden, &reference_hidden, expected_hidden),
+                    (&output, &reference_output, expected_output),
+                ] {
+                    let actual = actual_buffer.read_f32(count)?;
+                    let reference = reference_buffer.read_f32(count)?;
+                    for ((actual, reference), expected) in
+                        actual.iter().zip(reference).zip(expected)
+                    {
+                        ensure!(
+                            actual.to_bits() == reference.to_bits(),
+                            "Fused RMSNorm bit mismatch at count={count} case={case}"
+                        );
+                        let error = (actual - expected).abs();
+                        ensure!(
+                            error <= 2e-5 + expected.abs() * 0.002,
+                            "Fused RMSNorm CPU mismatch at count={count} case={case}"
+                        );
+                        max_error = max_error.max(error);
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        Ok(
+            serde_json::json!({"status":"passed", "checked_values":checked,
+            "max_cpu_abs_error":max_error, "reference":"two unfused GPU RMSNorm dispatches, bit exact; CPU serial tolerance",
+            "scope":"post RMSNorm FP16 + FP32 residual + pre RMSNorm FP16; not full-model parity"}),
+        )
     }
 
     fn check_parallel_norm(&mut self, pipeline: vk::Pipeline) -> Result<serde_json::Value> {
@@ -1509,17 +2006,31 @@ impl Gpu {
             "gpu_greedy_requested":self.gpu_greedy,
             "gpu_attention_layer_experimental":self.gpu_attention_layer,
             "gpu_layer_batch_size":self.layer_batch,
+            "subgroup_norm_requested":self.subgroup_norm_requested,
+            "subgroup_norm_supported":self.subgroup_norm_supported,
+            "subgroup_norm_active":self.subgroup_norm_active,
+            "subgroup_norm_self_test":self.subgroup_norm_self_test,
+            "fused_norm_requested":self.fused_norm_requested,
+            "fused_norm_active":self.rms_fused != vk::Pipeline::null(),
+            "fused_norm_self_test":self.fused_norm_self_test,
             "parallel_norm_requested":self.parallel_norm_requested,
             "parallel_norm_active":self.parallel_norm_active,
             "parallel_norm_self_test":self.parallel_norm_self_test,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
-            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
-            "dense_head_rows_per_group":self.head_rows,
+            "wave_head_requested":self.wave_head_requested,"wave_head_active":self.wave_head_active,
+            "wave_head_self_test":self.wave_head_self_test,
+            "wave_head_rows_per_group":self.wave_head_rows,
+            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.wave_head_active {"one_subgroup_per_row_2048_experimental"} else if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
+            "dense_head_rows_per_group":if self.wave_head_active {self.wave_head_rows} else {self.head_rows},
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
             "cooperative_k4_self_test":if self.cooperative_k4_active {self.cooperative_k4_self_test} else if self.mcg_cooperative[3] {"passed_mcg"} else {self.cooperative_k4_self_test},
             "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
             "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
             "experimental_k5_requested":self.enable_cooperative_k5,"specialized_mcg_requested":self.enable_specialized_mcg,
+            "exl3_multiwave_requested":self.enable_multiwave,
+            "exl3_multiwave_active_bitrates":self.multiwave.iter().enumerate()
+                .filter(|(_, p)| **p != vk::Pipeline::null()).map(|(i, _)| i + 4).collect::<Vec<_>>(),
+            "exl3_multiwave_self_test":"bit-exact partials against native wave32; not full-model parity",
             "experimental_unroll2_requested":self.enable_unroll2,
             "experimental_unroll2_active":self.enable_unroll2 && (self.cooperative_k4_active || self.cooperative_k5_active || self.mcg_cooperative.iter().any(|v| *v)),
             "split_k":self.split_k,
@@ -1688,6 +2199,124 @@ impl Gpu {
         })();
         if !self.device.abandoned.load(Ordering::Relaxed) {
             unsafe { self.device.raw.destroy_pipeline(reference, None) };
+        }
+        result
+    }
+
+    fn multiwave_pipeline(&mut self, bits: u32) -> Result<Option<vk::Pipeline>> {
+        if !self.enable_multiwave
+            || ![4, 5].contains(&bits)
+            || !self.native_verified
+            || !self.allow_cooperative_k4
+            || self.properties.limits.max_compute_shared_memory_size < 64
+        {
+            return Ok(None);
+        }
+        let index = (bits - 4) as usize;
+        if !self.multiwave_checked[index] {
+            self.multiwave_checked[index] = true;
+            let bytes: &[u8] = if bits == 4 {
+                include_bytes!(concat!(env!("OUT_DIR"), "/qmv_multiwave_4.spv"))
+            } else {
+                include_bytes!(concat!(env!("OUT_DIR"), "/qmv_multiwave_5.spv"))
+            };
+            match self.pipeline_with_subgroup(bytes, None, true) {
+                Ok(candidate) => {
+                    match self.verify_multiwave(bits, candidate) {
+                        Ok(true) => {
+                            self.multiwave[index] = candidate;
+                            self.capture_stats("exl3_multiwave_shared".into(), candidate);
+                        }
+                        result => {
+                            if self.device.abandoned.load(Ordering::Relaxed) {
+                                bail!("GPU abandoned during multiwave verification");
+                            }
+                            unsafe {
+                                self.device.raw.destroy_pipeline(candidate, None);
+                            }
+                            self.native_pipeline_errors.push(format!("multiwave K{bits} verification failed: {result:?}; baseline fallback"));
+                        }
+                    }
+                }
+                Err(err) => self
+                    .native_pipeline_errors
+                    .push(format!("multiwave K{bits}: {err}; baseline fallback")),
+            }
+        }
+        Ok((self.multiwave[index] != vk::Pipeline::null()).then_some(self.multiwave[index]))
+    }
+
+    fn verify_multiwave(&mut self, bits: u32, candidate: vk::Pipeline) -> Result<bool> {
+        let bytes: &[u8] = if bits == 4 {
+            include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv"))
+        } else {
+            include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv"))
+        };
+        let reference = self.pipeline_with_subgroup(bytes, None, true)?;
+        let result = (|| -> Result<bool> {
+            // Includes inactive tail waves, all codebooks, and every supported split.
+            for (rows, cols) in [(128usize, 48usize), (256, 128)] {
+                let states: Vec<u16> = (0..rows * cols)
+                    .map(|i| (i.wrapping_mul(181).wrapping_add(i / 13 * 911 + 37)) as u16)
+                    .collect();
+                let packed = codec::pack(&states, bits as usize)?;
+                let weights = self.buffer(
+                    &packed
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )?;
+                let x: Vec<f32> = (0..rows)
+                    .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+                    .collect();
+                for codebook in 0..3 {
+                    for splits in [1u32, 2, 4, 8] {
+                        if splits > self.properties.limits.max_compute_work_group_count[1] {
+                            continue;
+                        }
+                        let mut results = Vec::new();
+                        for (pipeline, groups) in
+                            [(reference, cols / 16), (candidate, (cols / 16).div_ceil(4))]
+                        {
+                            let output = self.output.as_ref().context("GPU output unavailable")?;
+                            self.execute(
+                                &x,
+                                &[Dispatch {
+                                    input: self.input.as_ref().context("GPU input unavailable")?,
+                                    weights: &weights,
+                                    output,
+                                    params: [
+                                        rows as u32,
+                                        cols as u32,
+                                        bits | (splits << 8),
+                                        codebook,
+                                    ],
+                                    outputs: cols * 4 * splits as usize,
+                                    groups: groups as u32,
+                                    groups_y: splits,
+                                    pipeline,
+                                    aux: None,
+                                    barrier_after: false,
+                                }],
+                            )?;
+                            results.push(output.read_f32(cols * 4 * splits as usize)?);
+                        }
+                        if !results[0]
+                            .iter()
+                            .zip(&results[1])
+                            .all(|(a, b)| a.to_bits() == b.to_bits())
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        })();
+        if !self.device.abandoned.load(Ordering::Relaxed) {
+            unsafe {
+                self.device.raw.destroy_pipeline(reference, None);
+            }
         }
         result
     }
@@ -1899,7 +2528,11 @@ impl Gpu {
                 && shape.cols / 16 <= self.max_groups as usize,
             "EXL3 dispatch exceeds GPU limit"
         );
-        let (pipeline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
+        let (baseline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
+        let multiwave = self.multiwave_pipeline(shape.bits)?;
+        // Multiwave always writes split partials, even if the baseline fell back.
+        let split = split || multiwave.is_some();
+        let pipeline = multiwave.unwrap_or(baseline);
         let split_count = self.split_for_shape(shape.input, shape.output, shape.bits);
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
@@ -1942,7 +2575,11 @@ impl Gpu {
                     shape.codebook,
                 ],
                 outputs: shape.cols,
-                groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
+                groups: if multiwave.is_some() {
+                    (shape.cols / 16).div_ceil(4) as u32
+                } else {
+                    exl3_groups(shape.cols).context("Invalid EXL3 groups")?
+                },
                 groups_y: if split { split_count } else { 1 },
                 pipeline,
                 aux: None,
@@ -1998,7 +2635,13 @@ impl Gpu {
             bits: shape.bits,
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
-            kernel: if split {
+            kernel: if multiwave.is_some() {
+                if shape.bits == 4 {
+                    "wave32_multiwave4_shared_k4"
+                } else {
+                    "wave32_multiwave4_shared_k5"
+                }
+            } else if split {
                 let cooperative =
                     if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
                         shape.bits + 10
@@ -2515,7 +3158,7 @@ impl Gpu {
         position: usize,
     ) -> Result<Vec<f32>> {
         ensure!(
-            (2..=4).contains(&layers.len())
+            (2..=24).contains(&layers.len())
                 && links.len() + 1 == layers.len()
                 && position < 2048
                 && x.iter().all(|v| v.is_finite()),
@@ -2600,6 +3243,20 @@ impl Gpu {
                     ]);
                 }
             }
+            match layer {
+                ResidentLayer::Conv(plan, _, _) => Self::replace_norm_pair(
+                    &mut commands,
+                    plan.commands[1],
+                    plan.commands[2],
+                    plan.fused_norm.as_ref(),
+                )?,
+                ResidentLayer::Attention(plan, _, _, _) => Self::replace_norm_pair(
+                    &mut commands,
+                    plan.commands[6],
+                    plan.commands[7],
+                    plan.fused_norm.as_ref(),
+                )?,
+            }
             if i < links.len() {
                 commands.push(links[i].command);
             }
@@ -2613,9 +3270,11 @@ impl Gpu {
                     }
                     self.collect_interval(conv.convolve_query, Some(true));
                     self.collect_interval(mlp.activate_query, Some(false));
-                    for query in plan.query_firsts {
-                        self.collect_other_interval(query, OtherKind::Norm);
-                    }
+                    self.collect_norm_pair_intervals(
+                        &plan.query_firsts,
+                        1,
+                        plan.fused_norm.as_ref(),
+                    );
                 }
                 ResidentLayer::Attention(plan, matrices, _, mlp) => {
                     let [q, k, v, output] = *matrices;
@@ -2626,9 +3285,8 @@ impl Gpu {
                     for i in [2usize, 3, 4, 5] {
                         self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention);
                     }
-                    for i in [0usize, 6, 7, 8] {
-                        self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm);
-                    }
+                    let norm_queries = [0usize, 6, 7, 8].map(|i| plan.query_firsts[i]);
+                    self.collect_norm_pair_intervals(&norm_queries, 1, plan.fused_norm.as_ref());
                     self.collect_interval(mlp.activate_query, Some(false));
                 }
             }
@@ -2851,6 +3509,8 @@ impl Gpu {
             commands.push(command);
             query_firsts.push(query);
         }
+        let fused_norm =
+            self.prepare_fused_norm_pair(&c.output.output, &hidden, c.norms[1], c.norms[2], c.eps)?;
         let mut buffers = norm_weights;
         buffers.push(q_output);
         buffers.push(k_output);
@@ -2861,6 +3521,7 @@ impl Gpu {
             q_data,
             k_data,
             _buffers: buffers,
+            fused_norm,
             commands: commands
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("Invalid attention command count"))?,
@@ -2966,28 +3627,32 @@ impl Gpu {
         plan.hidden.write(&hidden_bytes)?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
         self.prepare_attention_state(plan, position)?;
-        self.submit_graph(
-            &[
-                plan.commands[0],
-                q.command,
-                k.command,
-                v.command,
-                plan.commands[1],
-                plan.commands[2],
-                plan.commands[3],
-                plan.commands[4],
-                plan.commands[5],
-                output.command,
-                plan.commands[6],
-                plan.commands[7],
-                mlp.gate.command,
-                mlp.up.command,
-                mlp.activate,
-                mlp.down.command,
-                plan.commands[8],
-            ],
-            Instant::now(),
+        let mut commands = vec![
+            plan.commands[0],
+            q.command,
+            k.command,
+            v.command,
+            plan.commands[1],
+            plan.commands[2],
+            plan.commands[3],
+            plan.commands[4],
+            plan.commands[5],
+            output.command,
+            plan.commands[6],
+            plan.commands[7],
+            mlp.gate.command,
+            mlp.up.command,
+            mlp.activate,
+            mlp.down.command,
+            plan.commands[8],
+        ];
+        Self::replace_norm_pair(
+            &mut commands,
+            plan.commands[6],
+            plan.commands[7],
+            plan.fused_norm.as_ref(),
         )?;
+        self.submit_graph(&commands, Instant::now())?;
         for matrix in [q, k, v, output, &mlp.gate, &mlp.up, &mlp.down] {
             self.collect_timestamps(Some(matrix.query_first));
         }
@@ -2995,9 +3660,8 @@ impl Gpu {
         for i in [2usize, 3, 4, 5] {
             self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention);
         }
-        for i in [0usize, 6, 7, 8] {
-            self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm);
-        }
+        let norm_queries = [0usize, 6, 7, 8].map(|i| plan.query_firsts[i]);
+        self.collect_norm_pair_intervals(&norm_queries, 1, plan.fused_norm.as_ref());
         self.collect_interval(mlp.activate_query, Some(false));
         let started = Instant::now();
         let result = plan.hidden.read_f32(plan.heads * plan.dim);
@@ -3060,10 +3724,13 @@ impl Gpu {
             commands.push(command);
             query_firsts.push(query);
         }
+        let fused_norm =
+            self.prepare_fused_norm_pair(&conv.output.output, &hidden, norms[1], norms[2], eps)?;
         Ok(ConvLayerPlan {
             device: self.device.clone(),
             hidden,
             _weights: weights,
+            fused_norm,
             commands: commands
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("Invalid norm command count"))?,
@@ -3100,30 +3767,32 @@ impl Gpu {
         let started = Instant::now();
         plan.hidden.write(bytes)?;
         self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
-        self.submit_graph(
-            &[
-                plan.commands[0],
-                conv.input.command,
-                conv.convolve,
-                conv.output.command,
-                plan.commands[1],
-                plan.commands[2],
-                mlp.gate.command,
-                mlp.up.command,
-                mlp.activate,
-                mlp.down.command,
-                plan.commands[3],
-            ],
-            Instant::now(),
+        let mut commands = vec![
+            plan.commands[0],
+            conv.input.command,
+            conv.convolve,
+            conv.output.command,
+            plan.commands[1],
+            plan.commands[2],
+            mlp.gate.command,
+            mlp.up.command,
+            mlp.activate,
+            mlp.down.command,
+            plan.commands[3],
+        ];
+        Self::replace_norm_pair(
+            &mut commands,
+            plan.commands[1],
+            plan.commands[2],
+            plan.fused_norm.as_ref(),
         )?;
+        self.submit_graph(&commands, Instant::now())?;
         for matrix in [&conv.input, &conv.output, &mlp.gate, &mlp.up, &mlp.down] {
             self.collect_timestamps(Some(matrix.query_first));
         }
         self.collect_interval(conv.convolve_query, Some(true));
         self.collect_interval(mlp.activate_query, Some(false));
-        for query in plan.query_firsts {
-            self.collect_other_interval(query, OtherKind::Norm);
-        }
+        self.collect_norm_pair_intervals(&plan.query_firsts, 1, plan.fused_norm.as_ref());
         let started = Instant::now();
         let output = plan.hidden.read_f32(plan.size);
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
@@ -3287,8 +3956,19 @@ impl Gpu {
         {
             self.head_rows = 4;
         }
-        let rows_per_group = self.head_rows;
-        let pipeline = if rows_per_group != 4 {
+        self.wave_head_active = self.dense_wave != vk::Pipeline::null()
+            && input_len == 2048
+            && rows.iter().all(|rows| {
+                rows.div_ceil(self.wave_head_rows as usize) <= self.max_groups as usize
+            });
+        let rows_per_group = if self.wave_head_active {
+            self.wave_head_rows
+        } else {
+            self.head_rows
+        };
+        let pipeline = if self.wave_head_active {
+            self.dense_wave
+        } else if rows_per_group != 4 {
             self.dense_rows
         } else if self.subgroup_head {
             self.dense_subgroup
@@ -3692,14 +4372,19 @@ impl Gpu {
                     0,
                 );
             }
-            // Scratch is shared between prepared command buffers in the same submission.
+            // All device accesses recorded here are compute shader accesses, including
+            // layer copies. Keep this entry dependency even for independent-looking
+            // projections: their scratch aliases across prepared command buffers.
+            // It covers RAW/WAW visibility and WAR execution ordering. Host writes
+            // are coherent and made available by queue submission; host reads have
+            // a separate COMPUTE_SHADER -> HOST barrier at the end of the batch.
             let scratch = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)];
             d.cmd_pipeline_barrier(
                 command,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &scratch,
                 &[],
@@ -3751,7 +4436,11 @@ impl Gpu {
                 let push = std::slice::from_raw_parts(job.params.as_ptr().cast::<u8>(), 16);
                 d.cmd_push_constants(command, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
                 d.cmd_dispatch(command, job.groups, job.groups_y, 1);
-                if job.barrier_after {
+                // Only intra-command consumers need a trailing dependency here.
+                // The next command begins with the same compute dependency, while
+                // a final command is followed by the batch's HOST_READ dependency.
+                // Do not remove barriers between EXL3 phases or head/argmax jobs.
+                if job.barrier_after && index + 1 < jobs.len() {
                     let barriers = [vk::MemoryBarrier::default()
                         .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                         .dst_access_mask(
@@ -3902,6 +4591,9 @@ impl Drop for Gpu {
         unsafe {
             let d = &self.device.raw;
             d.destroy_pipeline(self.qmv, None);
+            for pipeline in self.multiwave {
+                d.destroy_pipeline(pipeline, None);
+            }
             for pipeline in self.qmv_stream {
                 d.destroy_pipeline(pipeline, None);
             }
@@ -3912,10 +4604,12 @@ impl Drop for Gpu {
             d.destroy_pipeline(self.dense_pair, None);
             d.destroy_pipeline(self.dense_subgroup, None);
             d.destroy_pipeline(self.dense_rows, None);
+            d.destroy_pipeline(self.dense_wave, None);
             d.destroy_pipeline(self.reduce, None);
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
             d.destroy_pipeline(self.rms_residual, None);
+            d.destroy_pipeline(self.rms_fused, None);
             d.destroy_pipeline(self.greedy, None);
             d.destroy_pipeline(self.norm_rope, None);
             d.destroy_pipeline(self.kv_update, None);
@@ -3949,6 +4643,92 @@ mod tests {
         assert_eq!(profile.device_samples, 0);
         assert_eq!(profile.device_compute_ns, 0);
         assert_eq!(profile.device_queue_ns, 0);
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; chained RAW/WAR/WAW and host-read dependencies"]
+    fn resident_chained_norm_dependencies_preserve_half_boundaries() {
+        for timestamps in [false, true] {
+            let mut gpu = Gpu::new_with_options(true, timestamps).unwrap();
+            let count = 2048usize;
+            let values = |seed: usize| -> Vec<f32> {
+                (0..count)
+                    .map(|i| ((i * seed % 71) as f32 - 35.) / 64.)
+                    .collect()
+            };
+            let bytes = |x: &[f32]| -> Vec<u8> { x.iter().flat_map(|v| v.to_ne_bytes()).collect() };
+            let x = values(13);
+            let base = values(7);
+            let post_weights = values(17);
+            let pre_weights = values(23);
+            let source = gpu.buffer(&bytes(&x)).unwrap();
+            let hidden = gpu.buffer(&bytes(&base)).unwrap();
+            let output = gpu.mapped_buffer(count * 4).unwrap();
+            let post = gpu.buffer(&bytes(&post_weights)).unwrap();
+            let pre = gpu.buffer(&bytes(&pre_weights)).unwrap();
+            let prepare = |input, weights, output, pipeline, residual| {
+                gpu.prepare_operator(Dispatch {
+                    input,
+                    weights,
+                    output,
+                    params: [count as u32, residual, 1e-5f32.to_bits(), 0],
+                    outputs: count,
+                    groups: if pipeline == gpu.copy { 16 } else { 1 },
+                    groups_y: 1,
+                    pipeline,
+                    aux: None,
+                    barrier_after: true,
+                })
+                .unwrap()
+                .0
+            };
+            let commands = [
+                prepare(&source, &post, &hidden, gpu.rms_residual, 1),
+                prepare(&hidden, &pre, &output, gpu.rms_residual, 0),
+                prepare(&output, &pre, &source, gpu.copy, 0),
+            ];
+            let mut expected_source = x;
+            let mut expected_hidden = base;
+            // Reuse the exact same command buffers and storage. The final copy
+            // overwrites the first operator's input, exercising WAR as well as
+            // next-iteration RAW and repeated residual WAW dependencies.
+            for _ in 0..4 {
+                let normalized =
+                    crate::math::rms_norm(&expected_source, &post_weights, 1e-5).unwrap();
+                for (hidden, norm) in expected_hidden.iter_mut().zip(normalized) {
+                    *hidden += norm;
+                }
+                expected_source =
+                    crate::math::rms_norm(&expected_hidden, &pre_weights, 1e-5).unwrap();
+                gpu.submit_graph(&commands, Instant::now()).unwrap();
+                for (actual, expected) in
+                    source.read_f32(count).unwrap().iter().zip(&expected_source)
+                {
+                    assert!((actual - expected).abs() <= 2e-6 + expected.abs() * 0.001);
+                }
+                for (actual, expected) in
+                    hidden.read_f32(count).unwrap().iter().zip(&expected_hidden)
+                {
+                    assert!((actual - expected).abs() <= 2e-5 + expected.abs() * 0.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; exact two-stage RMSNorm fusion and startup rejection"]
+    fn resident_fused_norm_validates_both_outputs_and_rejects_wrong_shader() {
+        let mut gpu = Gpu::new().unwrap();
+        gpu.fused_norm_requested = true;
+        gpu.configure_fused_norm().unwrap();
+        assert_eq!(gpu.rms_fused, vk::Pipeline::null());
+        assert_eq!(gpu.fused_norm_self_test["status"], "fallback");
+        gpu.parallel_norm_requested = true;
+        gpu.configure_parallel_norm().unwrap();
+        gpu.configure_fused_norm().unwrap();
+        assert_ne!(gpu.rms_fused, vk::Pipeline::null());
+        assert_eq!(gpu.fused_norm_self_test["status"], "passed");
+        assert!(gpu.check_fused_norm(gpu.copy).is_err());
     }
 
     #[test]
@@ -4044,6 +4824,199 @@ mod tests {
         assert_eq!(gpu.diagnostics()["parallel_norm_active"], false);
         unsafe { gpu.device.raw.destroy_pipeline(parallel, None) };
         eprintln!("parallel RMSNorm: {checked} f64 comparisons; max abs error {max_oracle_error}");
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; parallel RMSNorm with independent f64 oracle"]
+    fn resident_subgroup_norm_matches_f64_and_preserves_residual() {
+        let mut gpu = Gpu::new().unwrap();
+        if !gpu.subgroup_norm_supported {
+            return;
+        }
+        let parallel = gpu
+            .pipeline(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/rms_residual_subgroup.spv"
+            )))
+            .unwrap();
+        let mut max_oracle_error = 0f32;
+        let mut checked = 0usize;
+        for count in [1usize, 127, 128, 129, 2047, 2048] {
+            let weights: Vec<f32> = (0..count)
+                .map(|i| ((i * 13 % 31) as f32 - 15.) / 7.)
+                .collect();
+            let bytes: Vec<u8> = weights.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            let weights_buffer = gpu.buffer(&bytes).unwrap();
+            for case in 0..6 {
+                let x: Vec<f32> = (0..count)
+                    .map(|i| match case {
+                        0 => 0.,
+                        1 => 1.,
+                        2 => ((i * 37 % 257) as f32 - 128.) / 31.,
+                        3 => {
+                            if i % 127 == 0 {
+                                -65504.
+                            } else {
+                                0.0001
+                            }
+                        }
+                        4 => ((i % 17) as f32 - 8.) * 0.00001,
+                        _ => {
+                            if i % 2 == 0 {
+                                65504.
+                            } else {
+                                -65504.
+                            }
+                        }
+                    })
+                    .collect();
+                for eps in [1e-5f32, 0.01] {
+                    // Independent high-precision reference, then the checkpoint's
+                    // FP16 weight and normalized-output boundaries.
+                    let squares: f64 = x.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    let scale = (squares / count as f64 + f64::from(eps)).sqrt().recip();
+                    let expected_norm: Vec<f32> = x
+                        .iter()
+                        .zip(&weights)
+                        .map(|(&v, &w)| {
+                            crate::math::half(
+                                (f64::from(v) * scale * f64::from(crate::math::half(w))) as f32,
+                            )
+                        })
+                        .collect();
+                    for residual in [0u32, 1] {
+                        let base: Vec<f32> =
+                            (0..count).map(|i| (i % 19) as f32 / 7. - 1.).collect();
+                        let bytes: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
+                        gpu.output.as_ref().unwrap().write(&bytes).unwrap();
+                        let actual = gpu
+                            .compute_groups(
+                                parallel,
+                                &weights_buffer,
+                                &x,
+                                [count as u32, residual, eps.to_bits(), 0],
+                                count,
+                                1,
+                            )
+                            .unwrap();
+                        for (i, (&value, &norm)) in actual.iter().zip(&expected_norm).enumerate() {
+                            let expected = if residual == 0 { norm } else { base[i] + norm };
+                            let error = (value - expected).abs();
+                            assert!(
+                                error <= 2e-6 + norm.abs() * 0.001,
+                                "count={count} case={case} eps={eps} residual={residual} i={i}: {value} vs {expected}"
+                            );
+                            max_oracle_error = max_oracle_error.max(error);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            gpu.check_parallel_norm(parallel).unwrap()["checked_values"],
+            13056
+        );
+        // A shader returning the input must be rejected by the startup guard.
+        assert!(gpu.check_parallel_norm(gpu.copy).is_err());
+        assert_eq!(gpu.diagnostics()["parallel_norm_active"], false);
+        unsafe { gpu.device.raw.destroy_pipeline(parallel, None) };
+        eprintln!("parallel RMSNorm: {checked} f64 comparisons; max abs error {max_oracle_error}");
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; validates RMS subgroup selection and fallback"]
+    fn resident_subgroup_norm_selection_and_fallback() {
+        for profiling in [false, true] {
+            let mut gpu = Gpu::new_with_options(true, profiling).unwrap();
+            // Explicit per-instance flags avoid mutating process-wide test settings.
+            gpu.parallel_norm_requested = true;
+            gpu.configure_parallel_norm().unwrap();
+            assert!(gpu.parallel_norm_active);
+            let fallback = gpu.rms_residual;
+            let supported = gpu.subgroup_norm_supported;
+            gpu.subgroup_norm_requested = true;
+            gpu.subgroup_norm_supported = false;
+            gpu.configure_subgroup_norm().unwrap();
+            assert_eq!(gpu.rms_residual, fallback);
+            assert!(gpu.parallel_norm_active);
+            assert!(!gpu.subgroup_norm_active);
+            assert_eq!(
+                gpu.subgroup_norm_self_test["status"],
+                "unsupported_subgroup"
+            );
+            gpu.subgroup_norm_supported = supported;
+            if supported {
+                gpu.configure_subgroup_norm().unwrap();
+                assert!(gpu.subgroup_norm_active, "{}", gpu.subgroup_norm_self_test);
+                assert!(!gpu.parallel_norm_active);
+                assert_eq!(gpu.subgroup_norm_self_test["status"], "passed");
+                assert!(gpu.check_parallel_norm(gpu.copy).is_err());
+            }
+            assert_eq!(gpu.diagnostics()["subgroup_norm_active"], supported);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan subgroup arithmetic; guarded one-subgroup head"]
+    fn resident_wave_head_guard_and_chunked_greedy() {
+        for profiling in [false, true] {
+            set_gpu_timestamps(profiling);
+            set_wave_head(true);
+            let gpu = Gpu::new();
+            set_wave_head(false);
+            set_gpu_timestamps(true);
+            let mut gpu = gpu.unwrap();
+            if gpu.wave_head_rows == 0 {
+                assert_eq!(gpu.wave_head_self_test["status"], "unsupported_subgroup");
+                continue;
+            }
+            assert_ne!(gpu.dense_wave, vk::Pipeline::null());
+            assert_eq!(gpu.wave_head_self_test["checked_values"], 102);
+            assert!(gpu.check_wave_head(gpu.copy).is_err());
+            for dtype in 0..=1 {
+                let bytes = |count: usize, bias: usize| -> Vec<u8> {
+                    (0..count)
+                        .flat_map(|i| {
+                            let v = ((i * 17 + bias) % 113) as f32 / 128. - 0.25;
+                            (if dtype == 0 {
+                                half::f16::from_f32(v).to_bits()
+                            } else {
+                                half::bf16::from_f32(v).to_bits()
+                            })
+                            .to_le_bytes()
+                        })
+                        .collect()
+                };
+                let chunks = vec![
+                    (gpu.buffer(&bytes(2048 * 5, 3)).unwrap(), 5),
+                    (gpu.buffer(&bytes(2048 * 7, 9)).unwrap(), 7),
+                ];
+                let x: Vec<f32> = (0..2048)
+                    .map(|i| ((i * 19 % 79) as f32 - 39.) / 64.)
+                    .collect();
+                let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+                let mut plan = gpu.prepare_dense_head(chunks, 2048, dtype).unwrap();
+                assert!(gpu.wave_head_active);
+                let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                assert_eq!(actual.len(), 12);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| a.is_finite() && (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
+                let vocabulary = [1u32, 3, 4, 5, 9, 11];
+                gpu.prepare_greedy_head(&mut plan, &vocabulary).unwrap();
+                let reference: Vec<_> = reference.into_iter().map(crate::math::half).collect();
+                let expected = crate::math::greedy_in_vocabulary(&reference, &vocabulary).unwrap();
+                assert_eq!(gpu.forward_greedy_head(&plan, &x).unwrap(), expected);
+                let chunks = vec![(gpu.buffer(&bytes(128 * 5, 3)).unwrap(), 5)];
+                let fallback = gpu.prepare_dense_head(chunks, 128, dtype).unwrap();
+                assert!(!gpu.wave_head_active);
+                assert_eq!(fallback.pipeline, gpu.dense);
+            }
+        }
     }
 
     #[test]
@@ -4157,60 +5130,68 @@ mod tests {
     #[test]
     #[ignore = "requires Vulkan; experimental resident convolution layer"]
     fn resident_conv_layer_matches_cpu_layer_across_ring() {
-        let mut gpu = Gpu::new().unwrap();
-        let make_conv = |gpu: &mut Gpu| {
-            let input = resident_matrix(gpu, 128, 384, 11);
-            let output = resident_matrix(gpu, 128, 128, 17);
-            let weights: Vec<f32> = (0..128 * 7).map(|i| (i as f32 % 19. - 9.) / 64.).collect();
-            gpu.prepare_conv(input, output, &weights).unwrap()
-        };
-        let reference_conv = make_conv(&mut gpu);
-        let candidate_conv = make_conv(&mut gpu);
-        let gate = resident_matrix(&mut gpu, 128, 256, 19);
-        let up = resident_matrix(&mut gpu, 128, 256, 23);
-        let down = resident_matrix(&mut gpu, 256, 128, 29);
-        let mlp = gpu.prepare_mlp(gate, up, down).unwrap();
-        let norms: Vec<Vec<f32>> = (0..4)
-            .map(|n| {
-                (0..128)
-                    .map(|i| 0.75 + ((i + n) % 9) as f32 / 64.)
-                    .collect()
-            })
-            .collect();
-        let plan = gpu
-            .prepare_conv_layer(
-                &candidate_conv,
-                &mlp,
-                [&norms[0], &norms[1], &norms[2], &norms[3]],
-                1e-5,
-            )
-            .unwrap();
-        for position in 0..10 {
-            let x: Vec<f32> = (0..128)
-                .map(|i| ((i * 7 + position * 3) % 41) as f32 / 32. - 0.5)
+        for fused in [false, true] {
+            let mut gpu = Gpu::new().unwrap();
+            gpu.parallel_norm_requested = true;
+            gpu.configure_parallel_norm().unwrap();
+            gpu.fused_norm_requested = fused;
+            gpu.configure_fused_norm().unwrap();
+            assert_eq!(gpu.rms_fused != vk::Pipeline::null(), fused);
+            let make_conv = |gpu: &mut Gpu| {
+                let input = resident_matrix(gpu, 128, 384, 11);
+                let output = resident_matrix(gpu, 128, 128, 17);
+                let weights: Vec<f32> = (0..128 * 7).map(|i| (i as f32 % 19. - 9.) / 64.).collect();
+                gpu.prepare_conv(input, output, &weights).unwrap()
+            };
+            let reference_conv = make_conv(&mut gpu);
+            let candidate_conv = make_conv(&mut gpu);
+            let gate = resident_matrix(&mut gpu, 128, 256, 19);
+            let up = resident_matrix(&mut gpu, 128, 256, 23);
+            let down = resident_matrix(&mut gpu, 256, 128, 29);
+            let mlp = gpu.prepare_mlp(gate, up, down).unwrap();
+            let norms: Vec<Vec<f32>> = (0..4)
+                .map(|n| {
+                    (0..128)
+                        .map(|i| 0.75 + ((i + n) % 9) as f32 / 64.)
+                        .collect()
+                })
                 .collect();
-            let normalized = crate::math::rms_norm(&x, &norms[0], 1e-5).unwrap();
-            let conv = gpu
-                .forward_conv(&reference_conv, &normalized, position)
+            let plan = gpu
+                .prepare_conv_layer(
+                    &candidate_conv,
+                    &mlp,
+                    [&norms[0], &norms[1], &norms[2], &norms[3]],
+                    1e-5,
+                )
                 .unwrap();
-            let post = crate::math::rms_norm(&conv, &norms[1], 1e-5).unwrap();
-            let hidden: Vec<f32> = x.iter().zip(&post).map(|(a, b)| a + b).collect();
-            let normalized = crate::math::rms_norm(&hidden, &norms[2], 1e-5).unwrap();
-            let down = gpu.forward_mlp(&mlp, &normalized).unwrap();
-            let post = crate::math::rms_norm(&down, &norms[3], 1e-5).unwrap();
-            let expected: Vec<f32> = hidden.iter().zip(&post).map(|(a, b)| a + b).collect();
-            let before = gpu.submission_count();
-            let actual = gpu
-                .forward_conv_layer(&plan, &candidate_conv, &mlp, &x, position)
-                .unwrap();
-            assert_eq!(gpu.submission_count() - before, 1);
-            assert!(
-                actual
-                    .iter()
-                    .zip(&expected)
-                    .all(|(a, b)| (a - b).abs() <= 0.003 + b.abs() * 0.005),
-                "position {position}"
-            );
+            assert_eq!(plan.fused_norm.is_some(), fused);
+            for position in 0..10 {
+                let x: Vec<f32> = (0..128)
+                    .map(|i| ((i * 7 + position * 3) % 41) as f32 / 32. - 0.5)
+                    .collect();
+                let normalized = crate::math::rms_norm(&x, &norms[0], 1e-5).unwrap();
+                let conv = gpu
+                    .forward_conv(&reference_conv, &normalized, position)
+                    .unwrap();
+                let post = crate::math::rms_norm(&conv, &norms[1], 1e-5).unwrap();
+                let hidden: Vec<f32> = x.iter().zip(&post).map(|(a, b)| a + b).collect();
+                let normalized = crate::math::rms_norm(&hidden, &norms[2], 1e-5).unwrap();
+                let down = gpu.forward_mlp(&mlp, &normalized).unwrap();
+                let post = crate::math::rms_norm(&down, &norms[3], 1e-5).unwrap();
+                let expected: Vec<f32> = hidden.iter().zip(&post).map(|(a, b)| a + b).collect();
+                let before = gpu.submission_count();
+                let actual = gpu
+                    .forward_conv_layer(&plan, &candidate_conv, &mlp, &x, position)
+                    .unwrap();
+                assert_eq!(gpu.submission_count() - before, 1);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(a, b)| (a - b).abs() <= 0.003 + b.abs() * 0.005),
+                    "position {position}"
+                );
+            }
         }
     }
 
@@ -4663,6 +5644,27 @@ mod tests {
         assert!(actual.iter().any(|v| v.abs() > 0.01));
         assert!(!fallback.native_kernels.iter().any(|v| *v));
     }
+    #[test]
+    #[ignore = "requires Vulkan wave32 shuffle and native FP16"]
+    fn multiwave_shared_activation_matches_reference_and_falls_back() {
+        let mut gpu = Gpu::new().unwrap();
+        gpu.enable_multiwave = true;
+        if gpu.native_verified && gpu.allow_cooperative_k4 {
+            for bits in [4, 5] {
+                assert!(
+                    gpu.multiwave_pipeline(bits).unwrap().is_some(),
+                    "{:?}",
+                    gpu.native_pipeline_errors
+                );
+            }
+        }
+        gpu.allow_cooperative_k4 = false;
+        assert!(gpu.multiwave_pipeline(4).unwrap().is_none());
+        gpu.enable_multiwave = false;
+        assert!(gpu.multiwave_pipeline(5).unwrap().is_none());
+        assert!(gpu.multiwave_pipeline(6).unwrap().is_none());
+    }
+
     #[test]
     fn memory_selection_preserves_requirements_and_prefers_local() {
         assert_eq!(choose_memory_type(&[6, 7, 7], 7), Some(1));
