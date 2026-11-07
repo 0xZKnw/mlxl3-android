@@ -71,6 +71,16 @@ pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setGpuAttentionLayer
     crate::vulkan::set_gpu_attention_layer(enabled != 0);
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setFfnSplits(
+    _env: JNIEnv,
+    _class: JClass,
+    k4: jint,
+    k5: jint,
+) -> jboolean {
+    u8::from(k4 >= 0 && k5 >= 0 && crate::vulkan::set_ffn_splits(k4 as u32, k5 as u32))
+}
+
 fn emit(env: &mut JNIEnv, callback: &JObject, event: serde_json::Value) -> Result<()> {
     let text = env.new_string(event.to_string())?;
     env.call_method(

@@ -53,6 +53,9 @@ target device before treating any option as an improvement. If a cooperative
 kernel fails its startup parity check, the engine falls back to the prior path.
 GPU greedy selection applies the FP16 boundary, checks all logits for non-finite
 values, applies the tokenizer vocabulary mask, and resolves ties by lowest token ID.
+The FFN K4 and K5 menu entries can override the global split count separately
+for the 2048→7680 and 7680→2048 shapes. Tapping cycles through global, 1, 2,
+4 and 8; reload the model to apply. The diagnostic reports effective choices.
 Android system traces include `MLXL3 upload`, `MLXL3 record commands`,
 `MLXL3 queue submit`, `MLXL3 fence wait`, and `MLXL3 readback` slices. Capture
 them with CPU scheduling and frequency tracks in Perfetto to distinguish CPU

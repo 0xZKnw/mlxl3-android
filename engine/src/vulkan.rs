@@ -73,6 +73,15 @@ static REQUESTED_COOPERATIVE_K5: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SPECIALIZED_MCG: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_GREEDY: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
+static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
+static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_ffn_splits(k4: u32, k5: u32) -> bool {
+    if ![0, 1, 2, 4, 8].contains(&k4) || ![0, 1, 2, 4, 8].contains(&k5) { return false; }
+    REQUESTED_FFN_K4_SPLIT.store(k4, Ordering::Relaxed);
+    REQUESTED_FFN_K5_SPLIT.store(k5, Ordering::Relaxed);
+    true
+}
 
 pub fn set_gpu_attention_layer(enabled: bool) {
     REQUESTED_GPU_ATTENTION_LAYER.store(enabled, Ordering::Relaxed);
@@ -127,7 +136,10 @@ const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
 const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 320;
 const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
 const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 320;
-type RopeAngleCache = (Option<usize>, BTreeMap<(u32, usize, usize), Vec<(f32, f32)>>);
+type RopeAngleCache = (
+    Option<usize>,
+    BTreeMap<(u32, usize, usize), Vec<(f32, f32)>>,
+);
 
 fn projection_queries(index: usize) -> Option<u32> {
     (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
@@ -499,6 +511,8 @@ pub struct Gpu {
     cooperative_k5_active: bool,
     cooperative_k5_self_test: &'static str,
     split_k: u32,
+    ffn_k4_split: u32,
+    ffn_k5_split: u32,
     native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
     prepared: usize,
@@ -747,6 +761,10 @@ impl Gpu {
         let amd_info = amd_info_enabled
             .then(|| ash::amd::shader_info::Device::new(&device._instance.raw, &device.raw));
         let requested_split_k = REQUESTED_SPLIT_K.load(Ordering::Relaxed);
+        let max_split = if props.limits.max_compute_work_group_count[1] >= 8
+            && props.limits.max_storage_buffer_range >= 32768 * 32 * 4 { 8 } else { 4 };
+        let ffn_k4_split = REQUESTED_FFN_K4_SPLIT.load(Ordering::Relaxed);
+        let ffn_k5_split = REQUESTED_FFN_K5_SPLIT.load(Ordering::Relaxed);
         let mut gpu = Self {
             device,
             properties: props,
@@ -798,6 +816,8 @@ impl Gpu {
             } else {
                 4
             },
+            ffn_k4_split: if ffn_k4_split <= max_split { ffn_k4_split } else { 0 },
+            ffn_k5_split: if ffn_k5_split <= max_split { ffn_k5_split } else { 0 },
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
@@ -965,7 +985,7 @@ impl Gpu {
         gpu.norm_rope = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/norm_rope.spv")))?;
         gpu.kv_update = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/kv_update.spv")))?;
         gpu.attention = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/attention.spv")))?;
-        let partial_bytes = 32768 * 4 * gpu.split_k.max(4) as usize * 4;
+        let partial_bytes = 32768 * 4 * gpu.split_k.max(gpu.ffn_k4_split).max(gpu.ffn_k5_split).max(4) as usize * 4;
         gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
         gpu.hadamard = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/hadamard.spv")))?;
@@ -1245,6 +1265,7 @@ impl Gpu {
             "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
             "experimental_k5_requested":self.enable_cooperative_k5,"specialized_mcg_requested":self.enable_specialized_mcg,
             "split_k":self.split_k,
+            "ffn_k4_split_override":self.ffn_k4_split,"ffn_k5_split_override":self.ffn_k5_split,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
             "limits":{"storage_buffer_bytes":self.max_range,"shared_memory_bytes":self.properties.limits.max_compute_shared_memory_size,
@@ -1319,6 +1340,15 @@ impl Gpu {
 
     pub fn submission_count(&self) -> u64 {
         self.submissions.get()
+    }
+
+    fn split_for_shape(&self, input: usize, output: usize, bits: u32) -> u32 {
+        let selected = match (input, output, bits) {
+            (2048, 7680, 4) => self.ffn_k4_split,
+            (7680, 2048, 5) => self.ffn_k5_split,
+            _ => 0,
+        };
+        if selected == 0 { self.split_k } else { selected }
     }
 
     pub(crate) fn dense_timing_snapshot(&self) -> (u64, u64) {
@@ -1592,6 +1622,7 @@ impl Gpu {
             "EXL3 dispatch exceeds GPU limit"
         );
         let (pipeline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
+        let split_count = self.split_for_shape(shape.input, shape.output, shape.bits);
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
         let result = self.mapped_buffer(shape.cols * 4)?;
@@ -1629,12 +1660,12 @@ impl Gpu {
                 params: [
                     params[0],
                     params[1],
-                    shape.bits | (self.split_k << 8),
+                    shape.bits | (split_count << 8),
                     shape.codebook,
                 ],
                 outputs: shape.cols,
                 groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
-                groups_y: if split { self.split_k } else { 1 },
+                groups_y: if split { split_count } else { 1 },
                 pipeline,
                 aux: None,
                 barrier_after: true,
@@ -1646,7 +1677,7 @@ impl Gpu {
                 params: [
                     params[0],
                     params[1],
-                    if split { 2 | (self.split_k << 8) } else { 1 },
+                    if split { 2 | (split_count << 8) } else { 1 },
                     shape.output as u32,
                 ],
                 outputs: shape.cols,
@@ -1700,7 +1731,7 @@ impl Gpu {
                     } else {
                         0
                     };
-                wave_kernel_label(self.split_k, cooperative)
+                wave_kernel_label(split_count, cooperative)
             } else if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
                 "native_f16_literal"
             } else if self.native_kernels[shape.bits as usize - 1] {
@@ -2428,13 +2459,21 @@ impl Gpu {
         let cache_hit;
         {
             let mut cache = self.rope_angles.borrow_mut();
-            if cache.0 != Some(position) { cache.0 = Some(position); cache.1.clear(); }
+            if cache.0 != Some(position) {
+                cache.0 = Some(position);
+                cache.1.clear();
+            }
             let key = (plan.theta.to_bits(), plan.dim, plan.active);
             cache_hit = cache.1.contains_key(&key);
-            let angles = cache.1.entry(key).or_insert_with(|| (0..plan.active).map(|j| {
-                let angle = position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
-                angle.sin_cos()
-            }).collect());
+            let angles = cache.1.entry(key).or_insert_with(|| {
+                (0..plan.active)
+                    .map(|j| {
+                        let angle =
+                            position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
+                        angle.sin_cos()
+                    })
+                    .collect()
+            });
             for (j, &(sin, cos)) in angles.iter().enumerate() {
                 q_data[plan.dim + 2 * j] = sin;
                 q_data[plan.dim + 2 * j + 1] = cos;
@@ -2444,8 +2483,11 @@ impl Gpu {
         }
         self.record_profile(|p| {
             p.rope_ns = p.rope_ns.saturating_add(elapsed_ns(started));
-            if cache_hit { p.rope_cache_hits = p.rope_cache_hits.saturating_add(1); }
-            else { p.rope_cache_misses = p.rope_cache_misses.saturating_add(1); }
+            if cache_hit {
+                p.rope_cache_hits = p.rope_cache_hits.saturating_add(1);
+            } else {
+                p.rope_cache_misses = p.rope_cache_misses.saturating_add(1);
+            }
         });
         let started = Instant::now();
         let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -2719,7 +2761,8 @@ impl Gpu {
         if !split {
             return self.compute_groups(pipeline, weights, x, params, outputs, groups);
         }
-        params[2] |= self.split_k << 8;
+        let split_count = self.split_for_shape(x.len(), outputs, bits);
+        params[2] |= split_count << 8;
         let output = self.output.as_ref().context("GPU output unavailable")?;
         let partials = self.partials.as_ref().context("GPU partials unavailable")?;
         self.execute(
@@ -2732,7 +2775,7 @@ impl Gpu {
                     params,
                     outputs,
                     groups,
-                    groups_y: self.split_k,
+                    groups_y: split_count,
                     pipeline,
                     aux: None,
                     barrier_after: true,
@@ -3532,6 +3575,13 @@ mod tests {
     #[ignore = "requires Vulkan; split-K numerical parity"]
     fn resident_split_k_variants_match_reference() {
         let mut gpu = Gpu::new().unwrap();
+        gpu.ffn_k4_split = 2;
+        gpu.ffn_k5_split = 1;
+        assert_eq!(gpu.split_for_shape(2048, 7680, 4), 2);
+        assert_eq!(gpu.split_for_shape(7680, 2048, 5), 1);
+        assert_eq!(gpu.split_for_shape(2048, 512, 6), 4);
+        gpu.ffn_k4_split = 0;
+        gpu.ffn_k5_split = 0;
         let input: Vec<f32> = (0..128).map(|i| (i as f32 % 17. - 8.) / 32.).collect();
         for bits in [4usize, 5] {
             let states: Vec<u16> = (0..128 * 128).map(|i| (i * 37 + i / 7) as u16).collect();

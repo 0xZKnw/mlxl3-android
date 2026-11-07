@@ -45,6 +45,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var specializedMcg by mutableStateOf(prefs.getBoolean("specialized_mcg", false)); private set
     var gpuGreedy by mutableStateOf(prefs.getBoolean("gpu_greedy", false)); private set
     var gpuAttentionLayer by mutableStateOf(prefs.getBoolean("gpu_attention_layer", false)); private set
+    var ffnK4Split by mutableStateOf(prefs.getInt("ffn_k4_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
+    var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -89,6 +91,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         gpuAttentionLayer = enabled
         prefs.edit { putBoolean("gpu_attention_layer", enabled) }
         status = "Couches attention GPU ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
+    }
+    fun cycleFfnSplit(k4: Boolean) {
+        if (busy) return
+        val choices = listOf(0, 1, 2, 4, 8)
+        val previous = if (k4) ffnK4Split else ffnK5Split
+        val next = choices[(choices.indexOf(previous) + 1) % choices.size]
+        if (k4) ffnK4Split = next else ffnK5Split = next
+        prefs.edit { putInt(if (k4) "ffn_k4_split" else "ffn_k5_split", next) }
+        status = "Réglage FFN mis à jour · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -153,6 +164,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
         NativeEngine.setGpuGreedy(gpuGreedy)
         NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
+        check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -192,6 +204,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
             NativeEngine.setGpuGreedy(gpuGreedy)
             NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
+            check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

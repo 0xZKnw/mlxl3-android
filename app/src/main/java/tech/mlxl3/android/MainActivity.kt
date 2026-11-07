@@ -83,7 +83,8 @@ class MainActivity : ComponentActivity() {
                 model::send, model::stop, model::dismissError, model.diagnostics, model.splitK, model::chooseSplitK,
                 model.fastHead, model::chooseFastHead, model.gpuConvLayer, model::chooseGpuConvLayer,
                 model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg,
-                model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer)
+                model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
+                model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit)
         }
     }
 }
@@ -105,7 +106,8 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  cooperativeK5: Boolean = false, onK5: (Boolean) -> Unit = {},
                  specializedMcg: Boolean = false, onMcg: (Boolean) -> Unit = {},
                  gpuGreedy: Boolean = false, onGpuGreedy: (Boolean) -> Unit = {},
-                 gpuAttentionLayer: Boolean = false, onGpuAttentionLayer: (Boolean) -> Unit = {}) {
+                 gpuAttentionLayer: Boolean = false, onGpuAttentionLayer: (Boolean) -> Unit = {},
+                 ffnK4Split: Int = 0, ffnK5Split: Int = 0, onCycleFfnSplit: (Boolean) -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -139,6 +141,10 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
                                     onClick = { menu = false; onSplitK(value) })
                             }
+                            DropdownMenuItem(text = { Text("FFN K4 : ${if (ffnK4Split == 0) "global" else ffnK4Split} · changer / recharger") },
+                                onClick = { menu = false; onCycleFfnSplit(true) })
+                            DropdownMenuItem(text = { Text("FFN K5 : ${if (ffnK5Split == 0) "global" else ffnK5Split} · changer / recharger") },
+                                onClick = { menu = false; onCycleFfnSplit(false) })
                             DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onFastHead(!fastHead) })
                             DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },
