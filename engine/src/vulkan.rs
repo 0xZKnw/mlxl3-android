@@ -79,6 +79,13 @@ static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
+static REQUESTED_GPU_TIMESTAMPS: AtomicBool = AtomicBool::new(true);
+
+/// Applies when the next model is loaded. Wall-clock timings remain available.
+pub fn set_gpu_timestamps(enabled: bool) {
+    REQUESTED_GPU_TIMESTAMPS.store(enabled, Ordering::Relaxed);
+}
+
 static REQUESTED_PARALLEL_NORM: AtomicBool = AtomicBool::new(false);
 
 pub fn set_parallel_norm(enabled: bool) {
@@ -600,6 +607,7 @@ pub struct Gpu {
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
     rms_residual: vk::Pipeline,
+    gpu_timestamps_requested: bool,
     parallel_norm_requested: bool,
     parallel_norm_active: bool,
     parallel_norm_self_test: serde_json::Value,
@@ -637,6 +645,10 @@ impl Gpu {
     }
 
     fn new_with_native(allow_native: bool) -> Result<Self> {
+        Self::new_with_options(allow_native, REQUESTED_GPU_TIMESTAMPS.load(Ordering::Relaxed))
+    }
+
+    fn new_with_options(allow_native: bool, gpu_timestamps: bool) -> Result<Self> {
         let entry = unsafe { Entry::load().context("Vulkan loader is unavailable")? };
         let app_name = CString::new("MLXL3 Android")?;
         let app = vk::ApplicationInfo::default()
@@ -934,6 +946,7 @@ impl Gpu {
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
             rms_residual: vk::Pipeline::null(),
+            gpu_timestamps_requested: gpu_timestamps,
             parallel_norm_requested: REQUESTED_PARALLEL_NORM.load(Ordering::Relaxed),
             parallel_norm_active: false,
             parallel_norm_self_test: serde_json::json!({"status":"not_requested"}),
@@ -1022,7 +1035,8 @@ impl Gpu {
                     .push_constant_ranges(&ranges),
                 None,
             )?;
-            if timestamp_delta(0, 0, timestamp_bits).is_some()
+            if gpu_timestamps
+                && timestamp_delta(0, 0, timestamp_bits).is_some()
                 && props.limits.timestamp_period.is_finite()
                 && props.limits.timestamp_period > 0.
             {
@@ -1517,6 +1531,8 @@ impl Gpu {
             "memory_heaps":self.device.memory.memory_heaps[..self.device.memory.memory_heap_count as usize].iter()
                 .map(|h|serde_json::json!({"bytes":h.size,"flags":h.flags.as_raw()})).collect::<Vec<_>>(),
             "host_visibility":"once_per_group","device_timing_scope":"device_queue_ns covers whole submission including final HOST_READ; matrix intervals exclude group barriers; split post-Hadamard includes ordered partial reduction",
+            "gpu_timestamps_requested":self.gpu_timestamps_requested,
+            "gpu_profiling_mode":if self.queries == vk::QueryPool::null() {"off"} else {"full"},
             "prepared_matrices":self.prepared,"gpu_timestamps":self.queries != vk::QueryPool::null(),
             "timestamp_valid_bits":self.timestamp_bits,"timestamp_period_ns":self.properties.limits.timestamp_period,
             "automatic_calibration":false,"scratch_mapping":"persistent"})
@@ -3916,6 +3932,21 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; verify no-query execution and zero device timing samples"]
+    fn resident_without_gpu_timestamps_preserves_compute() {
+        let mut gpu = Gpu::new_with_options(true, false).unwrap();
+        assert_eq!(gpu.queries, vk::QueryPool::null());
+        assert_eq!(gpu.diagnostics()["gpu_profiling_mode"], "off");
+        let report = gpu.check_parallel_norm(gpu.rms_residual).unwrap();
+        assert_eq!(report["status"], "passed");
+        assert!(gpu.submission_count() > 0);
+        let profile = gpu.take_profile();
+        assert_eq!(profile.device_samples, 0);
+        assert_eq!(profile.device_compute_ns, 0);
+        assert_eq!(profile.device_queue_ns, 0);
+    }
 
     #[test]
     #[ignore = "requires Vulkan; parallel RMSNorm with independent f64 oracle"]

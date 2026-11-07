@@ -181,3 +181,9 @@ See [the S24 validation protocol](docs/s24-validation.md) before reporting resul
 
 Code is MIT licensed; see [third-party notices](THIRD_PARTY_NOTICES.md).
 Model weights retain their original license and are distributed separately.
+
+### GPU profiling A/B
+
+The menu's **Profilage GPU** setting defaults to full diagnostics. Disable it and reload the model to create no timestamp query pool and record no GPU timestamp/reset commands. Wall-clock prefill/decode throughput, submission counts and host timings remain available. GPU timing values and sample counts are zero when disabled: they are unavailable, not instantaneous. The diagnostic reports requested and active mode (unsupported timestamps also result in off).
+
+Compare full/off/full with the same model, fixed 32/128 benchmark, settings and thermal conditions. Do not compare a change in RMS algorithm and profiling simultaneously. No speedup is promised. The parallel RMS experiment from PR #6 remains opt-in with its serial fallback and runtime numerical check; synthetic checks do not prove full-checkpoint parity.
