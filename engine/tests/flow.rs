@@ -215,10 +215,16 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         let token = 3 + (position % 8) as u32;
         let check = position >= 254;
         let reference_logits = engine.model.forward(token, check, &cancelled).unwrap();
-        let actual_logits = experimental.model.forward(token, check, &cancelled).unwrap();
+        let actual_logits = experimental
+            .model
+            .forward(token, check, &cancelled)
+            .unwrap();
         if check {
             for (actual, expected) in actual_logits.unwrap().iter().zip(reference_logits.unwrap()) {
-                assert!((actual - expected).abs() <= 0.002 + expected.abs() * 0.01, "position {position}");
+                assert!(
+                    (actual - expected).abs() <= 0.002 + expected.abs() * 0.01,
+                    "position {position}"
+                );
             }
         }
     }

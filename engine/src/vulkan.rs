@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ash::{Entry, vk};
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     ffi::{CStr, CString},
     sync::{
         Arc,
@@ -126,6 +127,7 @@ const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
 const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 320;
 const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
 const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 320;
+type RopeAngleCache = (Option<usize>, BTreeMap<(u32, usize, usize), Vec<(f32, f32)>>);
 
 fn projection_queries(index: usize) -> Option<u32> {
     (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
@@ -527,6 +529,7 @@ pub struct Gpu {
     gate_output: Option<Buffer>,
     submissions: Cell<u64>,
     profile: RefCell<Profile>,
+    rope_angles: RefCell<RopeAngleCache>,
     projection_meta: Vec<ProjectionMeta>,
     used_memory_types: Cell<u32>,
     pub name: String,
@@ -825,6 +828,7 @@ impl Gpu {
             gate_output: None,
             submissions: Cell::new(0),
             profile: RefCell::new(Profile::default()),
+            rope_angles: RefCell::new((None, BTreeMap::new())),
             projection_meta: vec![],
             used_memory_types: Cell::new(0),
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -2420,14 +2424,29 @@ impl Gpu {
         let mut k_data = vec![0f32; plan.dim * 2];
         q_data[..plan.dim].copy_from_slice(&plan.q_weights);
         k_data[..plan.dim].copy_from_slice(&plan.k_weights);
-        for j in 0..plan.active {
-            let angle = position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
-            let (sin, cos) = angle.sin_cos();
-            q_data[plan.dim + 2 * j] = sin;
-            q_data[plan.dim + 2 * j + 1] = cos;
-            k_data[plan.dim + 2 * j] = sin;
-            k_data[plan.dim + 2 * j + 1] = cos;
+        let started = Instant::now();
+        let cache_hit;
+        {
+            let mut cache = self.rope_angles.borrow_mut();
+            if cache.0 != Some(position) { cache.0 = Some(position); cache.1.clear(); }
+            let key = (plan.theta.to_bits(), plan.dim, plan.active);
+            cache_hit = cache.1.contains_key(&key);
+            let angles = cache.1.entry(key).or_insert_with(|| (0..plan.active).map(|j| {
+                let angle = position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
+                angle.sin_cos()
+            }).collect());
+            for (j, &(sin, cos)) in angles.iter().enumerate() {
+                q_data[plan.dim + 2 * j] = sin;
+                q_data[plan.dim + 2 * j + 1] = cos;
+                k_data[plan.dim + 2 * j] = sin;
+                k_data[plan.dim + 2 * j + 1] = cos;
+            }
         }
+        self.record_profile(|p| {
+            p.rope_ns = p.rope_ns.saturating_add(elapsed_ns(started));
+            if cache_hit { p.rope_cache_hits = p.rope_cache_hits.saturating_add(1); }
+            else { p.rope_cache_misses = p.rope_cache_misses.saturating_add(1); }
+        });
         let started = Instant::now();
         let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let q_bytes: Vec<u8> = q_data.iter().flat_map(|v| v.to_ne_bytes()).collect();

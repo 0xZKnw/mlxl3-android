@@ -114,6 +114,8 @@ pub struct Profile {
     pub attention_cpu_ns: u64,
     pub convolution_cpu_ns: u64,
     pub rope_ns: u64,
+    pub rope_cache_hits: u64,
+    pub rope_cache_misses: u64,
     pub activation_ns: u64,
     pub embedding_ns: u64,
     #[serde(skip)]
