@@ -9,6 +9,15 @@ fn main() {
         "qmv_stream",
         "hadamard",
         "dense",
+        "dense_pair",
+        "dense_subgroup",
+        "dense_rows",
+        "rms_residual",
+        "greedy",
+        "norm_rope",
+        "kv_update",
+        "attention",
+        "copy",
         "reduce",
         "swiglu",
         "convolution",
@@ -80,20 +89,77 @@ fn main() {
             .expect("glslc");
         assert!(status.success(), "wave32 shader compilation failed");
     }
-    let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
-        .args([
-            "--target-env=vulkan1.1",
-            "-O",
-            "-fshader-stage=compute",
-            "-DEXL3_NATIVE=1",
-            "-DEXL3_PARTIALS=1",
-            "-DEXL3_BITS=4",
-            "-DEXL3_COOPERATIVE_K4=1",
-            "shaders/qmv_stream.comp",
-            "-o",
-        ])
-        .arg(out.join("qmv_wave_4_cooperative.spv"))
-        .status()
-        .expect("glslc");
-    assert!(status.success(), "cooperative K4 shader compilation failed");
+    for bits in [4, 5] {
+        let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+                "-DEXL3_PARTIALS=1",
+            ])
+            .arg(format!("-DEXL3_BITS={bits}"))
+            .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"))
+            .arg("shaders/qmv_stream.comp")
+            .arg("-o")
+            .arg(out.join(format!("qmv_wave_{bits}_cooperative.spv")))
+            .status()
+            .expect("glslc");
+        assert!(
+            status.success(),
+            "cooperative K{bits} shader compilation failed"
+        );
+        let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+                "-DEXL3_PARTIALS=1",
+                "-DEXL3_FIXED_MCG=1",
+            ])
+            .arg(format!("-DEXL3_BITS={bits}"))
+            .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"))
+            .arg("shaders/qmv_stream.comp")
+            .arg("-o")
+            .arg(out.join(format!("qmv_wave_{bits}_mcg.spv")))
+            .status()
+            .expect("glslc");
+        assert!(
+            status.success(),
+            "specialized MCG K{bits} shader compilation failed"
+        );
+        for mcg in [false, true] {
+            let mut compiler = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()));
+            compiler
+                .args([
+                    "--target-env=vulkan1.1",
+                    "-O",
+                    "-fshader-stage=compute",
+                    "-DEXL3_NATIVE=1",
+                    "-DEXL3_PARTIALS=1",
+                    "-DEXL3_UNROLL2=1",
+                ])
+                .arg(format!("-DEXL3_BITS={bits}"))
+                .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"));
+            if mcg {
+                compiler.arg("-DEXL3_FIXED_MCG=1");
+            }
+            let name = if mcg {
+                format!("qmv_wave_{bits}_mcg_unroll2.spv")
+            } else {
+                format!("qmv_wave_{bits}_cooperative_unroll2.spv")
+            };
+            let status = compiler
+                .arg("shaders/qmv_stream.comp")
+                .arg("-o")
+                .arg(out.join(name))
+                .status()
+                .expect("glslc");
+            assert!(
+                status.success(),
+                "unroll2 K{bits} shader compilation failed"
+            );
+        }
+    }
 }

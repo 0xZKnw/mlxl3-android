@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.documentfile.provider.DocumentFile
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,9 +38,99 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val main = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val prefs = application.getSharedPreferences("studio", 0)
+    var splitK by mutableStateOf(prefs.getInt("split_k", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
+    var fastHead by mutableStateOf(prefs.getBoolean("fast_head", false)); private set
+    var gpuConvLayer by mutableStateOf(prefs.getBoolean("gpu_conv_layer", false)); private set
+    var cooperativeK5 by mutableStateOf(prefs.getBoolean("cooperative_k5", false)); private set
+    var specializedMcg by mutableStateOf(prefs.getBoolean("specialized_mcg", false)); private set
+    var gpuGreedy by mutableStateOf(prefs.getBoolean("gpu_greedy", false)); private set
+    var gpuAttentionLayer by mutableStateOf(prefs.getBoolean("gpu_attention_layer", false)); private set
+    var ffnK4Split by mutableStateOf(prefs.getInt("ffn_k4_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
+    var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
+    var layerBatch by mutableStateOf(prefs.getInt("layer_batch", 1).takeIf { it in listOf(1, 2, 4) } ?: 1); private set
+    var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
+    var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
+    var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
+    fun chooseSplitK(value: Int) {
+        if (busy || value !in listOf(1, 2, 4, 8)) return
+        splitK = value
+        prefs.edit { putInt("split_k", value) }
+        status = "Split-K $value sélectionné · rechargez le modèle"
+    }
+    fun chooseFastHead(enabled: Boolean) {
+        if (busy) return
+        fastHead = enabled
+        prefs.edit { putBoolean("fast_head", enabled) }
+        status = "Tête expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseGpuConvLayer(enabled: Boolean) {
+        if (busy) return
+        gpuConvLayer = enabled
+        prefs.edit { putBoolean("gpu_conv_layer", enabled) }
+        status = "Couches convolution GPU ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
+    }
+    fun chooseK5(enabled: Boolean) {
+        if (busy) return
+        cooperativeK5 = enabled
+        prefs.edit { putBoolean("cooperative_k5", enabled) }
+        status = "Kernel K5 expérimental ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseMcg(enabled: Boolean) {
+        if (busy) return
+        specializedMcg = enabled
+        prefs.edit { putBoolean("specialized_mcg", enabled) }
+        status = "MCG spécialisé ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseGpuGreedy(enabled: Boolean) {
+        if (busy) return
+        gpuGreedy = enabled
+        prefs.edit { putBoolean("gpu_greedy", enabled) }
+        status = "Sélection GPU ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseGpuAttentionLayer(enabled: Boolean) {
+        if (busy) return
+        gpuAttentionLayer = enabled
+        prefs.edit { putBoolean("gpu_attention_layer", enabled) }
+        status = "Couches attention GPU ${if (enabled) "activées" else "désactivées"} · rechargez le modèle"
+    }
+    fun cycleFfnSplit(k4: Boolean) {
+        if (busy) return
+        val choices = listOf(0, 1, 2, 4, 8)
+        val previous = if (k4) ffnK4Split else ffnK5Split
+        val next = choices[(choices.indexOf(previous) + 1) % choices.size]
+        if (k4) ffnK4Split = next else ffnK5Split = next
+        prefs.edit { putInt(if (k4) "ffn_k4_split" else "ffn_k5_split", next) }
+        status = "Réglage FFN mis à jour · rechargez le modèle"
+    }
+    fun cycleLayerBatch() {
+        if (busy) return
+        val choices = listOf(1, 2, 4)
+        layerBatch = choices[(choices.indexOf(layerBatch) + 1) % choices.size]
+        prefs.edit { putInt("layer_batch", layerBatch) }
+        status = "Regroupement des couches mis à jour · rechargez le modèle"
+    }
+    fun chooseUnroll2(enabled: Boolean) {
+        if (busy) return
+        unroll2 = enabled
+        prefs.edit { putBoolean("unroll2", enabled) }
+        status = "Boucle K4/K5 expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseSubgroupHead(enabled: Boolean) {
+        if (busy) return
+        subgroupHead = enabled
+        prefs.edit { putBoolean("subgroup_head", enabled) }
+        status = "Réduction subgroup ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun cycleHeadRows() {
+        if (busy) return
+        val choices = listOf(1, 2, 4, 8)
+        headRows = choices[(choices.indexOf(headRows) + 1) % choices.size]
+        prefs.edit { putInt("head_rows", headRows) }
+        status = "Lignes de la tête mises à jour · rechargez le modèle"
+    }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
     private fun environment(): JSONObject = runCatching {
@@ -70,7 +161,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     private val callback = NativeEngine.Callback { json ->
         val event = JSONObject(json)
-        val report = if (event.optString("type") == "done") JSONObject()
+        val report = if (event.optString("type") in listOf("done", "benchmark_done")) JSONObject()
             .put("engine", event).put("environment_before", environmentBefore)
             .put("environment_after", environment()).toString(2) else null
         main.post {
@@ -90,6 +181,11 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     status = "${event.getInt("tokens")} tokens · %.1f s".format(event.getDouble("decode_seconds") + event.getDouble("prefill_seconds"))
                 }
+                "benchmark_done" -> {
+                    diagnostics = report
+                    val rate = event.optDouble("decode_tokens_per_second", Double.NaN)
+                    status = if (rate.isFinite() && rate >= 0) "Benchmark : %.1f tok/s".format(rate) else "Benchmark terminé"
+                }
             }
         }
     }
@@ -97,6 +193,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun loadSaved() = task {
         val path = prefs.getString("model", null) ?: error("Import a model first")
         main.post { ready = false; status = "Loading LFM3…" }
+        check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
+        NativeEngine.setFastHead(fastHead)
+        NativeEngine.setGpuConvLayer(gpuConvLayer)
+        NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
+        NativeEngine.setGpuGreedy(gpuGreedy)
+        NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
+        check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
+        check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
+        NativeEngine.setUnroll2(unroll2)
+        NativeEngine.setSubgroupHead(subgroupHead)
+        check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -130,6 +237,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             }
             ModelImport.validateFolder(stage)
             main.post { ready = false; status = "Loading LFM3…" }
+            check(NativeEngine.setSplitK(splitK)) { "Invalid split-K" }
+            NativeEngine.setFastHead(fastHead)
+            NativeEngine.setGpuConvLayer(gpuConvLayer)
+            NativeEngine.setExperimentalKernels(cooperativeK5, specializedMcg)
+            NativeEngine.setGpuGreedy(gpuGreedy)
+            NativeEngine.setGpuAttentionLayer(gpuAttentionLayer)
+            check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
+            check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
+            NativeEngine.setUnroll2(unroll2)
+            NativeEngine.setSubgroupHead(subgroupHead)
+            check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)
@@ -165,6 +283,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 check(stopped.get()) { result }
             }
+        }
+    }
+
+    fun benchmark() {
+        if (busy || !ready) return
+        task {
+            environmentBefore = environment()
+            main.post { diagnostics = null; status = "Benchmark…" }
+            val result = NativeEngine.benchmark(callback)
+            if (result.isNotEmpty()) check(stopped.get()) { result }
         }
     }
 

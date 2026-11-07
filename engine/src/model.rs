@@ -1,6 +1,9 @@
 use crate::{
     math,
-    vulkan::{ConvPlan, Gpu, MlpPlan},
+    vulkan::{
+        AttentionLayerConfig, AttentionLayerPlan, ConvLayerPlan, ConvPlan, Gpu, LayerCopyPlan,
+        MlpPlan, ResidentLayer,
+    },
     weights::{Linear, Weights},
 };
 use anyhow::{Context, Result, ensure};
@@ -173,12 +176,37 @@ struct Layer {
     ffn_norm: Vec<f32>,
     post_ffn_norm: Vec<f32>,
     mlp: MlpPlan,
+    gpu_conv_layer: Option<ConvLayerPlan>,
+    gpu_attention_layer: Option<AttentionLayerPlan>,
+}
+
+impl Layer {
+    fn resident(&self) -> Option<ResidentLayer<'_>> {
+        match &self.operator {
+            Operator::Conv(conv) => self
+                .gpu_conv_layer
+                .as_ref()
+                .map(|plan| ResidentLayer::Conv(plan, &conv.plan, &self.mlp)),
+            Operator::Attention(attn) => Some(ResidentLayer::Attention(
+                self.gpu_attention_layer.as_ref()?,
+                [
+                    attn.q.exl3_ref()?,
+                    attn.k.exl3_ref()?,
+                    attn.v.exl3_ref()?,
+                    attn.output.exl3_ref()?,
+                ],
+                attn.gate.gate_ref()?,
+                &self.mlp,
+            )),
+        }
+    }
 }
 pub struct Model {
     pub config: Config,
     pub gpu: Gpu,
     weights: Weights,
     layers: Vec<Layer>,
+    layer_links: Vec<Option<LayerCopyPlan>>,
     norm: Vec<f32>,
     head: Linear,
     position: usize,
@@ -216,6 +244,8 @@ impl Model {
             "kv_heads":self.config.num_key_value_heads,"vocabulary":self.config.vocab_size,
             "context_limit":self.context_limit,"position":self.position,"cpu_cache_logical_bytes":cache_bytes,
             "gpu_convolution_cache_logical_bytes":self.config.layer_types.iter().filter(|k| *k == "conv").count()*self.config.hidden_size*7*4,
+            "gpu_attention_layers":self.layers.iter().filter(|l| l.gpu_attention_layer.is_some()).count(),
+            "gpu_attention_cache_logical_bytes":self.layers.iter().filter_map(|l| l.gpu_attention_layer.as_ref()).map(|p| p.cache_bytes()).sum::<usize>(),
             "prefill_batch_size":1,"sampling":"greedy"})
     }
     pub fn load(
@@ -316,14 +346,91 @@ impl Model {
                 config.intermediate_size,
             )?
             .into_exl3()?;
+            let operator_norm = norm("operator_norm", h)?;
+            let post_operator_norm = norm("post_operator_norm", h)?;
+            let ffn_norm = norm("ffn_norm", h)?;
+            let post_ffn_norm = norm("post_ffn_norm", h)?;
+            let mlp = gpu.prepare_mlp(w1, w3, w2)?;
+            let gpu_conv_layer = if gpu.gpu_conv_layer_enabled() {
+                if let Operator::Conv(conv) = &operator {
+                    Some(gpu.prepare_conv_layer(
+                        &conv.plan,
+                        &mlp,
+                        [
+                            &operator_norm,
+                            &post_operator_norm,
+                            &ffn_norm,
+                            &post_ffn_norm,
+                        ],
+                        config.norm_eps,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let gpu_attention_layer = if gpu.gpu_attention_layer_enabled() {
+                if let Operator::Attention(attn) = &operator
+                    && let (Some(q), Some(k), Some(v), Some(output), Some(gate)) = (
+                        attn.q.exl3_ref(),
+                        attn.k.exl3_ref(),
+                        attn.v.exl3_ref(),
+                        attn.output.exl3_ref(),
+                        attn.gate.gate_ref(),
+                    )
+                {
+                    Some(gpu.prepare_attention_layer(AttentionLayerConfig {
+                        q,
+                        k,
+                        v,
+                        output,
+                        gate,
+                        mlp: &mlp,
+                        norms: [
+                            &operator_norm,
+                            &post_operator_norm,
+                            &ffn_norm,
+                            &post_ffn_norm,
+                        ],
+                        q_norm: &attn.q_norm,
+                        k_norm: &attn.k_norm,
+                        heads: config.num_attention_heads,
+                        kv_heads: config.num_key_value_heads,
+                        dim: config.head_dim,
+                        window: attn.window,
+                        eps: config.norm_eps,
+                        theta: attn.rope.rope_theta,
+                        fraction: attn.rope.partial_rotary_factor,
+                    })?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             layers.push(Layer {
                 operator,
-                operator_norm: norm("operator_norm", h)?,
-                post_operator_norm: norm("post_operator_norm", h)?,
-                ffn_norm: norm("ffn_norm", h)?,
-                post_ffn_norm: norm("post_ffn_norm", h)?,
-                mlp: gpu.prepare_mlp(w1, w3, w2)?,
+                operator_norm,
+                post_operator_norm,
+                ffn_norm,
+                post_ffn_norm,
+                mlp,
+                gpu_conv_layer,
+                gpu_attention_layer,
             });
+        }
+        let mut layer_links = Vec::new();
+        if gpu.layer_batch_size() > 1 {
+            for pair in layers.windows(2) {
+                let link = match (pair[0].resident(), pair[1].resident()) {
+                    (Some(source), Some(target)) => {
+                        Some(gpu.prepare_layer_copy(&source, &target, h)?)
+                    }
+                    _ => None,
+                };
+                layer_links.push(link);
+            }
         }
         ensure!(!cancel.load(Ordering::Relaxed), "Loading cancelled");
         progress("Loading vocabulary projection…");
@@ -334,6 +441,7 @@ impl Model {
             gpu,
             weights,
             layers,
+            layer_links,
             norm,
             head,
             position: 0,
@@ -354,12 +462,14 @@ impl Model {
         }
     }
 
-    pub fn forward(
-        &mut self,
-        token: u32,
-        logits: bool,
-        cancel: &AtomicBool,
-    ) -> Result<Option<Vec<f32>>> {
+    pub(crate) fn configure_gpu_greedy(&mut self, vocabulary: &[u32]) -> Result<bool> {
+        if self.gpu.gpu_greedy_enabled() {
+            return self.head.prepare_gpu_greedy(&mut self.gpu, vocabulary);
+        }
+        Ok(false)
+    }
+
+    fn advance(&mut self, token: u32, cancel: &AtomicBool) -> Result<Vec<f32>> {
         ensure!(self.position < self.context_limit, "Context is full");
         let started = std::time::Instant::now();
         let mut hidden =
@@ -370,8 +480,64 @@ impl Model {
                 .embedding_ns
                 .saturating_add(crate::vulkan::elapsed_ns(started))
         });
-        for layer in &mut self.layers {
+        let mut index = 0;
+        while index < self.layers.len() {
             ensure!(!cancel.load(Ordering::Relaxed), "Generation cancelled");
+            if self.gpu.layer_batch_size() > 1 && self.layers[index].resident().is_some() {
+                let mut end = index + 1;
+                while end < self.layers.len()
+                    && end - index < self.gpu.layer_batch_size()
+                    && self.layer_links.get(end - 1).is_some_and(Option::is_some)
+                    && self.layers[end].resident().is_some()
+                {
+                    end += 1;
+                }
+                if end - index > 1 {
+                    let layers: Vec<_> = self.layers[index..end]
+                        .iter()
+                        .map(|l| l.resident().expect("resident layer checked"))
+                        .collect();
+                    let links: Vec<_> = self.layer_links[index..end - 1]
+                        .iter()
+                        .map(|l| l.as_ref().expect("resident link checked"))
+                        .collect();
+                    hidden =
+                        self.gpu
+                            .forward_resident_batch(&layers, &links, &hidden, self.position)?;
+                    index = end;
+                    continue;
+                }
+            }
+            let layer = &mut self.layers[index];
+            index += 1;
+            if let (Some(plan), Operator::Conv(conv)) = (&layer.gpu_conv_layer, &layer.operator) {
+                hidden = self.gpu.forward_conv_layer(
+                    plan,
+                    &conv.plan,
+                    &layer.mlp,
+                    &hidden,
+                    self.position,
+                )?;
+                continue;
+            }
+            if let (Some(plan), Operator::Attention(attn)) =
+                (&layer.gpu_attention_layer, &layer.operator)
+            {
+                let q = attn.q.exl3_ref().context("Missing resident Q")?;
+                let k = attn.k.exl3_ref().context("Missing resident K")?;
+                let v = attn.v.exl3_ref().context("Missing resident V")?;
+                let output = attn.output.exl3_ref().context("Missing resident output")?;
+                let gate = attn.gate.gate_ref().context("Missing resident gate")?;
+                hidden = self.gpu.forward_attention_layer(
+                    plan,
+                    [q, k, v, output],
+                    gate,
+                    &layer.mlp,
+                    &hidden,
+                    self.position,
+                )?;
+                continue;
+            }
             let normalized = normalize(
                 &self.gpu,
                 &hidden,
@@ -420,6 +586,16 @@ impl Model {
             "Non-finite hidden state"
         );
         self.position += 1;
+        Ok(hidden)
+    }
+
+    pub fn forward(
+        &mut self,
+        token: u32,
+        logits: bool,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Vec<f32>>> {
+        let hidden = self.advance(token, cancel)?;
         if logits {
             let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
             let started = std::time::Instant::now();
@@ -431,6 +607,17 @@ impl Model {
         } else {
             Ok(None)
         }
+    }
+
+    pub(crate) fn forward_gpu_greedy(&mut self, token: u32, cancel: &AtomicBool) -> Result<u32> {
+        let hidden = self.advance(token, cancel)?;
+        let hidden = normalize(&self.gpu, &hidden, &self.norm, self.config.norm_eps)?;
+        let started = std::time::Instant::now();
+        let result = self.head.forward_gpu_greedy(&mut self.gpu, &hidden)?;
+        self.gpu.record_profile(|p| {
+            p.head_ns = p.head_ns.saturating_add(crate::vulkan::elapsed_ns(started))
+        });
+        Ok(result)
     }
 }
 
@@ -470,7 +657,8 @@ impl Attention {
         c: &Config,
         position: usize,
     ) -> Result<Vec<f32>> {
-        let [mut q, mut k, v] = Linear::forward_group([&self.q, &self.k, &self.v], gpu, x)?;
+        let ([mut q, mut k, v], gate) =
+            Linear::forward_qkv_gate([&self.q, &self.k, &self.v], &self.gate, gpu, x)?;
         for head in q.chunks_exact_mut(c.head_dim) {
             head.copy_from_slice(&normalize(gpu, head, &self.q_norm, c.norm_eps)?);
         }
@@ -507,7 +695,6 @@ impl Attention {
                 .attention_cpu_ns
                 .saturating_add(crate::vulkan::elapsed_ns(started))
         });
-        let gate = self.gate.forward(gpu, x)?;
         let started = std::time::Instant::now();
         let attended = attention(
             &q,

@@ -38,6 +38,42 @@ fence waits. Samples count measured commands; submissions count shared fences.
 The copied report also contains per-shape costs, the eight slowest projections,
 CPU operator times, driver information and float/subgroup capabilities.
 
+The model menu includes experimental split-K 1, 2, 4 and 8, an optional
+paired dense-head kernel, optional GPU-resident convolution and attention layers, and
+optional cooperative K5 and MCG-specialized kernels, and GPU greedy selection.
+An optional subgroup-reduction head takes precedence over the paired head and
+falls back when subgroup arithmetic is unavailable.
+The experimental head row-count selector offers 1, 2, 4 and 8 outputs per
+workgroup. A value other than 4 selects the variable-row kernel instead of the
+paired or subgroup kernel, so compare these options separately.
+Changes apply **only after reloading the model**;
+the defaults are split-K 4, the reference dense head, CPU layer boundaries,
+and disabled experimental K5/MCG/greedy and GPU layer variants. The copied report
+records the effective split count, chosen head kernel, cooperative K4/K5
+selection and its startup parity check, plus separate gate/head device times.
+These timings overlap other reported scopes and must not be added together.
+Different split counts, the paired head and GPU normalization may change
+floating-point results. Compare output quality and repeated end-to-end measurements on the
+target device before treating any option as an improvement. If a cooperative
+kernel fails its startup parity check, the engine falls back to the prior path.
+GPU greedy selection applies the FP16 boundary, checks all logits for non-finite
+values, applies the tokenizer vocabulary mask, and resolves ties by lowest token ID.
+The FFN K4 and K5 menu entries can override the global split count separately
+for the 2048→7680 and 7680→2048 shapes. Tapping cycles through global, 1, 2,
+4 and 8; reload the model to apply. The diagnostic reports effective choices.
+The experimental layer-batch setting cycles through 1, 2 and 4 resident layers
+per submission. It only combines adjacent layers whose GPU paths are enabled;
+cancellation is checked between batches. The default is 1.
+The optional K4/K5 two-tile loop is an experiment, disabled by default. It does
+not guarantee that the driver actually unrolls the loop or improves throughput.
+The menu's fixed benchmark evaluates 32 prefill and 128 decode steps using a
+repeatable sequence of vocabulary IDs. It is not a generated answer. Copy the
+diagnostic afterward and alternate configurations under similar thermal conditions.
+Android system traces include `MLXL3 upload`, `MLXL3 record commands`,
+`MLXL3 queue submit`, `MLXL3 fence wait`, and `MLXL3 readback` slices. Capture
+them with CPU scheduling and frequency tracks in Perfetto to distinguish CPU
+sleep, scheduling, and GPU work; they do not directly align GPU timestamps.
+
 One model, one conversation, context capped at 2048 tokens, up to 256 generated
 tokens per UI request. Thinking is disabled through the official text-only
 chat-template convention. No vision, speculative decoding, remote inference

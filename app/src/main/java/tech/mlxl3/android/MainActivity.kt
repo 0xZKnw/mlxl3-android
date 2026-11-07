@@ -80,7 +80,13 @@ class MainActivity : ComponentActivity() {
             }
             StudioScreen(model.messages, model.busy, model.ready, model.status, model.device, model.error,
                 model.savedModel, { picker.launch(null) }, model::loadSaved, model::newChat,
-                model::send, model::stop, model::dismissError, model.diagnostics)
+                model::send, model::stop, model::dismissError, model.diagnostics, model.splitK, model::chooseSplitK,
+                model.fastHead, model::chooseFastHead, model.gpuConvLayer, model::chooseGpuConvLayer,
+                model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg,
+                model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
+                model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
+                model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
+                model.headRows, model::cycleHeadRows)
         }
     }
 }
@@ -95,7 +101,19 @@ private val Edge = Color(0xFF303032)
 fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, status: String,
                  device: String, error: String?, savedModel: Boolean, onImport: () -> Unit,
                  onLoad: () -> Unit, onNew: () -> Unit, onSend: (String) -> Unit,
-                 onStop: () -> Unit, onDismissError: () -> Unit, diagnostics: String? = null) {
+                 onStop: () -> Unit, onDismissError: () -> Unit, diagnostics: String? = null,
+                 splitK: Int = 4, onSplitK: (Int) -> Unit = {},
+                 fastHead: Boolean = false, onFastHead: (Boolean) -> Unit = {},
+                 gpuConvLayer: Boolean = false, onGpuConvLayer: (Boolean) -> Unit = {},
+                 cooperativeK5: Boolean = false, onK5: (Boolean) -> Unit = {},
+                 specializedMcg: Boolean = false, onMcg: (Boolean) -> Unit = {},
+                 gpuGreedy: Boolean = false, onGpuGreedy: (Boolean) -> Unit = {},
+                 gpuAttentionLayer: Boolean = false, onGpuAttentionLayer: (Boolean) -> Unit = {},
+                 ffnK4Split: Int = 0, ffnK5Split: Int = 0, onCycleFfnSplit: (Boolean) -> Unit = {},
+                 layerBatch: Int = 1, onCycleLayerBatch: () -> Unit = {},
+                 unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}, onBenchmark: () -> Unit = {},
+                 subgroupHead: Boolean = false, onSubgroupHead: (Boolean) -> Unit = {},
+                 headRows: Int = 4, onCycleHeadRows: () -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -125,12 +143,41 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Importer un dossier EXL3") }, onClick = { menu = false; onImport() })
                             if (savedModel) DropdownMenuItem(text = { Text("Charger le modèle enregistré") }, onClick = { menu = false; onLoad() })
+                            if (ready) DropdownMenuItem(text = { Text("Benchmark fixe · 128 tokens") }, onClick = { menu = false; onBenchmark() })
                             if (diagnostics != null) DropdownMenuItem(text = { Text("Copier le diagnostic de performances") }, onClick = {
                                 menu = false
                                 context.getSystemService(ClipboardManager::class.java)
                                     .setPrimaryClip(ClipData.newPlainText("MLXL3 performance", diagnostics))
                                 Toast.makeText(context, "Diagnostic copié", Toast.LENGTH_SHORT).show()
                             })
+                            listOf(1, 2, 4, 8).forEach { value ->
+                                DropdownMenuItem(text = { Text("Split-K $value${if (value == splitK) " ✓" else ""} · au prochain chargement") },
+                                    onClick = { menu = false; onSplitK(value) })
+                            }
+                            DropdownMenuItem(text = { Text("FFN K4 : ${if (ffnK4Split == 0) "global" else ffnK4Split} · changer / recharger") },
+                                onClick = { menu = false; onCycleFfnSplit(true) })
+                            DropdownMenuItem(text = { Text("FFN K5 : ${if (ffnK5Split == 0) "global" else ffnK5Split} · changer / recharger") },
+                                onClick = { menu = false; onCycleFfnSplit(false) })
+                            DropdownMenuItem(text = { Text("Couches par lot : $layerBatch · changer / recharger") },
+                                onClick = { menu = false; onCycleLayerBatch() })
+                            DropdownMenuItem(text = { Text("Boucle K4/K5 ×2 : ${if (unroll2) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onUnroll2(!unroll2) })
+                            DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onFastHead(!fastHead) })
+                            DropdownMenuItem(text = { Text("Tête subgroup : ${if (subgroupHead) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onSubgroupHead(!subgroupHead) })
+                            DropdownMenuItem(text = { Text("Lignes tête : $headRows · changer / recharger") },
+                                onClick = { menu = false; onCycleHeadRows() })
+                            DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onGpuConvLayer(!gpuConvLayer) })
+                            DropdownMenuItem(text = { Text("Kernel K5 expérimental : ${if (cooperativeK5) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onK5(!cooperativeK5) })
+                            DropdownMenuItem(text = { Text("MCG spécialisé : ${if (specializedMcg) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onMcg(!specializedMcg) })
+                            DropdownMenuItem(text = { Text("Sélection GPU : ${if (gpuGreedy) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onGpuGreedy(!gpuGreedy) })
+                            DropdownMenuItem(text = { Text("Couches attention GPU : ${if (gpuAttentionLayer) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onGpuAttentionLayer(!gpuAttentionLayer) })
                         }
                     }
                     IconButton(onClick = onNew, enabled = !busy, modifier = Modifier.padding(start = 4.dp)) {

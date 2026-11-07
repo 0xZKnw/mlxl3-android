@@ -4,10 +4,11 @@ use anyhow::{Context, Result, bail, ensure};
 use ash::{Entry, vk};
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     ffi::{CStr, CString},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Instant,
 };
@@ -17,6 +18,34 @@ use crate::profiling::ProjectionMeta;
 
 pub(crate) fn elapsed_ns(start: Instant) -> u64 {
     start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+unsafe extern "C" {
+    fn ATrace_beginSection(name: *const std::ffi::c_char);
+    fn ATrace_endSection();
+}
+
+struct TraceSpan;
+impl TraceSpan {
+    fn begin(name: &CStr) -> Self {
+        #[cfg(target_os = "android")]
+        unsafe {
+            ATrace_beginSection(name.as_ptr())
+        };
+        #[cfg(not(target_os = "android"))]
+        let _ = name;
+        Self
+    }
+}
+impl Drop for TraceSpan {
+    fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        unsafe {
+            ATrace_endSection()
+        };
+    }
 }
 
 fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
@@ -37,6 +66,81 @@ fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
 }
 
 const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
+static REQUESTED_SPLIT_K: AtomicU32 = AtomicU32::new(4);
+static REQUESTED_FAST_HEAD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_GPU_CONV_LAYER: AtomicBool = AtomicBool::new(false);
+static REQUESTED_COOPERATIVE_K5: AtomicBool = AtomicBool::new(false);
+static REQUESTED_SPECIALIZED_MCG: AtomicBool = AtomicBool::new(false);
+static REQUESTED_GPU_GREEDY: AtomicBool = AtomicBool::new(false);
+static REQUESTED_GPU_ATTENTION_LAYER: AtomicBool = AtomicBool::new(false);
+static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
+static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
+static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
+static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
+static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
+
+pub fn set_head_rows(value: u32) -> bool {
+    if ![1, 2, 4, 8].contains(&value) {
+        return false;
+    }
+    REQUESTED_HEAD_ROWS.store(value, Ordering::Relaxed);
+    true
+}
+
+pub fn set_subgroup_head(enabled: bool) {
+    REQUESTED_SUBGROUP_HEAD.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_unroll2(enabled: bool) {
+    REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_layer_batch(value: u32) -> bool {
+    if ![1, 2, 4].contains(&value) {
+        return false;
+    }
+    REQUESTED_LAYER_BATCH.store(value, Ordering::Relaxed);
+    true
+}
+
+pub fn set_ffn_splits(k4: u32, k5: u32) -> bool {
+    if ![0, 1, 2, 4, 8].contains(&k4) || ![0, 1, 2, 4, 8].contains(&k5) {
+        return false;
+    }
+    REQUESTED_FFN_K4_SPLIT.store(k4, Ordering::Relaxed);
+    REQUESTED_FFN_K5_SPLIT.store(k5, Ordering::Relaxed);
+    true
+}
+
+pub fn set_gpu_attention_layer(enabled: bool) {
+    REQUESTED_GPU_ATTENTION_LAYER.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_gpu_greedy(enabled: bool) {
+    REQUESTED_GPU_GREEDY.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_fast_head(enabled: bool) {
+    REQUESTED_FAST_HEAD.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_gpu_conv_layer(enabled: bool) {
+    REQUESTED_GPU_CONV_LAYER.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_experimental_kernels(k5: bool, mcg: bool) {
+    REQUESTED_COOPERATIVE_K5.store(k5, Ordering::Relaxed);
+    REQUESTED_SPECIALIZED_MCG.store(mcg, Ordering::Relaxed);
+}
+
+pub fn set_split_k(value: u32) -> bool {
+    if ![1, 2, 4, 8].contains(&value) {
+        return false;
+    }
+    REQUESTED_SPLIT_K.store(value, Ordering::Relaxed);
+    true
+}
 
 fn codebook_offset(codebook: u32, state: u16) -> Option<usize> {
     if codebook >= 3 {
@@ -59,8 +163,13 @@ fn codebook_table() -> Vec<u8> {
 
 const MAX_DENSE_CHUNKS: usize = 128;
 const MAX_EXL3_MATRICES: usize = 24 * 8 + 1;
-const MAX_DESCRIPTOR_SETS: usize = MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 48;
-const QUERY_COUNT: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
+const MAX_DESCRIPTOR_SETS: usize = 4 * MAX_DENSE_CHUNKS + 3 * MAX_EXL3_MATRICES + 320;
+const OPERATOR_QUERY_BASE: u32 = 4 * (MAX_EXL3_MATRICES as u32 + 1);
+const QUERY_COUNT: u32 = OPERATOR_QUERY_BASE + 2 * 320;
+type RopeAngleCache = (
+    Option<usize>,
+    BTreeMap<(u32, usize, usize), Vec<(f32, f32)>>,
+);
 
 fn projection_queries(index: usize) -> Option<u32> {
     (index < MAX_EXL3_MATRICES).then(|| (index as u32 + 1) * 4)
@@ -88,11 +197,37 @@ fn can_force_wave32(min: u32, max: u32, stages: u32, max_subgroups: u32) -> bool
     min > 0 && min <= 32 && max >= 32 && stages & 32 != 0 && max_subgroups > 0
 }
 
+fn wave_kernel_label(split: u32, cooperative: u32) -> &'static str {
+    match (split, cooperative) {
+        (1, 14) => "wave32_split1_cooperative_k4_mcg",
+        (2, 14) => "wave32_split2_cooperative_k4_mcg",
+        (4, 14) => "wave32_split4_cooperative_k4_mcg",
+        (8, 14) => "wave32_split8_cooperative_k4_mcg",
+        (1, 15) => "wave32_split1_cooperative_k5_mcg",
+        (2, 15) => "wave32_split2_cooperative_k5_mcg",
+        (4, 15) => "wave32_split4_cooperative_k5_mcg",
+        (8, 15) => "wave32_split8_cooperative_k5_mcg",
+        (1, 4) => "wave32_split1_cooperative_k4",
+        (2, 4) => "wave32_split2_cooperative_k4",
+        (4, 4) => "wave32_split4_cooperative_k4",
+        (8, 4) => "wave32_split8_cooperative_k4",
+        (1, 5) => "wave32_split1_cooperative_k5",
+        (2, 5) => "wave32_split2_cooperative_k5",
+        (4, 5) => "wave32_split4_cooperative_k5",
+        (8, 5) => "wave32_split8_cooperative_k5",
+        (1, _) => "wave32_split1_native_f16",
+        (2, _) => "wave32_split2_native_f16",
+        (8, _) => "wave32_split8_native_f16",
+        _ => "wave32_split4_native_f16",
+    }
+}
+
 pub(crate) struct MlpPlan {
     gate: Exl3Matrix,
     up: Exl3Matrix,
     down: Exl3Matrix,
     activate: vk::CommandBuffer,
+    activate_query: u32,
 }
 
 pub(crate) struct ConvPlan {
@@ -100,6 +235,122 @@ pub(crate) struct ConvPlan {
     output: Exl3Matrix,
     state: Buffer,
     convolve: vk::CommandBuffer,
+    convolve_query: u32,
+}
+
+pub(crate) struct ConvLayerPlan {
+    device: Arc<Device>,
+    hidden: Buffer,
+    _weights: Vec<Buffer>,
+    commands: [vk::CommandBuffer; 4],
+    query_firsts: [u32; 4],
+    conv_input: vk::CommandBuffer,
+    mlp_gate: vk::CommandBuffer,
+    size: usize,
+}
+
+pub(crate) struct AttentionLayerPlan {
+    device: Arc<Device>,
+    hidden: Buffer,
+    cache: Buffer,
+    q_data: Buffer,
+    k_data: Buffer,
+    _buffers: Vec<Buffer>,
+    commands: [vk::CommandBuffer; 9],
+    query_firsts: [u32; 9],
+    identities: [vk::CommandBuffer; 6],
+    q_weights: Vec<f32>,
+    k_weights: Vec<f32>,
+    heads: usize,
+    kv_heads: usize,
+    dim: usize,
+    active: usize,
+    theta: f32,
+}
+
+impl AttentionLayerPlan {
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.cache.size
+    }
+}
+
+pub(crate) struct AttentionLayerConfig<'a> {
+    pub q: &'a Exl3Matrix,
+    pub k: &'a Exl3Matrix,
+    pub v: &'a Exl3Matrix,
+    pub output: &'a Exl3Matrix,
+    pub gate: &'a DenseGatePlan,
+    pub mlp: &'a MlpPlan,
+    pub norms: [&'a [f32]; 4],
+    pub q_norm: &'a [f32],
+    pub k_norm: &'a [f32],
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub dim: usize,
+    pub window: usize,
+    pub eps: f32,
+    pub theta: f32,
+    pub fraction: f32,
+}
+
+pub(crate) enum ResidentLayer<'a> {
+    Conv(&'a ConvLayerPlan, &'a ConvPlan, &'a MlpPlan),
+    Attention(
+        &'a AttentionLayerPlan,
+        [&'a Exl3Matrix; 4],
+        &'a DenseGatePlan,
+        &'a MlpPlan,
+    ),
+}
+
+impl ResidentLayer<'_> {
+    fn hidden(&self) -> &Buffer {
+        match self {
+            Self::Conv(plan, _, _) => &plan.hidden,
+            Self::Attention(plan, _, _, _) => &plan.hidden,
+        }
+    }
+}
+
+pub(crate) struct LayerCopyPlan {
+    command: vk::CommandBuffer,
+    query_first: u32,
+    source: vk::Buffer,
+    target: vk::Buffer,
+}
+
+enum OtherKind {
+    Norm,
+    Attention,
+    Copy,
+}
+
+pub(crate) struct DenseHeadPlan {
+    chunks: Vec<(Buffer, usize)>,
+    outputs: Vec<Buffer>,
+    input_len: usize,
+    total: usize,
+    command: vk::CommandBuffer,
+    dtype: u32,
+    greedy: Option<GreedyPlan>,
+    rows_per_group: u32,
+    pipeline: vk::Pipeline,
+}
+
+struct GreedyPlan {
+    _mask: Buffer,
+    results: Vec<Buffer>,
+    command: vk::CommandBuffer,
+}
+
+pub(crate) struct DenseGatePlan {
+    device: Arc<Device>,
+    _weights: Buffer,
+    input_len: usize,
+    outputs: usize,
+    dtype: u32,
+    command: vk::CommandBuffer,
+    query_first: u32,
 }
 
 fn timestamp_delta(start: u64, end: u64, bits: u32) -> Option<u64> {
@@ -166,6 +417,7 @@ struct Dispatch<'a> {
     input: &'a Buffer,
     weights: &'a Buffer,
     output: &'a Buffer,
+    aux: Option<&'a Buffer>,
     params: [u32; 4],
     outputs: usize,
     groups: u32,
@@ -245,6 +497,7 @@ impl Buffer {
         Ok(())
     }
     fn read_f32(&self, count: usize) -> Result<Vec<f32>> {
+        let _trace = TraceSpan::begin(c"MLXL3 readback");
         ensure!(
             count.checked_mul(4).is_some_and(|n| n <= self.size),
             "GPU buffer read exceeds allocation"
@@ -257,6 +510,18 @@ impl Buffer {
             output.iter().all(|x| x.is_finite()),
             "GPU returned non-finite values"
         );
+        Ok(output)
+    }
+
+    fn read_u32(&self, count: usize) -> Result<Vec<u32>> {
+        ensure!(
+            count.checked_mul(4).is_some_and(|n| n <= self.size),
+            "GPU buffer read exceeds allocation"
+        );
+        let mut output = vec![0u32; count];
+        self.with_mapping(|ptr| unsafe {
+            std::ptr::copy_nonoverlapping(ptr.cast::<u32>(), output.as_mut_ptr(), count);
+        })?;
         Ok(output)
     }
 }
@@ -292,6 +557,12 @@ pub struct Gpu {
     layout: vk::PipelineLayout,
     qmv: vk::Pipeline,
     qmv_stream: [vk::Pipeline; 8],
+    qmv_mcg: [vk::Pipeline; 8],
+    mcg_cooperative: [bool; 8],
+    mcg_attempted: [bool; 8],
+    enable_cooperative_k5: bool,
+    enable_specialized_mcg: bool,
+    enable_unroll2: bool,
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -301,23 +572,49 @@ pub struct Gpu {
     allow_wave32: bool,
     allow_cooperative_k4: bool,
     cooperative_k4_active: bool,
+    cooperative_k4_self_test: &'static str,
+    cooperative_k5_active: bool,
+    cooperative_k5_self_test: &'static str,
+    split_k: u32,
+    ffn_k4_split: u32,
+    ffn_k5_split: u32,
     native_pipeline_errors: Vec<String>,
     hadamard: vk::Pipeline,
     prepared: usize,
     queries: vk::QueryPool,
+    next_operator_query: Cell<u32>,
     timestamp_bits: u32,
     dense: vk::Pipeline,
+    dense_pair: vk::Pipeline,
+    dense_subgroup: vk::Pipeline,
+    dense_rows: vk::Pipeline,
+    fast_head: bool,
+    subgroup_head: bool,
+    head_rows: u32,
     reduce: vk::Pipeline,
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
+    rms_residual: vk::Pipeline,
+    greedy: vk::Pipeline,
+    norm_rope: vk::Pipeline,
+    kv_update: vk::Pipeline,
+    attention: vk::Pipeline,
+    copy: vk::Pipeline,
+    gpu_conv_layer: bool,
+    gpu_greedy: bool,
+    gpu_attention_layer: bool,
+    layer_batch: usize,
     partials: Option<Buffer>,
     input: Option<Buffer>,
     rotated: Option<Buffer>,
     output: Option<Buffer>,
     codebooks: Option<Buffer>,
     batch_outputs: Vec<Buffer>,
+    gate_input: Option<Buffer>,
+    gate_output: Option<Buffer>,
     submissions: Cell<u64>,
     profile: RefCell<Profile>,
+    rope_angles: RefCell<RopeAngleCache>,
     projection_meta: Vec<ProjectionMeta>,
     used_memory_types: Cell<u32>,
     pub name: String,
@@ -534,6 +831,16 @@ impl Gpu {
         });
         let amd_info = amd_info_enabled
             .then(|| ash::amd::shader_info::Device::new(&device._instance.raw, &device.raw));
+        let requested_split_k = REQUESTED_SPLIT_K.load(Ordering::Relaxed);
+        let max_split = if props.limits.max_compute_work_group_count[1] >= 8
+            && props.limits.max_storage_buffer_range >= 32768 * 32 * 4
+        {
+            8
+        } else {
+            4
+        };
+        let ffn_k4_split = REQUESTED_FFN_K4_SPLIT.load(Ordering::Relaxed);
+        let ffn_k5_split = REQUESTED_FFN_K5_SPLIT.load(Ordering::Relaxed);
         let mut gpu = Self {
             device,
             properties: props,
@@ -552,6 +859,12 @@ impl Gpu {
             layout: vk::PipelineLayout::null(),
             qmv: vk::Pipeline::null(),
             qmv_stream: [vk::Pipeline::null(); 8],
+            qmv_mcg: [vk::Pipeline::null(); 8],
+            mcg_cooperative: [false; 8],
+            mcg_attempted: [false; 8],
+            enable_cooperative_k5: REQUESTED_COOPERATIVE_K5.load(Ordering::Relaxed),
+            enable_specialized_mcg: REQUESTED_SPECIALIZED_MCG.load(Ordering::Relaxed),
+            enable_unroll2: REQUESTED_UNROLL2.load(Ordering::Relaxed),
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -569,23 +882,70 @@ impl Gpu {
                     .contains(vk::SubgroupFeatureFlags::SHUFFLE)
                 && props.limits.max_compute_work_group_count[1] >= 4,
             cooperative_k4_active: false,
+            cooperative_k4_self_test: "not_run",
+            cooperative_k5_active: false,
+            cooperative_k5_self_test: "not_run",
+            split_k: if props.limits.max_compute_work_group_count[1] >= requested_split_k
+                && (requested_split_k <= 4
+                    || props.limits.max_storage_buffer_range >= 32768 * 32 * 4)
+            {
+                requested_split_k
+            } else {
+                4
+            },
+            ffn_k4_split: if ffn_k4_split <= max_split {
+                ffn_k4_split
+            } else {
+                0
+            },
+            ffn_k5_split: if ffn_k5_split <= max_split {
+                ffn_k5_split
+            } else {
+                0
+            },
             native_pipeline_errors: vec![],
             hadamard: vk::Pipeline::null(),
             prepared: 0,
             queries: vk::QueryPool::null(),
+            next_operator_query: Cell::new(OPERATOR_QUERY_BASE),
             timestamp_bits,
             dense: vk::Pipeline::null(),
+            dense_pair: vk::Pipeline::null(),
+            dense_subgroup: vk::Pipeline::null(),
+            dense_rows: vk::Pipeline::null(),
+            fast_head: REQUESTED_FAST_HEAD.load(Ordering::Relaxed),
+            subgroup_head: REQUESTED_SUBGROUP_HEAD.load(Ordering::Relaxed)
+                && subgroup
+                    .supported_stages
+                    .contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::ARITHMETIC),
+            head_rows: REQUESTED_HEAD_ROWS.load(Ordering::Relaxed),
             reduce: vk::Pipeline::null(),
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
+            rms_residual: vk::Pipeline::null(),
+            greedy: vk::Pipeline::null(),
+            norm_rope: vk::Pipeline::null(),
+            kv_update: vk::Pipeline::null(),
+            attention: vk::Pipeline::null(),
+            copy: vk::Pipeline::null(),
+            gpu_conv_layer: REQUESTED_GPU_CONV_LAYER.load(Ordering::Relaxed),
+            gpu_greedy: REQUESTED_GPU_GREEDY.load(Ordering::Relaxed),
+            gpu_attention_layer: REQUESTED_GPU_ATTENTION_LAYER.load(Ordering::Relaxed),
+            layer_batch: REQUESTED_LAYER_BATCH.load(Ordering::Relaxed) as usize,
             partials: None,
             input: None,
             rotated: None,
             output: None,
             codebooks: None,
             batch_outputs: vec![],
+            gate_input: None,
+            gate_output: None,
             submissions: Cell::new(0),
             profile: RefCell::new(Profile::default()),
+            rope_angles: RefCell::new((None, BTreeMap::new())),
             projection_meta: vec![],
             used_memory_types: Cell::new(0),
             name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -704,11 +1064,53 @@ impl Gpu {
 
         gpu.qmv = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/qmv.spv")))?;
         gpu.dense = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense.spv")))?;
+        gpu.dense_pair = gpu
+            .pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_pair.spv")))
+            .unwrap_or(vk::Pipeline::null());
+        if gpu.dense_pair == vk::Pipeline::null() {
+            gpu.fast_head = false;
+        }
+        if gpu.subgroup_head {
+            gpu.dense_subgroup = gpu
+                .pipeline(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/dense_subgroup.spv"
+                )))
+                .unwrap_or(vk::Pipeline::null());
+            if gpu.dense_subgroup == vk::Pipeline::null() {
+                gpu.subgroup_head = false;
+            } else {
+                gpu.capture_stats("dense_subgroup".into(), gpu.dense_subgroup);
+            }
+        }
+        gpu.dense_rows = gpu
+            .pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_rows.spv")))
+            .unwrap_or(vk::Pipeline::null());
+        if gpu.dense_rows == vk::Pipeline::null() {
+            gpu.head_rows = 4;
+        }
         gpu.reduce = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/reduce.spv")))?;
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
             gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/convolution.spv")))?;
-        gpu.partials = Some(gpu.buffer(&vec![0; 32768 * 16 * 4])?);
+        gpu.rms_residual = gpu.pipeline(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/rms_residual.spv"
+        )))?;
+        gpu.greedy = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/greedy.spv")))?;
+        gpu.norm_rope = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/norm_rope.spv")))?;
+        gpu.kv_update = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/kv_update.spv")))?;
+        gpu.attention = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/attention.spv")))?;
+        gpu.copy = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/copy.spv")))?;
+        let partial_bytes = 32768
+            * 4
+            * gpu
+                .split_k
+                .max(gpu.ffn_k4_split)
+                .max(gpu.ffn_k5_split)
+                .max(4) as usize
+            * 4;
+        gpu.partials = Some(gpu.buffer(&vec![0; partial_bytes])?);
         gpu.capture_stats("dense_four_rows".into(), gpu.dense);
         gpu.hadamard = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/hadamard.spv")))?;
         gpu.input = Some(gpu.scratch_buffer()?);
@@ -971,14 +1373,27 @@ impl Gpu {
             "api_version":self.properties.api_version,"driver_version":self.properties.driver_version,
             "vendor_id":self.properties.vendor_id,"device_id":self.properties.device_id,
             "logical_buffer_bytes":self.allocated,"codebook_bytes":CODEBOOK_BYTES,"memory_types":types,
-            "kernel":if self.wave_kernels.iter().any(|n| *n) {"register_window_16_wave32_split4_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
+            "kernel":if self.wave_kernels.iter().chain(&self.mcg_cooperative).any(|n| *n) {"register_window_16_wave32_native_f16"} else if self.native_kernels.iter().any(|n| *n) {"register_window_16_native_f16_literal"} else {"register_window_16"},
             "native_float16_enabled":self.native_float16,"native_codebook_self_test":self.native_self_test,
             "native_codebook_arithmetic":"default/mcg: precise FP16 pair add; mul1: exact LUT; accumulation: FP32",
-            "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| n.then_some(i+1)).collect::<Vec<_>>(),
+            "native_pipeline_errors":self.native_pipeline_errors,"native_bitrates":self.native_kernels.iter().enumerate().filter_map(|(i,n)| (*n || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
             "projection":"gpu_resident_mlp_conv",
-            "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|v.then_some(i+1)).collect::<Vec<_>>(),
-            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":"four_rows_fp32",
-            "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active,
+            "gpu_conv_layer_experimental":self.gpu_conv_layer,
+            "gpu_greedy_requested":self.gpu_greedy,
+            "gpu_attention_layer_experimental":self.gpu_attention_layer,
+            "gpu_layer_batch_size":self.layer_batch,
+            "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
+            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
+            "dense_head_rows_per_group":self.head_rows,
+            "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
+            "cooperative_k4_self_test":if self.cooperative_k4_active {self.cooperative_k4_self_test} else if self.mcg_cooperative[3] {"passed_mcg"} else {self.cooperative_k4_self_test},
+            "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
+            "mcg_specialized_bitrates":self.mcg_cooperative.iter().enumerate().filter_map(|(i,active)| active.then_some(i+1)).collect::<Vec<_>>(),
+            "experimental_k5_requested":self.enable_cooperative_k5,"specialized_mcg_requested":self.enable_specialized_mcg,
+            "experimental_unroll2_requested":self.enable_unroll2,
+            "experimental_unroll2_active":self.enable_unroll2 && (self.cooperative_k4_active || self.cooperative_k5_active || self.mcg_cooperative.iter().any(|v| *v)),
+            "split_k":self.split_k,
+            "ffn_k4_split_override":self.ffn_k4_split,"ffn_k5_split_override":self.ffn_k5_split,
             "compiler_statistics":{"extension_enabled":self.amd_info.is_some(),"pipelines":self.compiler_stats},
             "capabilities":self.capabilities,
             "limits":{"storage_buffer_bytes":self.max_range,"shared_memory_bytes":self.properties.limits.max_compute_shared_memory_size,
@@ -988,7 +1403,7 @@ impl Gpu {
                 "max_allocations":self.properties.limits.max_memory_allocation_count},
             "memory_heaps":self.device.memory.memory_heaps[..self.device.memory.memory_heap_count as usize].iter()
                 .map(|h|serde_json::json!({"bytes":h.size,"flags":h.flags.as_raw()})).collect::<Vec<_>>(),
-            "host_visibility":"once_per_group","device_timing_scope":"device_queue_ns covers whole submission including final HOST_READ; matrix intervals exclude group barriers; split4 post-Hadamard includes ordered partial reduction",
+            "host_visibility":"once_per_group","device_timing_scope":"device_queue_ns covers whole submission including final HOST_READ; matrix intervals exclude group barriers; split post-Hadamard includes ordered partial reduction",
             "prepared_matrices":self.prepared,"gpu_timestamps":self.queries != vk::QueryPool::null(),
             "timestamp_valid_bits":self.timestamp_bits,"timestamp_period_ns":self.properties.limits.timestamp_period,
             "automatic_calibration":false,"scratch_mapping":"persistent"})
@@ -1055,24 +1470,204 @@ impl Gpu {
         self.submissions.get()
     }
 
-    fn stream_pipeline(&mut self, bits: u32) -> Result<vk::Pipeline> {
+    fn split_for_shape(&self, input: usize, output: usize, bits: u32) -> u32 {
+        let selected = match (input, output, bits) {
+            (2048, 7680, 4) => self.ffn_k4_split,
+            (7680, 2048, 5) => self.ffn_k5_split,
+            _ => 0,
+        };
+        if selected == 0 {
+            self.split_k
+        } else {
+            selected
+        }
+    }
+
+    pub(crate) fn dense_timing_snapshot(&self) -> (u64, u64) {
+        let profile = self.profile.borrow();
+        (profile.device_other_ns, profile.device_samples)
+    }
+
+    pub(crate) fn record_head_timing(&self, before: (u64, u64)) {
+        self.record_profile(|p| {
+            p.device_head_ns = p
+                .device_head_ns
+                .saturating_add(p.device_other_ns.saturating_sub(before.0));
+            p.device_head_samples = p
+                .device_head_samples
+                .saturating_add(p.device_samples.saturating_sub(before.1));
+        });
+    }
+
+    fn verify_cooperative(
+        &mut self,
+        bits: u32,
+        candidate: vk::Pipeline,
+        mcg_only: bool,
+    ) -> Result<bool> {
+        let reference_bytes: &[u8] = match bits {
+            4 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv")),
+            5 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv")),
+            _ => anyhow::bail!("Unsupported cooperative self-test bitrate"),
+        };
+        let reference = self.pipeline_with_subgroup(reference_bytes, None, true)?;
+        let result = (|| -> Result<bool> {
+            let rows = 128usize;
+            let cols = 128usize;
+            let states: Vec<u16> = (0..rows * cols)
+                .map(|i| (i.wrapping_mul(181).wrapping_add(i / 13 * 911 + 37)) as u16)
+                .collect();
+            let packed = codec::pack(&states, bits as usize)?;
+            let bytes: Vec<u8> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let weights = self.buffer(&bytes)?;
+            let x: Vec<f32> = (0..rows)
+                .map(|i| ((i * 13 % 17) as f32 - 8.) / 64.)
+                .collect();
+            for codebook in 0..3 {
+                if mcg_only && codebook != 1 {
+                    continue;
+                }
+                let params = [rows as u32, cols as u32, bits, codebook];
+                let expected = self.compute_groups(
+                    reference,
+                    &weights,
+                    &x,
+                    params,
+                    cols * 4,
+                    (cols / 16) as u32,
+                )?;
+                let actual = self.compute_groups(
+                    candidate,
+                    &weights,
+                    &x,
+                    params,
+                    cols * 4,
+                    (cols / 16) as u32,
+                )?;
+                if !expected
+                    .iter()
+                    .zip(&actual)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        if !self.device.abandoned.load(Ordering::Relaxed) {
+            unsafe { self.device.raw.destroy_pipeline(reference, None) };
+        }
+        result
+    }
+
+    fn stream_pipeline(&mut self, bits: u32, codebook: u32) -> Result<(vk::Pipeline, bool)> {
         ensure!((1..=8).contains(&bits), "Invalid specialized EXL3 bitrate");
         let index = bits as usize - 1;
+        if self.enable_specialized_mcg
+            && codebook == 1
+            && (bits == 4 || (bits == 5 && self.enable_cooperative_k5))
+            && self.native_verified
+            && self.allow_cooperative_k4
+        {
+            if !self.mcg_attempted[index] {
+                self.mcg_attempted[index] = true;
+                let bytes: &[u8] = match (bits, self.enable_unroll2) {
+                    (4, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg.spv")),
+                    (4, true) => {
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_mcg_unroll2.spv"))
+                    }
+                    (5, false) => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg.spv")),
+                    _ => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_mcg_unroll2.spv")),
+                };
+                if let Ok(pipeline) = self.pipeline_with_subgroup(bytes, None, true) {
+                    let verified = self.verify_cooperative(bits, pipeline, true);
+                    if matches!(&verified, Ok(true)) {
+                        self.qmv_mcg[index] = pipeline;
+                        self.mcg_cooperative[index] = true;
+                        self.capture_stats(
+                            format!("exl3_{bits}bit_wave32_cooperative_mcg"),
+                            pipeline,
+                        );
+                    } else {
+                        if self.device.abandoned.load(Ordering::Relaxed) {
+                            return Err(verified
+                                .err()
+                                .unwrap_or_else(|| anyhow::anyhow!("GPU abandoned")));
+                        }
+                        unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                        self.native_pipeline_errors
+                            .push(format!("MCG K{bits} self-test failed; using generic path"));
+                    }
+                }
+            }
+            if self.mcg_cooperative[index] {
+                return Ok((self.qmv_mcg[index], true));
+            }
+        }
         if self.qmv_stream[index] == vk::Pipeline::null() {
-            if bits == 4 && self.native_verified && self.allow_cooperative_k4 {
-                let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"));
+            if (bits == 4 || (bits == 5 && self.enable_cooperative_k5))
+                && self.native_verified
+                && self.allow_cooperative_k4
+            {
+                let bytes: &[u8] = match (bits, self.enable_unroll2) {
+                    (4, false) => {
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4_cooperative.spv"))
+                    }
+                    (4, true) => include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/qmv_wave_4_cooperative_unroll2.spv"
+                    )),
+                    (5, false) => {
+                        include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5_cooperative.spv"))
+                    }
+                    _ => include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/qmv_wave_5_cooperative_unroll2.spv"
+                    )),
+                };
                 match self.pipeline_with_subgroup(bytes, None, true) {
                     Ok(pipeline) => {
-                        self.qmv_stream[index] = pipeline;
-                        self.native_kernels[index] = true;
-                        self.wave_kernels[index] = true;
-                        self.cooperative_k4_active = true;
-                        self.capture_stats("exl3_4bit_wave32_cooperative".into(), pipeline);
-                        return Ok(pipeline);
+                        let verified = match self.verify_cooperative(bits, pipeline, false) {
+                            Ok(verified) => verified,
+                            Err(err) => {
+                                if self.device.abandoned.load(Ordering::Relaxed) {
+                                    return Err(err);
+                                }
+                                self.native_pipeline_errors
+                                    .push(format!("cooperative K{bits} self-test: {err}"));
+                                false
+                            }
+                        };
+                        if verified {
+                            self.qmv_stream[index] = pipeline;
+                            self.native_kernels[index] = true;
+                            self.wave_kernels[index] = true;
+                            if bits == 4 {
+                                self.cooperative_k4_active = true;
+                                self.cooperative_k4_self_test = "passed";
+                            } else {
+                                self.cooperative_k5_active = true;
+                                self.cooperative_k5_self_test = "passed";
+                            }
+                            self.capture_stats(
+                                format!("exl3_{bits}bit_wave32_cooperative"),
+                                pipeline,
+                            );
+                            return Ok((pipeline, true));
+                        }
+                        if bits == 4 {
+                            self.cooperative_k4_self_test = "mismatch_fallback";
+                        } else {
+                            self.cooperative_k5_self_test = "mismatch_fallback";
+                        }
+                        unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                        self.native_pipeline_errors.push(format!(
+                            "cooperative K{bits} parity mismatch; using fallback"
+                        ));
                     }
                     Err(err) => self
                         .native_pipeline_errors
-                        .push(format!("cooperative K4: {err}")),
+                        .push(format!("cooperative K{bits}: {err}")),
                 }
             }
             if self.native_verified && self.allow_wave32 {
@@ -1092,7 +1687,7 @@ impl Gpu {
                         self.native_kernels[index] = true;
                         self.wave_kernels[index] = true;
                         self.capture_stats(format!("exl3_{bits}bit_wave32"), pipeline);
-                        return Ok(pipeline);
+                        return Ok((pipeline, true));
                     }
                     Err(err) => self
                         .native_pipeline_errors
@@ -1115,7 +1710,7 @@ impl Gpu {
                         self.qmv_stream[index] = pipeline;
                         self.native_kernels[index] = true;
                         self.capture_stats(format!("exl3_{bits}bit_workgroup128"), pipeline);
-                        return Ok(pipeline);
+                        return Ok((pipeline, false));
                     }
                     Err(err) => self
                         .native_pipeline_errors
@@ -1127,7 +1722,7 @@ impl Gpu {
                 Some(bits),
             )?;
         }
-        Ok(self.qmv_stream[index])
+        Ok((self.qmv_stream[index], self.wave_kernels[index]))
     }
 
     pub fn prepare_exl3(
@@ -1172,7 +1767,8 @@ impl Gpu {
                 && shape.cols / 16 <= self.max_groups as usize,
             "EXL3 dispatch exceeds GPU limit"
         );
-        let pipeline = self.stream_pipeline(shape.bits)?;
+        let (pipeline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
+        let split_count = self.split_for_shape(shape.input, shape.output, shape.bits);
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
         let result = self.mapped_buffer(shape.cols * 4)?;
@@ -1183,7 +1779,6 @@ impl Gpu {
             .rotated
             .as_ref()
             .context("GPU rotation buffer unavailable")?;
-        let split = self.wave_kernels[shape.bits as usize - 1];
         let output = if split {
             self.partials.as_ref()
         } else {
@@ -1201,17 +1796,24 @@ impl Gpu {
                 groups: (shape.rows / 128) as u32,
                 groups_y: 1,
                 pipeline: self.hadamard,
+                aux: None,
                 barrier_after: true,
             },
             Dispatch {
                 input: rotated,
                 weights: &weights,
                 output,
-                params: [params[0], params[1], shape.bits, shape.codebook],
+                params: [
+                    params[0],
+                    params[1],
+                    shape.bits | (split_count << 8),
+                    shape.codebook,
+                ],
                 outputs: shape.cols,
                 groups: exl3_groups(shape.cols).context("Invalid EXL3 groups")?,
-                groups_y: if split { 4 } else { 1 },
+                groups_y: if split { split_count } else { 1 },
                 pipeline,
+                aux: None,
                 barrier_after: true,
             },
             Dispatch {
@@ -1221,13 +1823,14 @@ impl Gpu {
                 params: [
                     params[0],
                     params[1],
-                    if split { 2 } else { 1 },
+                    if split { 2 | (split_count << 8) } else { 1 },
                     shape.output as u32,
                 ],
                 outputs: shape.cols,
                 groups: (shape.cols / 128) as u32,
                 groups_y: 1,
                 pipeline: self.hadamard,
+                aux: None,
                 barrier_after: false,
             },
         ];
@@ -1263,10 +1866,18 @@ impl Gpu {
             bits: shape.bits,
             codebook: shape.codebook,
             packed_bytes: weights.size as u64,
-            kernel: if split && shape.bits == 4 && self.cooperative_k4_active {
-                "wave32_split4_cooperative_k4"
-            } else if split {
-                "wave32_split4_native_f16"
+            kernel: if split {
+                let cooperative =
+                    if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
+                        shape.bits + 10
+                    } else if shape.bits == 4 && self.cooperative_k4_active {
+                        4
+                    } else if shape.bits == 5 && self.cooperative_k5_active {
+                        5
+                    } else {
+                        0
+                    };
+                wave_kernel_label(split_count, cooperative)
             } else if self.native_kernels[shape.bits as usize - 1] && shape.codebook != 2 {
                 "native_f16_literal"
             } else if self.native_kernels[shape.bits as usize - 1] {
@@ -1334,6 +1945,173 @@ impl Gpu {
         result
     }
 
+    pub(crate) fn prepare_dense_gate(
+        &mut self,
+        weights: Buffer,
+        input_len: usize,
+        outputs: usize,
+        dtype: u32,
+    ) -> Result<DenseGatePlan> {
+        let params = self.validate_projection(&weights, &vec![0.; input_len], outputs, 0, dtype)?;
+        if self.gate_input.is_none() {
+            let input = self.scratch_buffer()?;
+            let output = self.scratch_buffer()?;
+            self.gate_input = Some(input);
+            self.gate_output = Some(output);
+        }
+        let (command, query_first) = self.prepare_operator(Dispatch {
+            input: self.gate_input.as_ref().context("Gate input unavailable")?,
+            weights: &weights,
+            output: self
+                .gate_output
+                .as_ref()
+                .context("Gate output unavailable")?,
+            params,
+            outputs,
+            groups: dense_groups(outputs).context("Invalid gate groups")?,
+            groups_y: 1,
+            pipeline: self.dense,
+            aux: None,
+            barrier_after: false,
+        })?;
+        Ok(DenseGatePlan {
+            device: self.device.clone(),
+            _weights: weights,
+            input_len,
+            outputs,
+            dtype,
+            command,
+            query_first,
+        })
+    }
+
+    pub(crate) fn forward_dense_gate(&self, gate: &DenseGatePlan, x: &[f32]) -> Result<Vec<f32>> {
+        ensure!(
+            Arc::ptr_eq(&gate.device, &self.device)
+                && x.len() == gate.input_len
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid gate input"
+        );
+        let input = self.gate_input.as_ref().context("Gate input unavailable")?;
+        let output = self
+            .gate_output
+            .as_ref()
+            .context("Gate output unavailable")?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
+        };
+        let started = Instant::now();
+        input.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        self.submit_graph(&[gate.command], Instant::now())?;
+        self.collect_gate_interval(gate.query_first);
+        output.read_f32(gate.outputs)
+    }
+
+    /// Submit independent Q/K/V projections and a dense attention gate together.
+    /// The gate has its own FP16-rounded input buffer; EXL3 still receives x unchanged.
+    pub(crate) fn project_exl3_with_dense_gate(
+        &mut self,
+        matrices: &[&Exl3Matrix],
+        gate: &DenseGatePlan,
+        x: &[f32],
+    ) -> Result<(Vec<Vec<f32>>, Vec<f32>)> {
+        ensure!(valid_group_size(matrices.len()), "Invalid QKV group size");
+        ensure!(
+            matrices
+                .iter()
+                .all(|m| Arc::ptr_eq(&m.weights.device, &self.device) && x.len() == m.shape.input)
+                && Arc::ptr_eq(&gate.device, &self.device)
+                && x.len() == gate.input_len
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid grouped attention input or device"
+        );
+        ensure!(
+            matrices
+                .iter()
+                .enumerate()
+                .all(|(i, m)| matrices[..i].iter().all(|other| other.command != m.command)),
+            "Duplicate matrix in QKV group"
+        );
+        let started = Instant::now();
+        let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
+        self.record_profile(|p| {
+            p.projection_cpu_ns = p.projection_cpu_ns.saturating_add(elapsed_ns(started))
+        });
+        ensure!(
+            rounded.iter().all(|v| v.is_finite()),
+            "Invalid rounded gate input"
+        );
+        self.upload(x)?;
+        let input = self.gate_input.as_ref().context("Gate input unavailable")?;
+        let output = self
+            .gate_output
+            .as_ref()
+            .context("Gate output unavailable")?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                rounded.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(rounded.as_slice()),
+            )
+        };
+        let started = Instant::now();
+        input.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        let recording = Instant::now();
+        let mut commands: Vec<_> = matrices.iter().map(|m| m.command).collect();
+        commands.push(gate.command);
+        self.submit_graph(&commands, recording)?;
+        for matrix in matrices {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
+        self.collect_gate_interval(gate.query_first);
+        let started = Instant::now();
+        let qkv = matrices
+            .iter()
+            .map(|m| m.output.read_f32(m.shape.output))
+            .collect::<Result<Vec<_>>>()?;
+        let gate = output.read_f32(gate.outputs)?;
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        Ok((qkv, gate))
+    }
+
+    fn collect_gate_interval(&self, query_first: u32) {
+        if self.queries == vk::QueryPool::null() {
+            return;
+        }
+        let mut ticks = [0u64; 2];
+        let started = Instant::now();
+        let result = unsafe {
+            self.device.raw.get_query_pool_results(
+                self.queries,
+                query_first,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        self.record_profile(|p| {
+            p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started));
+            match result {
+                Ok(()) => {
+                    if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
+                        let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period))
+                            as u64;
+                        p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
+                        p.device_other_ns = p.device_other_ns.saturating_add(ns);
+                        p.device_attention_gate_ns = p.device_attention_gate_ns.saturating_add(ns);
+                        p.device_attention_gate_samples =
+                            p.device_attention_gate_samples.saturating_add(1);
+                        p.device_samples = p.device_samples.saturating_add(1);
+                    }
+                }
+                Err(err) => {
+                    p.query_read_failures = p.query_read_failures.saturating_add(1);
+                    p.last_query_error = Some(format!("attention gate: {err:?}"));
+                }
+            }
+        });
+    }
+
     fn submit_graph(&self, commands: &[vk::CommandBuffer], recording: Instant) -> Result<()> {
         let mut batch = Vec::with_capacity(commands.len() + 2);
         batch.push(self.queue_start);
@@ -1388,7 +2166,13 @@ impl Gpu {
         });
     }
 
-    fn prepare_operator(&self, job: Dispatch<'_>) -> Result<vk::CommandBuffer> {
+    fn prepare_operator(&self, job: Dispatch<'_>) -> Result<(vk::CommandBuffer, u32)> {
+        let query_first = self.next_operator_query.get();
+        ensure!(
+            query_first <= QUERY_COUNT - 2,
+            "Operator query capacity exhausted"
+        );
+        self.next_operator_query.set(query_first + 2);
         let command = unsafe {
             self.device.raw.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
@@ -1409,9 +2193,9 @@ impl Gpu {
             &sets,
             &[job],
             vk::CommandBufferUsageFlags::empty(),
-            Some(2),
+            Some(query_first),
         )?;
-        Ok(command)
+        Ok((command, query_first))
     }
 
     pub(crate) fn prepare_mlp(
@@ -1434,7 +2218,7 @@ impl Gpu {
             "Invalid MLP projection shapes"
         );
         let size = gate.shape.output;
-        let activate = self.prepare_operator(Dispatch {
+        let (activate, activate_query) = self.prepare_operator(Dispatch {
             input: &gate.output,
             weights: &up.output,
             output: self.input.as_ref().context("GPU input unavailable")?,
@@ -1443,6 +2227,7 @@ impl Gpu {
             groups: size.div_ceil(128) as u32,
             groups_y: 1,
             pipeline: self.swiglu,
+            aux: None,
             barrier_after: true,
         })?;
         Ok(MlpPlan {
@@ -1450,6 +2235,7 @@ impl Gpu {
             up,
             down,
             activate,
+            activate_query,
         })
     }
 
@@ -1473,7 +2259,7 @@ impl Gpu {
         for m in [&plan.gate, &plan.up, &plan.down] {
             self.collect_timestamps(Some(m.query_first));
         }
-        self.collect_interval(2, Some(false));
+        self.collect_interval(plan.activate_query, Some(false));
         let started = Instant::now();
         let result = plan.down.output.read_f32(plan.down.shape.output);
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
@@ -1512,7 +2298,7 @@ impl Gpu {
         );
         let bytes: Vec<_> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let state = self.buffer(&bytes)?;
-        let convolve = self.prepare_operator(Dispatch {
+        let (convolve, convolve_query) = self.prepare_operator(Dispatch {
             input: &input.output,
             weights: &state,
             output: self.input.as_ref().context("GPU input unavailable")?,
@@ -1521,6 +2307,7 @@ impl Gpu {
             groups: h.div_ceil(128) as u32,
             groups_y: 1,
             pipeline: self.convolution,
+            aux: None,
             barrier_after: true,
         })?;
         Ok(ConvPlan {
@@ -1528,7 +2315,740 @@ impl Gpu {
             output,
             state,
             convolve,
+            convolve_query,
         })
+    }
+
+    pub(crate) fn gpu_conv_layer_enabled(&self) -> bool {
+        self.gpu_conv_layer
+    }
+
+    pub(crate) fn gpu_greedy_enabled(&self) -> bool {
+        self.gpu_greedy
+    }
+
+    pub(crate) fn gpu_attention_layer_enabled(&self) -> bool {
+        self.gpu_attention_layer
+    }
+
+    pub(crate) fn layer_batch_size(&self) -> usize {
+        self.layer_batch
+    }
+
+    pub(crate) fn prepare_layer_copy(
+        &self,
+        source: &ResidentLayer<'_>,
+        target: &ResidentLayer<'_>,
+        size: usize,
+    ) -> Result<LayerCopyPlan> {
+        ensure!(
+            size > 0
+                && size <= 32768
+                && source.hidden().raw != target.hidden().raw
+                && source.hidden().size >= size * 4
+                && target.hidden().size >= size * 4
+                && Arc::ptr_eq(&source.hidden().device, &self.device)
+                && Arc::ptr_eq(&target.hidden().device, &self.device),
+            "Invalid resident layer link"
+        );
+        let weights = self
+            .codebooks
+            .as_ref()
+            .context("GPU codebooks unavailable")?;
+        let (command, query_first) = self.prepare_operator(Dispatch {
+            input: source.hidden(),
+            weights,
+            output: target.hidden(),
+            aux: None,
+            params: [size as u32, 0, 0, 0],
+            outputs: size,
+            groups: size.div_ceil(128) as u32,
+            groups_y: 1,
+            pipeline: self.copy,
+            barrier_after: true,
+        })?;
+        Ok(LayerCopyPlan {
+            command,
+            query_first,
+            source: source.hidden().raw,
+            target: target.hidden().raw,
+        })
+    }
+
+    pub(crate) fn forward_resident_batch(
+        &self,
+        layers: &[ResidentLayer<'_>],
+        links: &[&LayerCopyPlan],
+        x: &[f32],
+        position: usize,
+    ) -> Result<Vec<f32>> {
+        ensure!(
+            (2..=4).contains(&layers.len())
+                && links.len() + 1 == layers.len()
+                && position < 2048
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid resident layer batch"
+        );
+        for (i, link) in links.iter().enumerate() {
+            ensure!(
+                link.source == layers[i].hidden().raw && link.target == layers[i + 1].hidden().raw,
+                "Resident layer link mismatch"
+            );
+        }
+        let first = layers.first().context("Missing first layer")?;
+        ensure!(
+            first.hidden().size >= x.len() * 4,
+            "Invalid resident input shape"
+        );
+        let started = Instant::now();
+        let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        first.hidden().write(&bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        let mut commands = Vec::new();
+        for (i, layer) in layers.iter().enumerate() {
+            match layer {
+                ResidentLayer::Conv(plan, conv, mlp) => {
+                    ensure!(
+                        Arc::ptr_eq(&plan.device, &self.device)
+                            && plan.size == x.len()
+                            && plan.conv_input == conv.input.command
+                            && plan.mlp_gate == mlp.gate.command,
+                        "Invalid convolution batch layer"
+                    );
+                    conv.state.write(&(position as u32).to_ne_bytes())?;
+                    commands.extend_from_slice(&[
+                        plan.commands[0],
+                        conv.input.command,
+                        conv.convolve,
+                        conv.output.command,
+                        plan.commands[1],
+                        plan.commands[2],
+                        mlp.gate.command,
+                        mlp.up.command,
+                        mlp.activate,
+                        mlp.down.command,
+                        plan.commands[3],
+                    ]);
+                }
+                ResidentLayer::Attention(plan, matrices, gate, mlp) => {
+                    let [q, k, v, output] = *matrices;
+                    ensure!(
+                        Arc::ptr_eq(&plan.device, &self.device)
+                            && plan.heads * plan.dim == x.len()
+                            && plan.identities
+                                == [
+                                    q.command,
+                                    k.command,
+                                    v.command,
+                                    output.command,
+                                    gate.command,
+                                    mlp.gate.command
+                                ],
+                        "Invalid attention batch layer"
+                    );
+                    self.prepare_attention_state(plan, position)?;
+                    commands.extend_from_slice(&[
+                        plan.commands[0],
+                        q.command,
+                        k.command,
+                        v.command,
+                        plan.commands[1],
+                        plan.commands[2],
+                        plan.commands[3],
+                        plan.commands[4],
+                        plan.commands[5],
+                        output.command,
+                        plan.commands[6],
+                        plan.commands[7],
+                        mlp.gate.command,
+                        mlp.up.command,
+                        mlp.activate,
+                        mlp.down.command,
+                        plan.commands[8],
+                    ]);
+                }
+            }
+            if i < links.len() {
+                commands.push(links[i].command);
+            }
+        }
+        self.submit_graph(&commands, Instant::now())?;
+        for layer in layers {
+            match layer {
+                ResidentLayer::Conv(plan, conv, mlp) => {
+                    for matrix in [&conv.input, &conv.output, &mlp.gate, &mlp.up, &mlp.down] {
+                        self.collect_timestamps(Some(matrix.query_first));
+                    }
+                    self.collect_interval(conv.convolve_query, Some(true));
+                    self.collect_interval(mlp.activate_query, Some(false));
+                    for query in plan.query_firsts {
+                        self.collect_other_interval(query, OtherKind::Norm);
+                    }
+                }
+                ResidentLayer::Attention(plan, matrices, _, mlp) => {
+                    let [q, k, v, output] = *matrices;
+                    for matrix in [q, k, v, output, &mlp.gate, &mlp.up, &mlp.down] {
+                        self.collect_timestamps(Some(matrix.query_first));
+                    }
+                    self.collect_gate_interval(plan.query_firsts[1]);
+                    for i in [2usize, 3, 4, 5] {
+                        self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention);
+                    }
+                    for i in [0usize, 6, 7, 8] {
+                        self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm);
+                    }
+                    self.collect_interval(mlp.activate_query, Some(false));
+                }
+            }
+        }
+        for link in links {
+            self.collect_other_interval(link.query_first, OtherKind::Copy);
+        }
+        let started = Instant::now();
+        let result = layers
+            .last()
+            .context("Missing final layer")?
+            .hidden()
+            .read_f32(x.len());
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        result
+    }
+
+    pub(crate) fn prepare_attention_layer(
+        &mut self,
+        c: AttentionLayerConfig<'_>,
+    ) -> Result<AttentionLayerPlan> {
+        let size = c
+            .heads
+            .checked_mul(c.dim)
+            .context("Attention size overflow")?;
+        let kv_size = c.kv_heads.checked_mul(c.dim).context("KV size overflow")?;
+        let active = (c.fraction * c.dim as f32) as usize / 2;
+        ensure!(
+            self.properties.limits.max_compute_shared_memory_size >= 8192
+                && c.dim == 128
+                && c.heads > 0
+                && c.kv_heads > 0
+                && c.heads.is_multiple_of(c.kv_heads)
+                && (1..=2048).contains(&c.window)
+                && (1..=64).contains(&active)
+                && c.theta.is_finite()
+                && c.theta > 0.
+                && c.eps.is_finite()
+                && c.eps > 0.
+                && c.q.shape.input == size
+                && c.q.shape.output == size
+                && c.k.shape.input == size
+                && c.k.shape.output == kv_size
+                && c.v.shape.input == size
+                && c.v.shape.output == kv_size
+                && c.output.shape.input == size
+                && c.output.shape.output == size
+                && c.gate.input_len == size
+                && c.gate.outputs == c.heads
+                && c.mlp.gate.shape.input == size
+                && c.mlp.down.shape.output == size
+                && c.norms
+                    .iter()
+                    .all(|v| v.len() == size && v.iter().all(|x| x.is_finite()))
+                && c.q_norm.len() == c.dim
+                && c.k_norm.len() == c.dim
+                && c.q_norm.iter().chain(c.k_norm).all(|x| x.is_finite()),
+            "Invalid resident attention configuration"
+        );
+        ensure!(
+            [c.q, c.k, c.v, c.output, &c.mlp.gate, &c.mlp.up, &c.mlp.down]
+                .iter()
+                .all(|m| Arc::ptr_eq(&m.weights.device, &self.device))
+                && Arc::ptr_eq(&c.gate.device, &self.device),
+            "Attention belongs to another GPU"
+        );
+        let state_len = c
+            .window
+            .checked_mul(kv_size)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| n.checked_add(1))
+            .context("KV cache size overflow")?;
+        let hidden = self.mapped_buffer(size * 4)?;
+        let cache = self.mapped_buffer(state_len * 4)?;
+        let q_data = self.mapped_buffer(c.dim * 2 * 4)?;
+        let k_data = self.mapped_buffer(c.dim * 2 * 4)?;
+        let q_output = self.mapped_buffer(size * 4)?;
+        let k_output = self.mapped_buffer(kv_size * 4)?;
+        let norm_weights = c
+            .norms
+            .iter()
+            .map(|norm| {
+                let bytes: Vec<u8> = norm
+                    .iter()
+                    .map(|v| crate::math::half(*v))
+                    .flat_map(|v| v.to_ne_bytes())
+                    .collect();
+                self.buffer(&bytes)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let gate_output = self
+            .gate_output
+            .as_ref()
+            .context("Gate output unavailable")?;
+        let specs = [
+            Dispatch {
+                input: &hidden,
+                weights: &norm_weights[0],
+                output: input,
+                aux: None,
+                params: [size as u32, 0, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+            Dispatch {
+                input,
+                weights: &c.gate._weights,
+                output: gate_output,
+                aux: None,
+                params: [size as u32, c.heads as u32, c.gate.dtype, 0],
+                outputs: c.heads,
+                groups: dense_groups(c.heads).context("Invalid gate size")?,
+                groups_y: 1,
+                pipeline: self.dense,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.q.output,
+                weights: &q_data,
+                output: &q_output,
+                aux: None,
+                params: [c.dim as u32, c.heads as u32, active as u32, c.eps.to_bits()],
+                outputs: size,
+                groups: c.heads as u32,
+                groups_y: 1,
+                pipeline: self.norm_rope,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.k.output,
+                weights: &k_data,
+                output: &k_output,
+                aux: None,
+                params: [
+                    c.dim as u32,
+                    c.kv_heads as u32,
+                    active as u32,
+                    c.eps.to_bits(),
+                ],
+                outputs: kv_size,
+                groups: c.kv_heads as u32,
+                groups_y: 1,
+                pipeline: self.norm_rope,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &k_output,
+                weights: &c.v.output,
+                output: &cache,
+                aux: None,
+                params: [kv_size as u32, c.window as u32, 0, 0],
+                outputs: kv_size,
+                groups: kv_size.div_ceil(128) as u32,
+                groups_y: 1,
+                pipeline: self.kv_update,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &q_output,
+                weights: &cache,
+                output: input,
+                aux: Some(gate_output),
+                params: [
+                    c.heads as u32,
+                    c.kv_heads as u32,
+                    c.dim as u32,
+                    c.window as u32,
+                ],
+                outputs: size,
+                groups: c.heads as u32,
+                groups_y: 1,
+                pipeline: self.attention,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.output.output,
+                weights: &norm_weights[1],
+                output: &hidden,
+                aux: None,
+                params: [size as u32, 1, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &hidden,
+                weights: &norm_weights[2],
+                output: input,
+                aux: None,
+                params: [size as u32, 0, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+            Dispatch {
+                input: &c.mlp.down.output,
+                weights: &norm_weights[3],
+                output: &hidden,
+                aux: None,
+                params: [size as u32, 1, c.eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                barrier_after: true,
+            },
+        ];
+        let mut commands = Vec::new();
+        let mut query_firsts = Vec::new();
+        for spec in specs {
+            let (command, query) = self.prepare_operator(spec)?;
+            commands.push(command);
+            query_firsts.push(query);
+        }
+        let mut buffers = norm_weights;
+        buffers.push(q_output);
+        buffers.push(k_output);
+        Ok(AttentionLayerPlan {
+            device: self.device.clone(),
+            hidden,
+            cache,
+            q_data,
+            k_data,
+            _buffers: buffers,
+            commands: commands
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid attention command count"))?,
+            query_firsts: query_firsts
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid attention query count"))?,
+            identities: [
+                c.q.command,
+                c.k.command,
+                c.v.command,
+                c.output.command,
+                c.gate.command,
+                c.mlp.gate.command,
+            ],
+            q_weights: c.q_norm.to_vec(),
+            k_weights: c.k_norm.to_vec(),
+            heads: c.heads,
+            kv_heads: c.kv_heads,
+            dim: c.dim,
+            active,
+            theta: c.theta,
+        })
+    }
+
+    fn prepare_attention_state(&self, plan: &AttentionLayerPlan, position: usize) -> Result<()> {
+        let mut q_data = vec![0f32; plan.dim * 2];
+        let mut k_data = vec![0f32; plan.dim * 2];
+        q_data[..plan.dim].copy_from_slice(&plan.q_weights);
+        k_data[..plan.dim].copy_from_slice(&plan.k_weights);
+        let started = Instant::now();
+        let cache_hit;
+        {
+            let mut cache = self.rope_angles.borrow_mut();
+            if cache.0 != Some(position) {
+                cache.0 = Some(position);
+                cache.1.clear();
+            }
+            let key = (plan.theta.to_bits(), plan.dim, plan.active);
+            cache_hit = cache.1.contains_key(&key);
+            let angles = cache.1.entry(key).or_insert_with(|| {
+                (0..plan.active)
+                    .map(|j| {
+                        let angle =
+                            position as f32 / plan.theta.powf((2 * j) as f32 / plan.dim as f32);
+                        angle.sin_cos()
+                    })
+                    .collect()
+            });
+            for (j, &(sin, cos)) in angles.iter().enumerate() {
+                q_data[plan.dim + 2 * j] = sin;
+                q_data[plan.dim + 2 * j + 1] = cos;
+                k_data[plan.dim + 2 * j] = sin;
+                k_data[plan.dim + 2 * j + 1] = cos;
+            }
+        }
+        self.record_profile(|p| {
+            p.rope_ns = p.rope_ns.saturating_add(elapsed_ns(started));
+            if cache_hit {
+                p.rope_cache_hits = p.rope_cache_hits.saturating_add(1);
+            } else {
+                p.rope_cache_misses = p.rope_cache_misses.saturating_add(1);
+            }
+        });
+        let started = Instant::now();
+        let q_bytes: Vec<u8> = q_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let k_bytes: Vec<u8> = k_data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        plan.q_data.write(&q_bytes)?;
+        plan.k_data.write(&k_bytes)?;
+        plan.cache.write(&(position as u32).to_ne_bytes())?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        Ok(())
+    }
+
+    pub(crate) fn forward_attention_layer(
+        &self,
+        plan: &AttentionLayerPlan,
+        matrices: [&Exl3Matrix; 4],
+        gate: &DenseGatePlan,
+        mlp: &MlpPlan,
+        x: &[f32],
+        position: usize,
+    ) -> Result<Vec<f32>> {
+        let [q, k, v, output] = matrices;
+        ensure!(
+            Arc::ptr_eq(&plan.device, &self.device)
+                && position < 2048
+                && plan.identities
+                    == [
+                        q.command,
+                        k.command,
+                        v.command,
+                        output.command,
+                        gate.command,
+                        mlp.gate.command
+                    ]
+                && x.len() == plan.heads * plan.dim
+                && plan.kv_heads > 0
+                && x.iter().all(|v| v.is_finite()),
+            "Invalid resident attention input"
+        );
+        let started = Instant::now();
+        let hidden_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        plan.hidden.write(&hidden_bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        self.prepare_attention_state(plan, position)?;
+        self.submit_graph(
+            &[
+                plan.commands[0],
+                q.command,
+                k.command,
+                v.command,
+                plan.commands[1],
+                plan.commands[2],
+                plan.commands[3],
+                plan.commands[4],
+                plan.commands[5],
+                output.command,
+                plan.commands[6],
+                plan.commands[7],
+                mlp.gate.command,
+                mlp.up.command,
+                mlp.activate,
+                mlp.down.command,
+                plan.commands[8],
+            ],
+            Instant::now(),
+        )?;
+        for matrix in [q, k, v, output, &mlp.gate, &mlp.up, &mlp.down] {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
+        self.collect_gate_interval(plan.query_firsts[1]);
+        for i in [2usize, 3, 4, 5] {
+            self.collect_other_interval(plan.query_firsts[i], OtherKind::Attention);
+        }
+        for i in [0usize, 6, 7, 8] {
+            self.collect_other_interval(plan.query_firsts[i], OtherKind::Norm);
+        }
+        self.collect_interval(mlp.activate_query, Some(false));
+        let started = Instant::now();
+        let result = plan.hidden.read_f32(plan.heads * plan.dim);
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        result
+    }
+
+    pub(crate) fn prepare_conv_layer(
+        &mut self,
+        conv: &ConvPlan,
+        mlp: &MlpPlan,
+        norms: [&[f32]; 4],
+        eps: f32,
+    ) -> Result<ConvLayerPlan> {
+        let size = conv.output.shape.output;
+        ensure!(
+            size == mlp.down.shape.output
+                && size == mlp.gate.shape.input
+                && norms
+                    .iter()
+                    .all(|n| n.len() == size && n.iter().all(|v| v.is_finite()))
+                && eps.is_finite()
+                && eps > 0.,
+            "Invalid resident convolution layer"
+        );
+        let hidden = self.mapped_buffer(size * 4)?;
+        let weights = norms
+            .iter()
+            .map(|norm| {
+                let bytes: Vec<u8> = norm
+                    .iter()
+                    .map(|v| crate::math::half(*v))
+                    .flat_map(|v| v.to_ne_bytes())
+                    .collect();
+                self.buffer(&bytes)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let specs = [
+            (&hidden, input, 0u32),
+            (&conv.output.output, &hidden, 1u32),
+            (&hidden, input, 0u32),
+            (&mlp.down.output, &hidden, 1u32),
+        ];
+        let mut commands = Vec::new();
+        let mut query_firsts = Vec::new();
+        for (i, (source, target, residual)) in specs.into_iter().enumerate() {
+            let (command, query) = self.prepare_operator(Dispatch {
+                input: source,
+                weights: &weights[i],
+                output: target,
+                params: [size as u32, residual, eps.to_bits(), 0],
+                outputs: size,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.rms_residual,
+                aux: None,
+                barrier_after: true,
+            })?;
+            commands.push(command);
+            query_firsts.push(query);
+        }
+        Ok(ConvLayerPlan {
+            device: self.device.clone(),
+            hidden,
+            _weights: weights,
+            commands: commands
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid norm command count"))?,
+            query_firsts: query_firsts
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid norm query count"))?,
+            conv_input: conv.input.command,
+            mlp_gate: mlp.gate.command,
+            size,
+        })
+    }
+
+    pub(crate) fn forward_conv_layer(
+        &self,
+        plan: &ConvLayerPlan,
+        conv: &ConvPlan,
+        mlp: &MlpPlan,
+        x: &[f32],
+        position: usize,
+    ) -> Result<Vec<f32>> {
+        ensure!(
+            Arc::ptr_eq(&plan.device, &self.device)
+                && plan.conv_input == conv.input.command
+                && plan.mlp_gate == mlp.gate.command
+                && x.len() == plan.size
+                && x.iter().all(|v| v.is_finite())
+                && position < 2048,
+            "Invalid resident convolution input"
+        );
+        conv.state.write(&(position as u32).to_ne_bytes())?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(x.as_ptr().cast::<u8>(), std::mem::size_of_val(x))
+        };
+        let started = Instant::now();
+        plan.hidden.write(bytes)?;
+        self.record_profile(|p| p.upload_ns = p.upload_ns.saturating_add(elapsed_ns(started)));
+        self.submit_graph(
+            &[
+                plan.commands[0],
+                conv.input.command,
+                conv.convolve,
+                conv.output.command,
+                plan.commands[1],
+                plan.commands[2],
+                mlp.gate.command,
+                mlp.up.command,
+                mlp.activate,
+                mlp.down.command,
+                plan.commands[3],
+            ],
+            Instant::now(),
+        )?;
+        for matrix in [&conv.input, &conv.output, &mlp.gate, &mlp.up, &mlp.down] {
+            self.collect_timestamps(Some(matrix.query_first));
+        }
+        self.collect_interval(conv.convolve_query, Some(true));
+        self.collect_interval(mlp.activate_query, Some(false));
+        for query in plan.query_firsts {
+            self.collect_other_interval(query, OtherKind::Norm);
+        }
+        let started = Instant::now();
+        let output = plan.hidden.read_f32(plan.size);
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        output
+    }
+
+    fn collect_other_interval(&self, query_first: u32, kind: OtherKind) {
+        if self.queries == vk::QueryPool::null() {
+            return;
+        }
+        let mut ticks = [0u64; 2];
+        let started = Instant::now();
+        let result = unsafe {
+            self.device.raw.get_query_pool_results(
+                self.queries,
+                query_first,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        self.record_profile(|p| {
+            p.query_read_ns = p.query_read_ns.saturating_add(elapsed_ns(started));
+            match result {
+                Ok(()) => {
+                    if let Some(delta) = timestamp_delta(ticks[0], ticks[1], self.timestamp_bits) {
+                        let ns = (delta as f64 * f64::from(self.properties.limits.timestamp_period))
+                            as u64;
+                        p.device_compute_ns = p.device_compute_ns.saturating_add(ns);
+                        p.device_other_ns = p.device_other_ns.saturating_add(ns);
+                        match kind {
+                            OtherKind::Attention => {
+                                p.device_attention_gpu_ns =
+                                    p.device_attention_gpu_ns.saturating_add(ns);
+                                p.device_attention_gpu_samples =
+                                    p.device_attention_gpu_samples.saturating_add(1);
+                            }
+                            OtherKind::Norm => {
+                                p.device_norm_residual_ns =
+                                    p.device_norm_residual_ns.saturating_add(ns);
+                                p.device_norm_residual_samples =
+                                    p.device_norm_residual_samples.saturating_add(1);
+                            }
+                            OtherKind::Copy => {
+                                p.device_layer_copy_ns = p.device_layer_copy_ns.saturating_add(ns);
+                                p.device_layer_copy_samples =
+                                    p.device_layer_copy_samples.saturating_add(1);
+                            }
+                        }
+                        p.device_samples = p.device_samples.saturating_add(1);
+                    }
+                }
+                Err(err) => {
+                    p.query_read_failures = p.query_read_failures.saturating_add(1);
+                    p.last_query_error = Some(format!("norm interval: {err:?}"));
+                }
+            }
+        });
     }
 
     pub(crate) fn forward_conv(
@@ -1554,7 +3074,7 @@ impl Gpu {
         for m in [&plan.input, &plan.output] {
             self.collect_timestamps(Some(m.query_first));
         }
-        self.collect_interval(2, Some(true));
+        self.collect_interval(plan.convolve_query, Some(true));
         let started = Instant::now();
         let result = plan.output.output.read_f32(plan.output.shape.output);
         self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
@@ -1569,7 +3089,7 @@ impl Gpu {
         bits: u32,
         codebook: u32,
     ) -> Result<Vec<f32>> {
-        let params = self.validate_projection(weights, x, outputs, bits, codebook)?;
+        let mut params = self.validate_projection(weights, x, outputs, bits, codebook)?;
         if bits == 0 {
             return self.compute_groups(
                 self.dense,
@@ -1581,10 +3101,12 @@ impl Gpu {
             );
         }
         let groups = exl3_groups(outputs).context("Invalid EXL3 output shape")?;
-        let pipeline = self.stream_pipeline(bits)?;
-        if !self.wave_kernels[bits as usize - 1] {
+        let (pipeline, split) = self.stream_pipeline(bits, codebook)?;
+        if !split {
             return self.compute_groups(pipeline, weights, x, params, outputs, groups);
         }
+        let split_count = self.split_for_shape(x.len(), outputs, bits);
+        params[2] |= split_count << 8;
         let output = self.output.as_ref().context("GPU output unavailable")?;
         let partials = self.partials.as_ref().context("GPU partials unavailable")?;
         self.execute(
@@ -1597,8 +3119,9 @@ impl Gpu {
                     params,
                     outputs,
                     groups,
-                    groups_y: 4,
+                    groups_y: split_count,
                     pipeline,
+                    aux: None,
                     barrier_after: true,
                 },
                 Dispatch {
@@ -1610,11 +3133,248 @@ impl Gpu {
                     groups: outputs.div_ceil(128) as u32,
                     groups_y: 1,
                     pipeline: self.reduce,
+                    aux: None,
                     barrier_after: false,
                 },
             ],
         )?;
         output.read_f32(outputs)
+    }
+
+    pub(crate) fn prepare_dense_head(
+        &mut self,
+        chunks: Vec<(Buffer, usize)>,
+        input_len: usize,
+        dtype: u32,
+    ) -> Result<DenseHeadPlan> {
+        let rows: Vec<_> = chunks.iter().map(|(_, rows)| *rows).collect();
+        let total = dense_batch_output_count(&rows).context("Invalid dense head chunks")?;
+        if rows
+            .iter()
+            .any(|rows| rows.div_ceil(self.head_rows as usize) > self.max_groups as usize)
+        {
+            self.head_rows = 4;
+        }
+        let rows_per_group = self.head_rows;
+        let pipeline = if rows_per_group != 4 {
+            self.dense_rows
+        } else if self.subgroup_head {
+            self.dense_subgroup
+        } else if self.fast_head {
+            self.dense_pair
+        } else {
+            self.dense
+        };
+        let dummy = vec![0.0; input_len];
+        let params = chunks
+            .iter()
+            .map(|(weights, rows)| self.validate_projection(weights, &dummy, *rows, 0, dtype))
+            .collect::<Result<Vec<_>>>()?;
+        let outputs = rows
+            .iter()
+            .map(|rows| self.mapped_buffer(rows * 4))
+            .collect::<Result<Vec<_>>>()?;
+        let layouts = vec![self.set_layout; chunks.len()];
+        let command = unsafe {
+            self.device.raw.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?
+        }[0];
+        let sets = unsafe {
+            self.device.raw.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.descriptor_pool)
+                    .set_layouts(&layouts),
+            )?
+        };
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let jobs: Vec<_> = chunks
+            .iter()
+            .zip(&params)
+            .zip(&outputs)
+            .map(|(((weights, rows), params), output)| Dispatch {
+                input,
+                weights,
+                output,
+                params: [params[0], params[1], params[2], rows_per_group],
+                outputs: *rows,
+                groups: rows.div_ceil(rows_per_group as usize) as u32,
+                groups_y: 1,
+                pipeline,
+                aux: None,
+                barrier_after: false,
+            })
+            .collect();
+        self.record_jobs(
+            command,
+            &sets,
+            &jobs,
+            vk::CommandBufferUsageFlags::empty(),
+            None,
+        )?;
+        Ok(DenseHeadPlan {
+            chunks,
+            outputs,
+            input_len,
+            total,
+            command,
+            dtype,
+            greedy: None,
+            rows_per_group,
+            pipeline,
+        })
+    }
+
+    pub(crate) fn forward_dense_head(&self, plan: &DenseHeadPlan, x: &[f32]) -> Result<Vec<f32>> {
+        ensure!(
+            x.len() == plan.input_len && x.iter().all(|v| v.is_finite()),
+            "Invalid dense head input"
+        );
+        ensure!(
+            plan.chunks
+                .iter()
+                .all(|(weights, _)| Arc::ptr_eq(&weights.device, &self.device)),
+            "Dense head belongs to another GPU"
+        );
+        self.upload(x)?;
+        self.submit(&[plan.command], Instant::now())?;
+        self.collect_timestamps(None);
+        let started = Instant::now();
+        let mut result = Vec::with_capacity(plan.total);
+        for ((_, rows), output) in plan.chunks.iter().zip(&plan.outputs) {
+            result.extend(output.read_f32(*rows)?);
+        }
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        Ok(result)
+    }
+
+    pub(crate) fn prepare_greedy_head(
+        &mut self,
+        plan: &mut DenseHeadPlan,
+        vocabulary: &[u32],
+    ) -> Result<()> {
+        ensure!(
+            !vocabulary.is_empty() && vocabulary.iter().all(|id| (*id as usize) < plan.total),
+            "Invalid vocabulary"
+        );
+        let mut mask = vec![0u32; plan.total];
+        for &id in vocabulary {
+            mask[id as usize] = 1;
+        }
+        let mask_bytes: Vec<u8> = mask.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let mask = self.buffer(&mask_bytes)?;
+        let results = (0..plan.chunks.len())
+            .map(|_| self.mapped_buffer(16))
+            .collect::<Result<Vec<_>>>()?;
+        let layouts = vec![self.set_layout; plan.chunks.len() * 2];
+        let command = unsafe {
+            self.device.raw.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?
+        }[0];
+        let sets = unsafe {
+            self.device.raw.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.descriptor_pool)
+                    .set_layouts(&layouts),
+            )?
+        };
+        let input = self.input.as_ref().context("GPU input unavailable")?;
+        let mut jobs = Vec::with_capacity(plan.chunks.len() * 2);
+        for (i, ((weights, rows), output)) in plan.chunks.iter().zip(&plan.outputs).enumerate() {
+            jobs.push(Dispatch {
+                input,
+                weights,
+                output,
+                params: [
+                    plan.input_len as u32,
+                    *rows as u32,
+                    plan.dtype,
+                    plan.rows_per_group,
+                ],
+                outputs: *rows,
+                groups: rows.div_ceil(plan.rows_per_group as usize) as u32,
+                groups_y: 1,
+                pipeline: plan.pipeline,
+                aux: None,
+                barrier_after: i + 1 == plan.chunks.len(),
+            });
+        }
+        let mut offset = 0usize;
+        for (((_, rows), logits), result) in plan.chunks.iter().zip(&plan.outputs).zip(&results) {
+            jobs.push(Dispatch {
+                input: logits,
+                weights: &mask,
+                output: result,
+                params: [*rows as u32, offset as u32, 0, 0],
+                outputs: 1,
+                groups: 1,
+                groups_y: 1,
+                pipeline: self.greedy,
+                aux: None,
+                barrier_after: false,
+            });
+            offset += rows;
+        }
+        self.record_jobs(
+            command,
+            &sets,
+            &jobs,
+            vk::CommandBufferUsageFlags::empty(),
+            None,
+        )?;
+        plan.greedy = Some(GreedyPlan {
+            _mask: mask,
+            results,
+            command,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn forward_greedy_head(&self, plan: &DenseHeadPlan, x: &[f32]) -> Result<u32> {
+        ensure!(
+            x.len() == plan.input_len && x.iter().all(|v| v.is_finite()),
+            "Invalid dense head input"
+        );
+        ensure!(
+            plan.chunks
+                .iter()
+                .all(|(w, _)| Arc::ptr_eq(&w.device, &self.device)),
+            "Dense head belongs to another GPU"
+        );
+        let greedy = plan
+            .greedy
+            .as_ref()
+            .context("GPU vocabulary not prepared")?;
+        self.upload(x)?;
+        self.submit(&[greedy.command], Instant::now())?;
+        self.collect_timestamps(None);
+        let started = Instant::now();
+        let mut best: Option<(f32, u32)> = None;
+        for result in &greedy.results {
+            let values = result.read_u32(4)?;
+            ensure!(values[2] == 0, "Non-finite head output");
+            if values[3] != 0 {
+                let candidate = (f32::from_bits(values[0]), values[1]);
+                ensure!(
+                    candidate.0.is_finite() && (candidate.1 as usize) < plan.total,
+                    "Invalid GPU greedy result"
+                );
+                if best.is_none_or(|(score, id)| {
+                    candidate.0 > score || (candidate.0 == score && candidate.1 < id)
+                }) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        self.record_profile(|p| p.readback_ns = p.readback_ns.saturating_add(elapsed_ns(started)));
+        best.map(|(_, id)| id).context("No allowed token")
     }
 
     pub fn multiply_dense_chunks(
@@ -1651,6 +3411,7 @@ impl Gpu {
                     .expect("validated dense shape"),
                 groups_y: 1,
                 pipeline: self.dense,
+                aux: None,
                 barrier_after: false,
             })
             .collect();
@@ -1697,6 +3458,7 @@ impl Gpu {
                 groups,
                 groups_y: 1,
                 pipeline,
+                aux: None,
                 barrier_after: false,
             }],
         )?;
@@ -1707,6 +3469,7 @@ impl Gpu {
     }
 
     fn upload(&self, x: &[f32]) -> Result<()> {
+        let _trace = TraceSpan::begin(c"MLXL3 upload");
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
@@ -1749,6 +3512,7 @@ impl Gpu {
         flags: vk::CommandBufferUsageFlags,
         phase_queries: Option<u32>,
     ) -> Result<()> {
+        let _trace = TraceSpan::begin(c"MLXL3 record commands");
         ensure!(
             !self.device.abandoned.load(Ordering::Relaxed),
             "GPU timed out; restart the app"
@@ -1771,11 +3535,11 @@ impl Gpu {
         ensure!(
             phase_queries.is_none()
                 || jobs.len() == 3
-                || (phase_queries == Some(2) && jobs.len() == 1),
+                || (phase_queries.is_some_and(|q| q >= OPERATOR_QUERY_BASE) && jobs.len() == 1),
             "Invalid EXL3 phase queries"
         );
         let query_first = phase_queries.unwrap_or(0);
-        let query_count = if phase_queries.is_some() && phase_queries != Some(2) {
+        let query_count = if phase_queries.is_some() && jobs.len() == 3 {
             4
         } else {
             2
@@ -1819,7 +3583,13 @@ impl Gpu {
                 );
             }
             for (index, job) in jobs.iter().enumerate() {
-                let infos = [job.input, job.weights, job.output, codebooks].map(|buffer| {
+                let infos = [
+                    job.input,
+                    job.weights,
+                    job.output,
+                    job.aux.unwrap_or(codebooks),
+                ]
+                .map(|buffer| {
                     [vk::DescriptorBufferInfo::default()
                         .buffer(buffer.raw)
                         .range(buffer.size as u64)]
@@ -1910,7 +3680,11 @@ impl Gpu {
             let d = &self.device.raw;
             d.reset_fences(&[self.fence])?;
             let submits = [vk::SubmitInfo::default().command_buffers(commands)];
-            if let Err(err) = d.queue_submit(self.queue, &submits, self.fence) {
+            let submitted = {
+                let _trace = TraceSpan::begin(c"MLXL3 queue submit");
+                d.queue_submit(self.queue, &submits, self.fence)
+            };
+            if let Err(err) = submitted {
                 self.device.abandoned.store(true, Ordering::Relaxed);
                 bail!("Vulkan submit failed ({err:?}); restart the app");
             }
@@ -1919,7 +3693,10 @@ impl Gpu {
                 p.record_submit_ns = p.record_submit_ns.saturating_add(elapsed_ns(recording))
             });
             let waiting = Instant::now();
-            let waited = d.wait_for_fences(&[self.fence], true, 30_000_000_000);
+            let waited = {
+                let _trace = TraceSpan::begin(c"MLXL3 fence wait");
+                d.wait_for_fences(&[self.fence], true, 30_000_000_000)
+            };
             self.record_profile(|p| p.wait_ns = p.wait_ns.saturating_add(elapsed_ns(waiting)));
             if let Err(err) = waited {
                 // Pending work may still own buffers; retain resources until process exit.
@@ -1996,10 +3773,22 @@ impl Drop for Gpu {
             for pipeline in self.qmv_stream {
                 d.destroy_pipeline(pipeline, None);
             }
+            for pipeline in self.qmv_mcg {
+                d.destroy_pipeline(pipeline, None);
+            }
             d.destroy_pipeline(self.dense, None);
+            d.destroy_pipeline(self.dense_pair, None);
+            d.destroy_pipeline(self.dense_subgroup, None);
+            d.destroy_pipeline(self.dense_rows, None);
             d.destroy_pipeline(self.reduce, None);
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
+            d.destroy_pipeline(self.rms_residual, None);
+            d.destroy_pipeline(self.greedy, None);
+            d.destroy_pipeline(self.norm_rope, None);
+            d.destroy_pipeline(self.kv_update, None);
+            d.destroy_pipeline(self.attention, None);
+            d.destroy_pipeline(self.copy, None);
             d.destroy_pipeline(self.hadamard, None);
             d.destroy_query_pool(self.queries, None);
             d.destroy_pipeline_layout(self.layout, None);
@@ -2014,6 +3803,336 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; alternate dense head row counts"]
+    fn resident_dense_head_row_variants_match_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        assert_ne!(gpu.dense_rows, vk::Pipeline::null());
+        for input in [128usize, 129, 2048] {
+            let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
+            for dtype in 0..=1 {
+                let bytes: Vec<u8> = (0..input * 9)
+                    .flat_map(|i| {
+                        let v = (i as f32 % 29. - 14.) / 64.;
+                        (if dtype == 0 {
+                            half::f16::from_f32(v).to_bits()
+                        } else {
+                            half::bf16::from_f32(v).to_bits()
+                        })
+                        .to_le_bytes()
+                    })
+                    .collect();
+                let baseline = gpu.buffer(&bytes).unwrap();
+                let reference = gpu.multiply(&baseline, &x, 9, 0, dtype).unwrap();
+                for rows in [1, 2, 8] {
+                    gpu.head_rows = rows;
+                    let chunks = vec![(gpu.buffer(&bytes).unwrap(), 9)];
+                    let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
+                    let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                    assert_eq!(
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                    );
+                }
+                gpu.head_rows = 4;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan subgroup arithmetic; dense head parity"]
+    fn resident_subgroup_dense_head_matches_reference() {
+        set_subgroup_head(true);
+        let gpu = Gpu::new();
+        set_subgroup_head(false);
+        let mut gpu = gpu.unwrap();
+        if !gpu.subgroup_head {
+            return;
+        }
+        for input in [128usize, 129, 2048] {
+            let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
+            for dtype in 0..=1 {
+                let bytes: Vec<u8> = (0..input * 5)
+                    .flat_map(|i| {
+                        let v = (i as f32 % 29. - 14.) / 64.;
+                        (if dtype == 0 {
+                            half::f16::from_f32(v).to_bits()
+                        } else {
+                            half::bf16::from_f32(v).to_bits()
+                        })
+                        .to_le_bytes()
+                    })
+                    .collect();
+                let chunks = vec![(gpu.buffer(&bytes).unwrap(), 5)];
+                let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+                let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
+                let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; greedy mask, ties and nonfinite checks"]
+    fn resident_gpu_greedy_matches_cpu_and_rejects_nonfinite() {
+        let mut gpu = Gpu::new().unwrap();
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|v| half::f16::from_f32(*v).to_bits().to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let chunks = vec![
+            (gpu.buffer(&bytes(&[1., 2., 2.])).unwrap(), 3),
+            (gpu.buffer(&bytes(&[3., 0.])).unwrap(), 2),
+        ];
+        let mut plan = gpu.prepare_dense_head(chunks, 1, 0).unwrap();
+        let vocabulary = [1u32, 2u32];
+        gpu.prepare_greedy_head(&mut plan, &vocabulary).unwrap();
+        let logits: Vec<f32> = gpu
+            .forward_dense_head(&plan, &[1.])
+            .unwrap()
+            .into_iter()
+            .map(crate::math::half)
+            .collect();
+        assert_eq!(
+            gpu.forward_greedy_head(&plan, &[1.]).unwrap(),
+            crate::math::greedy_in_vocabulary(&logits, &vocabulary).unwrap()
+        );
+        assert_eq!(gpu.forward_greedy_head(&plan, &[1.]).unwrap(), 1);
+        let chunks = vec![(gpu.buffer(&bytes(&[65504., 1.])).unwrap(), 2)];
+        let mut plan = gpu.prepare_dense_head(chunks, 1, 0).unwrap();
+        gpu.prepare_greedy_head(&mut plan, &[1]).unwrap();
+        assert!(gpu.forward_greedy_head(&plan, &[2.]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; experimental resident convolution layer"]
+    fn resident_conv_layer_matches_cpu_layer_across_ring() {
+        let mut gpu = Gpu::new().unwrap();
+        let make_conv = |gpu: &mut Gpu| {
+            let input = resident_matrix(gpu, 128, 384, 11);
+            let output = resident_matrix(gpu, 128, 128, 17);
+            let weights: Vec<f32> = (0..128 * 7).map(|i| (i as f32 % 19. - 9.) / 64.).collect();
+            gpu.prepare_conv(input, output, &weights).unwrap()
+        };
+        let reference_conv = make_conv(&mut gpu);
+        let candidate_conv = make_conv(&mut gpu);
+        let gate = resident_matrix(&mut gpu, 128, 256, 19);
+        let up = resident_matrix(&mut gpu, 128, 256, 23);
+        let down = resident_matrix(&mut gpu, 256, 128, 29);
+        let mlp = gpu.prepare_mlp(gate, up, down).unwrap();
+        let norms: Vec<Vec<f32>> = (0..4)
+            .map(|n| {
+                (0..128)
+                    .map(|i| 0.75 + ((i + n) % 9) as f32 / 64.)
+                    .collect()
+            })
+            .collect();
+        let plan = gpu
+            .prepare_conv_layer(
+                &candidate_conv,
+                &mlp,
+                [&norms[0], &norms[1], &norms[2], &norms[3]],
+                1e-5,
+            )
+            .unwrap();
+        for position in 0..10 {
+            let x: Vec<f32> = (0..128)
+                .map(|i| ((i * 7 + position * 3) % 41) as f32 / 32. - 0.5)
+                .collect();
+            let normalized = crate::math::rms_norm(&x, &norms[0], 1e-5).unwrap();
+            let conv = gpu
+                .forward_conv(&reference_conv, &normalized, position)
+                .unwrap();
+            let post = crate::math::rms_norm(&conv, &norms[1], 1e-5).unwrap();
+            let hidden: Vec<f32> = x.iter().zip(&post).map(|(a, b)| a + b).collect();
+            let normalized = crate::math::rms_norm(&hidden, &norms[2], 1e-5).unwrap();
+            let down = gpu.forward_mlp(&mlp, &normalized).unwrap();
+            let post = crate::math::rms_norm(&down, &norms[3], 1e-5).unwrap();
+            let expected: Vec<f32> = hidden.iter().zip(&post).map(|(a, b)| a + b).collect();
+            let before = gpu.submission_count();
+            let actual = gpu
+                .forward_conv_layer(&plan, &candidate_conv, &mlp, &x, position)
+                .unwrap();
+            assert_eq!(gpu.submission_count() - before, 1);
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| (a - b).abs() <= 0.003 + b.abs() * 0.005),
+                "position {position}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; experimental paired dense head"]
+    fn resident_paired_dense_head_matches_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        assert_ne!(gpu.dense_pair, vk::Pipeline::null());
+        for input in [128usize, 129, 2048] {
+            let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
+            for dtype in 0..=1 {
+                let bytes: Vec<u8> = (0..input * 5)
+                    .flat_map(|i| {
+                        let v = (i as f32 % 29. - 14.) / 64.;
+                        (if dtype == 0 {
+                            half::f16::from_f32(v).to_bits()
+                        } else {
+                            half::bf16::from_f32(v).to_bits()
+                        })
+                        .to_le_bytes()
+                    })
+                    .collect();
+                let chunks = vec![(gpu.buffer(&bytes).unwrap(), 5)];
+                let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+                gpu.fast_head = true;
+                let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
+                let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005)
+                );
+                gpu.fast_head = false;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; split-K numerical parity"]
+    fn resident_split_k_variants_match_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        gpu.ffn_k4_split = 2;
+        gpu.ffn_k5_split = 1;
+        assert_eq!(gpu.split_for_shape(2048, 7680, 4), 2);
+        assert_eq!(gpu.split_for_shape(7680, 2048, 5), 1);
+        assert_eq!(gpu.split_for_shape(2048, 512, 6), 4);
+        gpu.ffn_k4_split = 0;
+        gpu.ffn_k5_split = 0;
+        let input: Vec<f32> = (0..128).map(|i| (i as f32 % 17. - 8.) / 32.).collect();
+        for bits in [4usize, 5] {
+            let states: Vec<u16> = (0..128 * 128).map(|i| (i * 37 + i / 7) as u16).collect();
+            let packed = codec::pack(&states, bits).unwrap();
+            let bytes: Vec<u8> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let weights = gpu.buffer(&bytes).unwrap();
+            for codebook in 0..3 {
+                gpu.split_k = 4;
+                let baseline = gpu
+                    .multiply(&weights, &input, 128, bits as u32, codebook)
+                    .unwrap();
+                for split in [1, 2, 4, 8] {
+                    gpu.split_k = split;
+                    let actual = gpu
+                        .multiply(&weights, &input, 128, bits as u32, codebook)
+                        .unwrap();
+                    assert!(
+                        actual
+                            .iter()
+                            .zip(&baseline)
+                            .all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005),
+                        "split {split}, bits {bits}, codebook {codebook}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; prepared dense head parity and reuse"]
+    fn resident_prepared_dense_head_matches_dynamic() {
+        let mut gpu = Gpu::new().unwrap();
+        let input = 128usize;
+        let weights: Vec<u8> = (0..input * 9)
+            .flat_map(|i| {
+                half::f16::from_f32((i as f32 % 31. - 15.) / 32.)
+                    .to_bits()
+                    .to_le_bytes()
+            })
+            .collect();
+        let chunks = vec![
+            (gpu.buffer(&weights[..input * 4 * 2]).unwrap(), 4),
+            (gpu.buffer(&weights[input * 4 * 2..]).unwrap(), 5),
+        ];
+        let x: Vec<f32> = (0..input).map(|i| (i as f32 - 63.) / 128.).collect();
+        let expected = gpu.multiply_dense_chunks(&chunks, &x, 0).unwrap();
+        let plan = gpu.prepare_dense_head(chunks, input, 0).unwrap();
+        for _ in 0..3 {
+            let before = gpu.submission_count();
+            let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+            assert_eq!(gpu.submission_count() - before, 1);
+            assert_eq!(actual, expected);
+        }
+        assert!(gpu.forward_dense_head(&plan, &[f32::NAN; 128]).is_err());
+        assert!(gpu.forward_dense_head(&plan, &[0.; 127]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; mixed dense attention gate and QKV"]
+    fn resident_grouped_gate_matches_separate_submissions() {
+        let mut gpu = Gpu::new().unwrap();
+        let q = resident_matrix(&mut gpu, 128, 128, 1);
+        let k = resident_matrix(&mut gpu, 128, 128, 2);
+        let v = resident_matrix(&mut gpu, 128, 128, 3);
+        let x: Vec<f32> = (0..128).map(|i| (i as f32 - 63.5) / 127.).collect();
+        let gate_bytes: Vec<u8> = (0..128 * 16)
+            .flat_map(|i| {
+                half::f16::from_f32((i as f32 % 29. - 14.) / 32.)
+                    .to_bits()
+                    .to_le_bytes()
+            })
+            .collect();
+        let weights = gpu.buffer(&gate_bytes).unwrap();
+        let rounded: Vec<f32> = x.iter().copied().map(crate::math::half).collect();
+        let expected_qkv = gpu.project_exl3_batch(&[&q, &k, &v], &x).unwrap();
+        let expected_gate = gpu.multiply(&weights, &rounded, 16, 0, 0).unwrap();
+        let plan = gpu.prepare_dense_gate(weights, 128, 16, 0).unwrap();
+        let before = gpu.submission_count();
+        let (actual_qkv, actual_gate) = gpu
+            .project_exl3_with_dense_gate(&[&q, &k, &v], &plan, &x)
+            .unwrap();
+        assert_eq!(gpu.submission_count() - before, 1);
+        assert_eq!(actual_qkv, expected_qkv);
+        assert_eq!(actual_gate, expected_gate);
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; independent prepared gate plans share scratch"]
+    fn resident_gate_plans_preserve_weights_across_reuse() {
+        let mut gpu = Gpu::new().unwrap();
+        let x: Vec<f32> = (0..128).map(|i| (i as f32 - 64.) / 128.).collect();
+        let mut plans = Vec::new();
+        let mut expected = Vec::new();
+        for dtype in 0..=1 {
+            let bytes: Vec<u8> = (0..128 * 16)
+                .flat_map(|i| {
+                    let value = (i as f32 % 37. - 18.) / 64.;
+                    (if dtype == 0 {
+                        half::f16::from_f32(value).to_bits()
+                    } else {
+                        half::bf16::from_f32(value).to_bits()
+                    })
+                    .to_le_bytes()
+                })
+                .collect();
+            let weights = gpu.buffer(&bytes).unwrap();
+            expected.push(gpu.multiply(&weights, &x, 16, 0, dtype).unwrap());
+            plans.push(gpu.prepare_dense_gate(weights, 128, 16, dtype).unwrap());
+        }
+        for _ in 0..3 {
+            for (plan, expected) in plans.iter().zip(&expected) {
+                assert_eq!(&gpu.forward_dense_gate(plan, &x).unwrap(), expected);
+            }
+        }
+    }
 
     #[test]
     fn cooperative_k4_load_windows_cover_every_lane_and_wrap() {
@@ -2267,7 +4386,7 @@ mod tests {
                 .unwrap();
             let actual = gpu.multiply(&weights, &x, cols, bits as u32, 1).unwrap();
             assert!(
-                gpu.wave_kernels[bits - 1],
+                gpu.wave_kernels[bits - 1] || gpu.mcg_cooperative[bits - 1],
                 "test must exercise split4, not fallback"
             );
             assert_eq!(actual.len(), cols);
@@ -2355,7 +4474,7 @@ mod tests {
         assert_eq!(projection_queries(0), Some(4));
         assert_eq!(
             projection_queries(MAX_EXL3_MATRICES - 1),
-            Some(QUERY_COUNT - 4)
+            Some(OPERATOR_QUERY_BASE - 4)
         );
         assert_eq!(projection_queries(MAX_EXL3_MATRICES), None);
         assert_eq!(projection_queries(usize::MAX), None);
@@ -2930,7 +5049,7 @@ mod proofs {
             assert_eq!(first as usize / 4 - 1, index);
         }
         assert_eq!(valid_group_size(count), count >= 1 && count <= 3);
-        kani::cover!(index == MAX_EXL3_MATRICES - 1 && first == Some(QUERY_COUNT - 4));
+        kani::cover!(index == MAX_EXL3_MATRICES - 1 && first == Some(OPERATOR_QUERY_BASE - 4));
         kani::cover!(index == usize::MAX && first.is_none());
         kani::cover!(count == 3 && valid_group_size(count));
     }

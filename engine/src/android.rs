@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use jni::{
     JNIEnv,
     objects::{JClass, JObject, JString, JValue},
-    sys::jstring,
+    sys::{jboolean, jint, jstring},
 };
 use std::{
     path::Path,
@@ -15,6 +15,122 @@ use std::{
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 static CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_benchmark(
+    mut env: JNIEnv,
+    _class: JClass,
+    callback: JObject,
+) -> jstring {
+    boundary(&mut env, |env| {
+        let mut guard = ENGINE
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Engine is busy"))?;
+        let engine = guard.as_mut().context("Load a model first")?;
+        engine.benchmark(32, 128, &CANCEL, &mut |event| emit(env, &callback, event))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setSplitK(
+    _env: JNIEnv,
+    _class: JClass,
+    value: jint,
+) -> jboolean {
+    u8::from(value > 0 && crate::vulkan::set_split_k(value as u32))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setFastHead(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_fast_head(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setGpuConvLayer(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_gpu_conv_layer(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setExperimentalKernels(
+    _env: JNIEnv,
+    _class: JClass,
+    k5: jboolean,
+    mcg: jboolean,
+) {
+    crate::vulkan::set_experimental_kernels(k5 != 0, mcg != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setGpuGreedy(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_gpu_greedy(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setGpuAttentionLayer(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_gpu_attention_layer(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setFfnSplits(
+    _env: JNIEnv,
+    _class: JClass,
+    k4: jint,
+    k5: jint,
+) -> jboolean {
+    u8::from(k4 >= 0 && k5 >= 0 && crate::vulkan::set_ffn_splits(k4 as u32, k5 as u32))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setLayerBatch(
+    _env: JNIEnv,
+    _class: JClass,
+    value: jint,
+) -> jboolean {
+    u8::from(value > 0 && crate::vulkan::set_layer_batch(value as u32))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setUnroll2(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_unroll2(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setSubgroupHead(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_subgroup_head(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setHeadRows(
+    _env: JNIEnv,
+    _class: JClass,
+    value: jint,
+) -> jboolean {
+    u8::from(value > 0 && crate::vulkan::set_head_rows(value as u32))
+}
 
 fn emit(env: &mut JNIEnv, callback: &JObject, event: serde_json::Value) -> Result<()> {
     let text = env.new_string(event.to_string())?;

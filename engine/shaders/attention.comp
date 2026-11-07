@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 128) in;
+layout(set=0,binding=0,std430) readonly buffer Query { float query[]; };
+layout(set=0,binding=1,std430) readonly buffer State { float state[]; };
+layout(set=0,binding=2,std430) writeonly buffer Output { float y[]; };
+layout(set=0,binding=3,std430) readonly buffer Gate { float gate[]; };
+layout(push_constant) uniform Params { uint heads; uint kv_heads; uint dim; uint window; } p;
+shared float scores[2048];
+#include "half_round.glsl"
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    uint kv = head / (p.heads / p.kv_heads);
+    uint kv_size = p.kv_heads * p.dim;
+    uint position = floatBitsToUint(state[0]);
+    uint count = min(position + 1u, p.window);
+    uint start = position + 1u - count;
+    for (uint t = tid; t < count; t += 128u) {
+        uint slot = (start + t) % p.window;
+        precise float sum = 0.0;
+        for (uint d = 0u; d < p.dim; ++d) {
+            precise float product = query[head*p.dim+d] * state[1u+slot*kv_size+kv*p.dim+d];
+            sum = sum + product;
+        }
+        scores[t] = sum / sqrt(float(p.dim));
+    }
+    barrier();
+    if (tid == 0u) {
+        float maximum = scores[0];
+        for (uint t = 1u; t < count; ++t) maximum = max(maximum, scores[t]);
+        precise float sum = 0.0;
+        for (uint t = 0u; t < count; ++t) { scores[t] = exp(scores[t] - maximum); sum += scores[t]; }
+        for (uint t = 0u; t < count; ++t) scores[t] /= sum;
+    }
+    barrier();
+    if (tid < p.dim) {
+        precise float sum = 0.0;
+        for (uint t = 0u; t < count; ++t) {
+            uint slot = (start+t) % p.window;
+            precise float product = scores[t] * state[1u+p.window*kv_size+slot*kv_size+kv*p.dim+tid];
+            sum = sum + product;
+        }
+        float g = 1.0 / (1.0 + exp(-halfRound(gate[head])));
+        y[head*p.dim+tid] = halfRound(halfRound(sum) * g);
+    }
+}

@@ -169,7 +169,8 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             .forward(token, true, &cancelled)
             .unwrap()
             .unwrap();
-        assert_eq!(engine.model.gpu.submission_count() - before, 11);
+        // Two attention gates now share their QKV submissions.
+        assert_eq!(engine.model.gpu.submission_count() - before, 9);
         assert_eq!(reference[index].len(), last.len());
         for (actual, bits) in last.iter().zip(&reference[index]) {
             let expected = f32::from_bits(*bits);
@@ -179,6 +180,94 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         assert!(last.iter().all(|v| v.is_finite()));
         assert!(last.iter().any(|v| v.abs() > 0.01));
     }
+    // Exercise the experimental combination through the complete reduced model,
+    // not just isolated shaders. Reset global defaults immediately after load.
+    mlxl3_android::vulkan::set_gpu_conv_layer(true);
+    mlxl3_android::vulkan::set_fast_head(true);
+    mlxl3_android::vulkan::set_subgroup_head(true);
+    assert!(mlxl3_android::vulkan::set_head_rows(8));
+    mlxl3_android::vulkan::set_experimental_kernels(true, true);
+    mlxl3_android::vulkan::set_gpu_greedy(true);
+    mlxl3_android::vulkan::set_gpu_attention_layer(true);
+    assert!(mlxl3_android::vulkan::set_layer_batch(4));
+    mlxl3_android::vulkan::set_unroll2(true);
+    assert!(mlxl3_android::vulkan::set_split_k(8));
+    let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
+    mlxl3_android::vulkan::set_gpu_conv_layer(false);
+    mlxl3_android::vulkan::set_fast_head(false);
+    mlxl3_android::vulkan::set_subgroup_head(false);
+    assert!(mlxl3_android::vulkan::set_head_rows(4));
+    mlxl3_android::vulkan::set_experimental_kernels(false, false);
+    mlxl3_android::vulkan::set_gpu_greedy(false);
+    mlxl3_android::vulkan::set_gpu_attention_layer(false);
+    assert!(mlxl3_android::vulkan::set_layer_batch(1));
+    mlxl3_android::vulkan::set_unroll2(false);
+    assert!(mlxl3_android::vulkan::set_split_k(4));
+    let mut experimental = experimental.unwrap();
+    assert_eq!(experimental.model.diagnostics()["gpu_attention_layers"], 2);
+    for (index, token) in [3, 4, 5, 6, 7, 8, 9, 10].into_iter().enumerate() {
+        let before = experimental.model.gpu.submission_count();
+        let actual = experimental
+            .model
+            .forward(token, true, &cancelled)
+            .unwrap()
+            .unwrap();
+        assert_eq!(experimental.model.gpu.submission_count() - before, 2);
+        for (value, bits) in actual.iter().zip(&reference[index]) {
+            let expected = f32::from_bits(*bits);
+            assert!((value - expected).abs() <= 0.001 + expected.abs() * 0.004);
+        }
+    }
+    // Exercise full-attention growth and sliding-cache wrap around positions 255–257.
+    for position in 8..258usize {
+        let token = 3 + (position % 8) as u32;
+        let check = position >= 254;
+        let reference_logits = engine.model.forward(token, check, &cancelled).unwrap();
+        let actual_logits = experimental
+            .model
+            .forward(token, check, &cancelled)
+            .unwrap();
+        if check {
+            for (actual, expected) in actual_logits.unwrap().iter().zip(reference_logits.unwrap()) {
+                assert!(
+                    (actual - expected).abs() <= 0.002 + expected.abs() * 0.01,
+                    "position {position}"
+                );
+            }
+        }
+    }
+    let messages = [Message {
+        role: "user".into(),
+        content: "Hello".into(),
+    }];
+    let mut experimental_events = vec![];
+    experimental
+        .generate(&messages, 4, &cancelled, &mut |event| {
+            experimental_events.push(event);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        experimental_events.last().unwrap()["performance"]["generation"]["gpu_greedy"],
+        true
+    );
+    let mut bench_events = vec![];
+    experimental
+        .benchmark(2, 3, &cancelled, &mut |event| {
+            bench_events.push(event);
+            Ok(())
+        })
+        .unwrap();
+    let benchmark = bench_events.last().unwrap();
+    assert_eq!(benchmark["type"], "benchmark_done");
+    assert_eq!(benchmark["prompt_tokens"], 2);
+    assert_eq!(benchmark["decode_tokens"], 3);
+    assert_eq!(
+        benchmark["performance"]["generation"]["fixed_input_tokens"],
+        true
+    );
+    assert_eq!(benchmark["performance"]["generation"]["gpu_greedy"], true);
+    drop(experimental);
     engine.model.reset();
     let first = engine.model.forward(3, true, &cancelled).unwrap().unwrap();
     assert_ne!(first, last);
@@ -187,10 +276,6 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
         first,
         engine.model.forward(3, true, &cancelled).unwrap().unwrap()
     );
-    let messages = [Message {
-        role: "user".into(),
-        content: "Hello".into(),
-    }];
     let mut events = vec![];
     engine
         .generate(&messages, 4, &cancelled, &mut |event| {
@@ -198,6 +283,14 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             Ok(())
         })
         .unwrap();
+    let text_events = |events: &[serde_json::Value]| {
+        events
+            .iter()
+            .filter(|e| e["type"] == "text")
+            .map(|e| e["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(text_events(&experimental_events), text_events(&events));
     assert!(
         events
             .iter()
@@ -272,6 +365,9 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
             assert!(p["device_queue_ns"].as_u64().unwrap() > 0);
             assert!(p["device_swiglu_ns"].as_u64().unwrap() > 0);
             assert!(p["device_convolution_ns"].as_u64().unwrap() > 0);
+            assert!(p["device_head_ns"].as_u64().unwrap() > 0);
+            assert!(p["device_head_samples"].as_u64().unwrap() > 0);
+            assert!(p["device_attention_gate_ns"].as_u64().unwrap() > 0);
             assert_eq!(p["convolution_cpu_ns"], 0);
         }
         for field in [
@@ -287,11 +383,11 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     assert!(!done["performance"].to_string().contains("Hello"));
     assert_eq!(
         done["prefill_submissions"].as_u64().unwrap(),
-        done["prompt_tokens"].as_u64().unwrap() * 10 + 1
+        done["prompt_tokens"].as_u64().unwrap() * 8 + 1
     );
     assert_eq!(
         done["decode_submissions"].as_u64().unwrap(),
-        done["decode_tokens"].as_u64().unwrap() * 11
+        done["decode_tokens"].as_u64().unwrap() * 9
     );
     cancelled.store(true, Ordering::Relaxed);
     assert!(

@@ -1,7 +1,7 @@
 use crate::{
     codec::{self, Codebook},
     math,
-    vulkan::{Buffer, Exl3Matrix, Exl3Shape, Gpu},
+    vulkan::{Buffer, DenseGatePlan, DenseHeadPlan, Exl3Matrix, Exl3Shape, Gpu},
 };
 use anyhow::{Context, Result, ensure};
 use half::{bf16, f16};
@@ -160,6 +160,8 @@ impl Weights {
 
 enum Storage {
     Exl3(Exl3Matrix),
+    Head(DenseHeadPlan),
+    Gate(DenseGatePlan),
     Dense {
         chunks: Vec<(Buffer, usize)>,
         dtype: u32,
@@ -169,12 +171,53 @@ pub struct Linear {
     storage: Storage,
     input: usize,
     output: usize,
+    is_head: bool,
 }
 impl Linear {
+    pub(crate) fn exl3_ref(&self) -> Option<&Exl3Matrix> {
+        if let Storage::Exl3(matrix) = &self.storage {
+            Some(matrix)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn gate_ref(&self) -> Option<&DenseGatePlan> {
+        if let Storage::Gate(plan) = &self.storage {
+            Some(plan)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn prepare_gpu_greedy(&mut self, gpu: &mut Gpu, vocabulary: &[u32]) -> Result<bool> {
+        if let Storage::Head(plan) = &mut self.storage {
+            gpu.prepare_greedy_head(plan, vocabulary)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn forward_gpu_greedy(&self, gpu: &mut Gpu, x: &[f32]) -> Result<u32> {
+        ensure!(x.len() == self.input, "Linear input shape mismatch");
+        let Storage::Head(plan) = &self.storage else {
+            anyhow::bail!("GPU greedy requires a dense head")
+        };
+        let started = std::time::Instant::now();
+        let rounded: Vec<f32> = x.iter().copied().map(math::half).collect();
+        gpu.record_profile(|p| {
+            p.projection_cpu_ns = p
+                .projection_cpu_ns
+                .saturating_add(crate::vulkan::elapsed_ns(started))
+        });
+        let before = gpu.dense_timing_snapshot();
+        let token = gpu.forward_greedy_head(plan, &rounded)?;
+        gpu.record_head_timing(before);
+        Ok(token)
+    }
     pub(crate) fn into_exl3(self) -> Result<Exl3Matrix> {
         match self.storage {
             Storage::Exl3(matrix) => Ok(matrix),
-            Storage::Dense { .. } => {
+            Storage::Dense { .. } | Storage::Head(_) | Storage::Gate(_) => {
                 anyhow::bail!("GPU resident operator requires EXL3 projections")
             }
         }
@@ -193,12 +236,46 @@ impl Linear {
             .iter()
             .map(|l| match &l.storage {
                 Storage::Exl3(matrix) => Ok(matrix),
-                Storage::Dense { .. } => anyhow::bail!("Grouped projections require EXL3 weights"),
+                Storage::Dense { .. } | Storage::Head(_) | Storage::Gate(_) => {
+                    anyhow::bail!("Grouped projections require EXL3 weights")
+                }
             })
             .collect::<Result<Vec<_>>>()?;
         gpu.project_exl3_batch(&matrices, x)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("Grouped linear output count mismatch"))
+    }
+
+    pub(crate) fn forward_qkv_gate(
+        qkv: [&Self; 3],
+        gate: &Self,
+        gpu: &mut Gpu,
+        x: &[f32],
+    ) -> Result<([Vec<f32>; 3], Vec<f32>)> {
+        ensure!(gate.input == x.len(), "Gate input shape mismatch");
+        if let Storage::Gate(plan) = &gate.storage {
+            let matrices = qkv
+                .iter()
+                .map(|l| match &l.storage {
+                    Storage::Exl3(matrix) => Ok(matrix),
+                    Storage::Dense { .. } | Storage::Head(_) | Storage::Gate(_) => {
+                        anyhow::bail!("Grouped projections require EXL3 weights")
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let (values, mut gate_values) = gpu.project_exl3_with_dense_gate(&matrices, plan, x)?;
+            gate_values.iter_mut().for_each(|v| *v = math::half(*v));
+            ensure!(
+                gate_values.len() == gate.output && gate_values.iter().all(|v| v.is_finite()),
+                "Invalid gate output"
+            );
+            let values = values
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Grouped linear output count mismatch"))?;
+            return Ok((values, gate_values));
+        }
+        let values = Self::forward_group(qkv, gpu, x)?;
+        Ok((values, gate.forward(gpu, x)?))
     }
 
     pub fn load(
@@ -288,7 +365,14 @@ impl Linear {
             for bytes in w.bytes(&key)?.chunks(chunk_rows * bytes_per_row) {
                 chunks.push((gpu.buffer(bytes)?, bytes.len() / bytes_per_row));
             }
-            Storage::Dense { chunks, dtype }
+            if name == "lm_head" {
+                Storage::Head(gpu.prepare_dense_head(chunks, input, dtype)?)
+            } else if name.ends_with(".self_attn.gate_proj") && chunks.len() == 1 {
+                let (weights, rows) = chunks.pop().expect("one gate chunk");
+                Storage::Gate(gpu.prepare_dense_gate(weights, input, rows, dtype)?)
+            } else {
+                Storage::Dense { chunks, dtype }
+            }
         };
         ensure!(
             !w.has(&format!("{name}.bias")),
@@ -298,6 +382,7 @@ impl Linear {
             storage,
             input,
             output,
+            is_head: name == "lm_head",
         })
     }
 
@@ -307,6 +392,23 @@ impl Linear {
         let mut result = match &self.storage {
             // GPU post-Hadamard already enforces the FP16 boundary and finite output.
             Storage::Exl3(matrix) => return gpu.project_exl3(matrix, x),
+            Storage::Gate(plan) => {
+                let x: Vec<_> = x.iter().copied().map(math::half).collect();
+                gpu.forward_dense_gate(plan, &x)?
+            }
+            Storage::Head(plan) => {
+                let x: Vec<_> = x.iter().copied().map(math::half).collect();
+                gpu.record_profile(|p| {
+                    p.projection_cpu_ns = p
+                        .projection_cpu_ns
+                        .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
+                });
+                let before = gpu.dense_timing_snapshot();
+                let result = gpu.forward_dense_head(plan, &x)?;
+                gpu.record_head_timing(before);
+                cpu_started = std::time::Instant::now();
+                result
+            }
             Storage::Dense { chunks, dtype } => {
                 let x: Vec<_> = x.iter().copied().map(math::half).collect();
                 gpu.record_profile(|p| {
@@ -314,7 +416,11 @@ impl Linear {
                         .projection_cpu_ns
                         .saturating_add(crate::vulkan::elapsed_ns(cpu_started))
                 });
+                let before = gpu.dense_timing_snapshot();
                 let result = gpu.multiply_dense_chunks(chunks, &x, *dtype)?;
+                if self.is_head {
+                    gpu.record_head_timing(before);
+                }
                 cpu_started = std::time::Instant::now();
                 result
             }
