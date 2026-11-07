@@ -41,6 +41,11 @@ CPU operator times, driver information and float/subgroup capabilities.
 The model menu includes experimental split-K 1, 2, 4 and 8, an optional
 paired dense-head kernel, optional GPU-resident convolution and attention layers, and
 optional cooperative K5 and MCG-specialized kernels, and GPU greedy selection.
+An optional subgroup-reduction head takes precedence over the paired head and
+falls back when subgroup arithmetic is unavailable.
+The experimental head row-count selector offers 1, 2, 4 and 8 outputs per
+workgroup. A value other than 4 selects the variable-row kernel instead of the
+paired or subgroup kernel, so compare these options separately.
 Changes apply **only after reloading the model**;
 the defaults are split-K 4, the reference dense head, CPU layer boundaries,
 and disabled experimental K5/MCG/greedy and GPU layer variants. The copied report

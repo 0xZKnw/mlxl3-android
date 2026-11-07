@@ -49,6 +49,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var ffnK5Split by mutableStateOf(prefs.getInt("ffn_k5_split", 0).takeIf { it in listOf(0, 1, 2, 4, 8) } ?: 0); private set
     var layerBatch by mutableStateOf(prefs.getInt("layer_batch", 1).takeIf { it in listOf(1, 2, 4) } ?: 1); private set
     var unroll2 by mutableStateOf(prefs.getBoolean("unroll2", false)); private set
+    var subgroupHead by mutableStateOf(prefs.getBoolean("subgroup_head", false)); private set
+    var headRows by mutableStateOf(prefs.getInt("head_rows", 4).takeIf { it in listOf(1, 2, 4, 8) } ?: 4); private set
     val savedModel: Boolean get() = prefs.getString("model", null)?.let { File(it).isDirectory } == true
 
     fun dismissError() { error = null }
@@ -115,6 +117,19 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         unroll2 = enabled
         prefs.edit { putBoolean("unroll2", enabled) }
         status = "Boucle K4/K5 expérimentale ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun chooseSubgroupHead(enabled: Boolean) {
+        if (busy) return
+        subgroupHead = enabled
+        prefs.edit { putBoolean("subgroup_head", enabled) }
+        status = "Réduction subgroup ${if (enabled) "activée" else "désactivée"} · rechargez le modèle"
+    }
+    fun cycleHeadRows() {
+        if (busy) return
+        val choices = listOf(1, 2, 4, 8)
+        headRows = choices[(choices.indexOf(headRows) + 1) % choices.size]
+        prefs.edit { putInt("head_rows", headRows) }
+        status = "Lignes de la tête mises à jour · rechargez le modèle"
     }
     fun newChat() { if (!busy) { messages = emptyList(); diagnostics = null } }
 
@@ -187,6 +202,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
         check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
         NativeEngine.setUnroll2(unroll2)
+        NativeEngine.setSubgroupHead(subgroupHead)
+        check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
         val result = NativeEngine.load(path, callback)
         check(result.isEmpty()) { result }
     }
@@ -229,6 +246,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             check(NativeEngine.setFfnSplits(ffnK4Split, ffnK5Split)) { "Invalid FFN split-K" }
             check(NativeEngine.setLayerBatch(layerBatch)) { "Invalid layer batch" }
             NativeEngine.setUnroll2(unroll2)
+            NativeEngine.setSubgroupHead(subgroupHead)
+            check(NativeEngine.setHeadRows(headRows)) { "Invalid head rows" }
             val result = NativeEngine.load(stage.path, callback)
             check(result.isEmpty()) { result }
             val previous = prefs.getString("model", null)

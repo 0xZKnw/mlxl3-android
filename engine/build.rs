@@ -10,6 +10,8 @@ fn main() {
         "hadamard",
         "dense",
         "dense_pair",
+        "dense_subgroup",
+        "dense_rows",
         "rms_residual",
         "greedy",
         "norm_rope",

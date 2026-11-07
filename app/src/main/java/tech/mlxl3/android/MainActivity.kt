@@ -85,7 +85,8 @@ class MainActivity : ComponentActivity() {
                 model.cooperativeK5, model::chooseK5, model.specializedMcg, model::chooseMcg,
                 model.gpuGreedy, model::chooseGpuGreedy, model.gpuAttentionLayer, model::chooseGpuAttentionLayer,
                 model.ffnK4Split, model.ffnK5Split, model::cycleFfnSplit, model.layerBatch, model::cycleLayerBatch,
-                model.unroll2, model::chooseUnroll2, model::benchmark)
+                model.unroll2, model::chooseUnroll2, model::benchmark, model.subgroupHead, model::chooseSubgroupHead,
+                model.headRows, model::cycleHeadRows)
         }
     }
 }
@@ -110,7 +111,9 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                  gpuAttentionLayer: Boolean = false, onGpuAttentionLayer: (Boolean) -> Unit = {},
                  ffnK4Split: Int = 0, ffnK5Split: Int = 0, onCycleFfnSplit: (Boolean) -> Unit = {},
                  layerBatch: Int = 1, onCycleLayerBatch: () -> Unit = {},
-                 unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}, onBenchmark: () -> Unit = {}) {
+                 unroll2: Boolean = false, onUnroll2: (Boolean) -> Unit = {}, onBenchmark: () -> Unit = {},
+                 subgroupHead: Boolean = false, onSubgroupHead: (Boolean) -> Unit = {},
+                 headRows: Int = 4, onCycleHeadRows: () -> Unit = {}) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Ink, onPrimary = Canvas, background = Canvas,
         surface = Panel, onSurface = Ink, onBackground = Ink, outline = Edge)) {
         val draft = rememberTextFieldState()
@@ -161,6 +164,10 @@ fun StudioScreen(messages: List<ChatMessage>, busy: Boolean, ready: Boolean, sta
                                 onClick = { menu = false; onUnroll2(!unroll2) })
                             DropdownMenuItem(text = { Text("Tête expérimentale : ${if (fastHead) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onFastHead(!fastHead) })
+                            DropdownMenuItem(text = { Text("Tête subgroup : ${if (subgroupHead) "oui" else "non"} · recharger") },
+                                onClick = { menu = false; onSubgroupHead(!subgroupHead) })
+                            DropdownMenuItem(text = { Text("Lignes tête : $headRows · changer / recharger") },
+                                onClick = { menu = false; onCycleHeadRows() })
                             DropdownMenuItem(text = { Text("Couches convolution GPU : ${if (gpuConvLayer) "oui" else "non"} · recharger") },
                                 onClick = { menu = false; onGpuConvLayer(!gpuConvLayer) })
                             DropdownMenuItem(text = { Text("Kernel K5 expérimental : ${if (cooperativeK5) "oui" else "non"} · recharger") },

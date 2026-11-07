@@ -77,6 +77,16 @@ static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
+static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
+static REQUESTED_HEAD_ROWS: AtomicU32 = AtomicU32::new(4);
+
+pub fn set_head_rows(value: u32) -> bool {
+    if ![1, 2, 4, 8].contains(&value) { return false; }
+    REQUESTED_HEAD_ROWS.store(value, Ordering::Relaxed);
+    true
+}
+
+pub fn set_subgroup_head(enabled: bool) { REQUESTED_SUBGROUP_HEAD.store(enabled, Ordering::Relaxed); }
 
 pub fn set_unroll2(enabled: bool) {
     REQUESTED_UNROLL2.store(enabled, Ordering::Relaxed);
@@ -319,6 +329,8 @@ pub(crate) struct DenseHeadPlan {
     command: vk::CommandBuffer,
     dtype: u32,
     greedy: Option<GreedyPlan>,
+    rows_per_group: u32,
+    pipeline: vk::Pipeline,
 }
 
 struct GreedyPlan {
@@ -570,7 +582,11 @@ pub struct Gpu {
     timestamp_bits: u32,
     dense: vk::Pipeline,
     dense_pair: vk::Pipeline,
+    dense_subgroup: vk::Pipeline,
+    dense_rows: vk::Pipeline,
     fast_head: bool,
+    subgroup_head: bool,
+    head_rows: u32,
     reduce: vk::Pipeline,
     swiglu: vk::Pipeline,
     convolution: vk::Pipeline,
@@ -891,7 +907,13 @@ impl Gpu {
             timestamp_bits,
             dense: vk::Pipeline::null(),
             dense_pair: vk::Pipeline::null(),
+            dense_subgroup: vk::Pipeline::null(),
+            dense_rows: vk::Pipeline::null(),
             fast_head: REQUESTED_FAST_HEAD.load(Ordering::Relaxed),
+            subgroup_head: REQUESTED_SUBGROUP_HEAD.load(Ordering::Relaxed)
+                && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::ARITHMETIC),
+            head_rows: REQUESTED_HEAD_ROWS.load(Ordering::Relaxed),
             reduce: vk::Pipeline::null(),
             swiglu: vk::Pipeline::null(),
             convolution: vk::Pipeline::null(),
@@ -1040,6 +1062,13 @@ impl Gpu {
         if gpu.dense_pair == vk::Pipeline::null() {
             gpu.fast_head = false;
         }
+        if gpu.subgroup_head {
+            gpu.dense_subgroup = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_subgroup.spv"))).unwrap_or(vk::Pipeline::null());
+            if gpu.dense_subgroup == vk::Pipeline::null() { gpu.subgroup_head = false; }
+            else { gpu.capture_stats("dense_subgroup".into(), gpu.dense_subgroup); }
+        }
+        gpu.dense_rows = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/dense_rows.spv"))).unwrap_or(vk::Pipeline::null());
+        if gpu.dense_rows == vk::Pipeline::null() { gpu.head_rows = 4; }
         gpu.reduce = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/reduce.spv")))?;
         gpu.swiglu = gpu.pipeline(include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv")))?;
         gpu.convolution =
@@ -1334,7 +1363,8 @@ impl Gpu {
             "gpu_attention_layer_experimental":self.gpu_attention_layer,
             "gpu_layer_batch_size":self.layer_batch,
             "exl3_wave32_bitrates":self.wave_kernels.iter().enumerate().filter_map(|(i,v)|(*v || self.mcg_cooperative[i]).then_some(i+1)).collect::<Vec<_>>(),
-            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
+            "subgroup_size_control_enabled":self.force_wave32,"dense_kernel":if self.head_rows != 4 {"variable_rows_experimental"} else if self.subgroup_head {"four_rows_pair_subgroup_experimental"} else if self.fast_head {"four_rows_pair_fp32_experimental"} else {"four_rows_fp32"},
+            "dense_head_rows_per_group":self.head_rows,
             "cooperative_k4_supported":self.allow_cooperative_k4,"cooperative_k4_active":self.cooperative_k4_active || self.mcg_cooperative[3],
             "cooperative_k4_self_test":if self.cooperative_k4_active {self.cooperative_k4_self_test} else if self.mcg_cooperative[3] {"passed_mcg"} else {self.cooperative_k4_self_test},
             "cooperative_k5_active":self.cooperative_k5_active || self.mcg_cooperative[4],"cooperative_k5_self_test":if self.cooperative_k5_active {self.cooperative_k5_self_test} else if self.mcg_cooperative[4] {"passed_mcg"} else {self.cooperative_k5_self_test},
@@ -3099,6 +3129,13 @@ impl Gpu {
     ) -> Result<DenseHeadPlan> {
         let rows: Vec<_> = chunks.iter().map(|(_, rows)| *rows).collect();
         let total = dense_batch_output_count(&rows).context("Invalid dense head chunks")?;
+        if rows.iter().any(|rows| rows.div_ceil(self.head_rows as usize) > self.max_groups as usize) {
+            self.head_rows = 4;
+        }
+        let rows_per_group = self.head_rows;
+        let pipeline = if rows_per_group != 4 { self.dense_rows }
+            else if self.subgroup_head { self.dense_subgroup }
+            else if self.fast_head { self.dense_pair } else { self.dense };
         let dummy = vec![0.0; input_len];
         let params = chunks
             .iter()
@@ -3133,15 +3170,11 @@ impl Gpu {
                 input,
                 weights,
                 output,
-                params: *params,
+                params: [params[0], params[1], params[2], rows_per_group],
                 outputs: *rows,
-                groups: dense_groups(*rows).expect("validated dense head shape"),
+                groups: rows.div_ceil(rows_per_group as usize) as u32,
                 groups_y: 1,
-                pipeline: if self.fast_head {
-                    self.dense_pair
-                } else {
-                    self.dense
-                },
+                pipeline,
                 aux: None,
                 barrier_after: false,
             })
@@ -3161,6 +3194,8 @@ impl Gpu {
             command,
             dtype,
             greedy: None,
+            rows_per_group,
+            pipeline,
         })
     }
 
@@ -3228,15 +3263,11 @@ impl Gpu {
                 input,
                 weights,
                 output,
-                params: [plan.input_len as u32, *rows as u32, plan.dtype, 0],
+                params: [plan.input_len as u32, *rows as u32, plan.dtype, plan.rows_per_group],
                 outputs: *rows,
-                groups: dense_groups(*rows).context("Invalid head shape")?,
+                groups: rows.div_ceil(plan.rows_per_group as usize) as u32,
                 groups_y: 1,
-                pipeline: if self.fast_head {
-                    self.dense_pair
-                } else {
-                    self.dense
-                },
+                pipeline: plan.pipeline,
                 aux: None,
                 barrier_after: i + 1 == plan.chunks.len(),
             });
@@ -3713,6 +3744,8 @@ impl Drop for Gpu {
             }
             d.destroy_pipeline(self.dense, None);
             d.destroy_pipeline(self.dense_pair, None);
+            d.destroy_pipeline(self.dense_subgroup, None);
+            d.destroy_pipeline(self.dense_rows, None);
             d.destroy_pipeline(self.reduce, None);
             d.destroy_pipeline(self.swiglu, None);
             d.destroy_pipeline(self.convolution, None);
@@ -3736,6 +3769,56 @@ impl Drop for Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires Vulkan; alternate dense head row counts"]
+    fn resident_dense_head_row_variants_match_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        assert_ne!(gpu.dense_rows, vk::Pipeline::null());
+        for input in [128usize, 129, 2048] {
+            let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
+            for dtype in 0..=1 {
+                let bytes: Vec<u8> = (0..input * 9).flat_map(|i| {
+                    let v = (i as f32 % 29. - 14.) / 64.;
+                    (if dtype == 0 { half::f16::from_f32(v).to_bits() } else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
+                }).collect();
+                let baseline = gpu.buffer(&bytes).unwrap();
+                let reference = gpu.multiply(&baseline, &x, 9, 0, dtype).unwrap();
+                for rows in [1, 2, 8] {
+                    gpu.head_rows = rows;
+                    let chunks = vec![(gpu.buffer(&bytes).unwrap(), 9)];
+                    let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
+                    let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                    assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+                }
+                gpu.head_rows = 4;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan subgroup arithmetic; dense head parity"]
+    fn resident_subgroup_dense_head_matches_reference() {
+        set_subgroup_head(true);
+        let gpu = Gpu::new();
+        set_subgroup_head(false);
+        let mut gpu = gpu.unwrap();
+        if !gpu.subgroup_head { return; }
+        for input in [128usize, 129, 2048] {
+            let x: Vec<f32> = (0..input).map(|i| (i as f32 % 31. - 15.) / 32.).collect();
+            for dtype in 0..=1 {
+                let bytes: Vec<u8> = (0..input * 5).flat_map(|i| {
+                    let v = (i as f32 % 29. - 14.) / 64.;
+                    (if dtype == 0 { half::f16::from_f32(v).to_bits() } else { half::bf16::from_f32(v).to_bits() }).to_le_bytes()
+                }).collect();
+                let chunks = vec![(gpu.buffer(&bytes).unwrap(), 5)];
+                let reference = gpu.multiply_dense_chunks(&chunks, &x, dtype).unwrap();
+                let plan = gpu.prepare_dense_head(chunks, input, dtype).unwrap();
+                let actual = gpu.forward_dense_head(&plan, &x).unwrap();
+                assert!(actual.iter().zip(&reference).all(|(a, b)| (a - b).abs() <= 0.0001 + b.abs() * 0.0005));
+            }
+        }
+    }
 
     #[test]
     #[ignore = "requires Vulkan; greedy mask, ties and nonfinite checks"]

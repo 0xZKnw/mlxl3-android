@@ -1,0 +1,30 @@
+#version 450
+layout(local_size_x = 128) in;
+layout(set=0,binding=0,std430) readonly buffer Input { float x[]; };
+layout(set=0,binding=1,std430) readonly buffer Weights { uint packed[]; };
+layout(set=0,binding=2,std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint dtype; uint output_rows; } p;
+shared float partial[1024];
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint first = gl_WorkGroupID.x * p.output_rows;
+    float acc[8];
+    for (uint row = 0u; row < 8u; ++row) acc[row] = 0.0;
+    for (uint col = tid; col < p.rows; col += 128u) {
+        for (uint row = 0u; row < p.output_rows && first + row < p.cols; ++row) {
+            uint idx = (first + row) * p.rows + col;
+            uint bits = (packed[idx / 2u] >> ((idx % 2u) * 16u)) & 65535u;
+            float weight = p.dtype == 0u ? unpackHalf2x16(bits).x : uintBitsToFloat(bits << 16u);
+            acc[row] = fma(x[col], weight, acc[row]);
+        }
+    }
+    for (uint row = 0u; row < p.output_rows; ++row) partial[row*128u+tid] = acc[row];
+    barrier();
+    for (uint stride = 64u; stride > 0u; stride /= 2u) {
+        if (tid < stride) for (uint row = 0u; row < p.output_rows; ++row)
+            partial[row*128u+tid] += partial[row*128u+tid+stride];
+        barrier();
+    }
+    if (tid == 0u) for (uint row = 0u; row < p.output_rows && first + row < p.cols; ++row)
+        y[first+row] = partial[row*128u];
+}

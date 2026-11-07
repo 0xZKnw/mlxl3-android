@@ -1,0 +1,36 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float x[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Weights { uint packed[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float y[]; };
+layout(push_constant) uniform Params { uint rows; uint cols; uint dtype; uint unused; } p;
+shared vec4 group_sums[128];
+float decode(uint bits) { return p.dtype == 0u ? unpackHalf2x16(bits).x : uintBitsToFloat(bits << 16u); }
+void main() {
+    uint n = gl_WorkGroupID.x * 4u;
+    uint tid = gl_LocalInvocationID.x;
+    vec4 acc = vec4(0.0);
+    for (uint col = tid * 2u; col < p.rows; col += 256u) {
+        for (uint row = 0u; row < 4u; ++row) {
+            if (n + row >= p.cols) continue;
+            uint idx = (n + row) * p.rows + col;
+            uint w0 = packed[idx / 2u];
+            acc[row] = fma(x[col], decode((w0 >> ((idx % 2u) * 16u)) & 65535u), acc[row]);
+            if (col + 1u < p.rows) {
+                uint idx1 = idx + 1u;
+                uint w1 = (idx & 1u) == 0u ? w0 : packed[idx1 / 2u];
+                acc[row] = fma(x[col+1u], decode((w1 >> ((idx1 % 2u) * 16u)) & 65535u), acc[row]);
+            }
+        }
+    }
+    vec4 sum = subgroupAdd(acc);
+    if (subgroupElect()) group_sums[gl_SubgroupID] = sum;
+    barrier();
+    if (tid == 0u) {
+        vec4 total = vec4(0.0);
+        for (uint i = 0u; i < gl_NumSubgroups; ++i) total += group_sums[i];
+        for (uint row = 0u; row < 4u && n + row < p.cols; ++row) y[n + row] = total[row];
+    }
+}

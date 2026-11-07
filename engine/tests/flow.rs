@@ -184,6 +184,8 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     // not just isolated shaders. Reset global defaults immediately after load.
     mlxl3_android::vulkan::set_gpu_conv_layer(true);
     mlxl3_android::vulkan::set_fast_head(true);
+    mlxl3_android::vulkan::set_subgroup_head(true);
+    assert!(mlxl3_android::vulkan::set_head_rows(8));
     mlxl3_android::vulkan::set_experimental_kernels(true, true);
     mlxl3_android::vulkan::set_gpu_greedy(true);
     mlxl3_android::vulkan::set_gpu_attention_layer(true);
@@ -193,6 +195,8 @@ fn full_engine_prefill_decode_reset_cancel_and_context_errors() {
     let experimental = Engine::load(dir.path(), &cancelled, &mut |_| {});
     mlxl3_android::vulkan::set_gpu_conv_layer(false);
     mlxl3_android::vulkan::set_fast_head(false);
+    mlxl3_android::vulkan::set_subgroup_head(false);
+    assert!(mlxl3_android::vulkan::set_head_rows(4));
     mlxl3_android::vulkan::set_experimental_kernels(false, false);
     mlxl3_android::vulkan::set_gpu_greedy(false);
     mlxl3_android::vulkan::set_gpu_attention_layer(false);
