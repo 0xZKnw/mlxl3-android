@@ -66,6 +66,8 @@ fn choose_memory_type(flags: &[u32], allowed: u32) -> Option<usize> {
 }
 
 const CODEBOOK_BYTES: usize = 3 * 65536 * 2;
+/// Quiet-NaN payload written before every reference/candidate self-test run.
+const SELF_TEST_POISON: u32 = 0x7fc0_dead;
 static REQUESTED_SPLIT_K: AtomicU32 = AtomicU32::new(4);
 static REQUESTED_FAST_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_GPU_CONV_LAYER: AtomicBool = AtomicBool::new(false);
@@ -77,6 +79,8 @@ static REQUESTED_FFN_K4_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_FFN_K5_SPLIT: AtomicU32 = AtomicU32::new(0);
 static REQUESTED_LAYER_BATCH: AtomicU32 = AtomicU32::new(1);
 static REQUESTED_EXL3_MULTIWAVE: AtomicBool = AtomicBool::new(false);
+static REQUESTED_COOPERATIVE_K6: AtomicBool = AtomicBool::new(false);
+static REQUESTED_EXL3_PACKED4: AtomicBool = AtomicBool::new(false);
 static REQUESTED_UNROLL2: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SUBGROUP_HEAD: AtomicBool = AtomicBool::new(false);
 static REQUESTED_SHUFFLE_HADAMARD: AtomicBool = AtomicBool::new(false);
@@ -140,6 +144,17 @@ pub fn set_subgroup_head(enabled: bool) {
 /// Experimental four-wave shared-activation kernel. Applies on model reload.
 pub fn set_exl3_multiwave(enabled: bool) {
     REQUESTED_EXL3_MULTIWAVE.store(enabled, Ordering::Relaxed);
+}
+
+/// Lossless K6 cooperative word loads; bit-exact startup check. Applies on reload.
+pub fn set_cooperative_k6(enabled: bool) {
+    REQUESTED_COOPERATIVE_K6.store(enabled, Ordering::Relaxed);
+}
+
+/// Lossless: four independent cooperative waves per 128-invocation workgroup,
+/// without shared memory or barriers. Bit-exact startup check. Applies on reload.
+pub fn set_exl3_packed4(enabled: bool) {
+    REQUESTED_EXL3_PACKED4.store(enabled, Ordering::Relaxed);
 }
 
 pub fn set_unroll2(enabled: bool) {
@@ -267,6 +282,10 @@ fn wave_kernel_label(split: u32, cooperative: u32) -> &'static str {
         (2, 5) => "wave32_split2_cooperative_k5",
         (4, 5) => "wave32_split4_cooperative_k5",
         (8, 5) => "wave32_split8_cooperative_k5",
+        (1, 6) => "wave32_split1_cooperative_k6",
+        (2, 6) => "wave32_split2_cooperative_k6",
+        (4, 6) => "wave32_split4_cooperative_k6",
+        (8, 6) => "wave32_split8_cooperative_k6",
         (1, _) => "wave32_split1_native_f16",
         (2, _) => "wave32_split2_native_f16",
         (8, _) => "wave32_split8_native_f16",
@@ -626,6 +645,13 @@ pub struct Gpu {
     enable_multiwave: bool,
     multiwave: [vk::Pipeline; 2],
     multiwave_checked: [bool; 2],
+    enable_cooperative_k6: bool,
+    cooperative_k6_active: bool,
+    cooperative_k6_self_test: &'static str,
+    enable_packed4: bool,
+    packed4: [vk::Pipeline; 3],
+    packed4_checked: [bool; 3],
+    full_subgroups: bool,
     native_float16: bool,
     native_verified: bool,
     native_self_test: serde_json::Value,
@@ -963,6 +989,13 @@ impl Gpu {
             enable_multiwave: REQUESTED_EXL3_MULTIWAVE.load(Ordering::Relaxed),
             multiwave: [vk::Pipeline::null(); 2],
             multiwave_checked: [false; 2],
+            enable_cooperative_k6: REQUESTED_COOPERATIVE_K6.load(Ordering::Relaxed),
+            cooperative_k6_active: false,
+            cooperative_k6_self_test: "not_run",
+            enable_packed4: REQUESTED_EXL3_PACKED4.load(Ordering::Relaxed),
+            packed4: [vk::Pipeline::null(); 3],
+            packed4_checked: [false; 3],
+            full_subgroups: force_wave32 && size_features.compute_full_subgroups == vk::TRUE,
             native_float16,
             native_verified: false,
             native_self_test: serde_json::json!({"status":if allow_native {"unsupported"} else {"disabled"},"checked_values":0}),
@@ -1389,7 +1422,9 @@ impl Gpu {
                     })
                     .collect();
                 let params = [256, 256, phase | (splits << 8), logical];
+                self.poison_output(256)?;
                 let expected = self.compute_groups(self.hadamard, &buffer, &x, params, 256, 2)?;
+                self.poison_output(256)?;
                 let actual = self.compute_groups(pipeline, &buffer, &x, params, 256, 2)?;
                 for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
                     ensure!(
@@ -2235,6 +2270,13 @@ impl Gpu {
             "exl3_multiwave_active_bitrates":self.multiwave.iter().enumerate()
                 .filter(|(_, p)| **p != vk::Pipeline::null()).map(|(i, _)| i + 4).collect::<Vec<_>>(),
             "exl3_multiwave_self_test":"bit-exact partials against native wave32; not full-model parity",
+            "cooperative_k6_requested":self.enable_cooperative_k6,"cooperative_k6_active":self.cooperative_k6_active,
+            "cooperative_k6_self_test":self.cooperative_k6_self_test,
+            "exl3_packed4_requested":self.enable_packed4,
+            "exl3_packed4_active_bitrates":self.packed4.iter().enumerate()
+                .filter(|(_, p)| **p != vk::Pipeline::null()).map(|(i, _)| i + 4).collect::<Vec<_>>(),
+            "exl3_packed4_full_subgroups_flag":self.full_subgroups,
+            "exl3_packed4_self_test":"bit-exact partials against native wave32, tails and splits 1/2/4/8; not full-model parity",
             "experimental_unroll2_requested":self.enable_unroll2,
             "experimental_unroll2_active":self.enable_unroll2 && (self.cooperative_k4_active || self.cooperative_k5_active || self.mcg_cooperative.iter().any(|v| *v)),
             "split_k":self.split_k,
@@ -2346,6 +2388,19 @@ impl Gpu {
         });
     }
 
+    /// Fills the shared self-test output with a NaN payload that no kernel
+    /// computes, so a candidate that skips stores cannot inherit the values
+    /// the reference just left in the same buffer.
+    fn poison_output(&self, count: usize) -> Result<()> {
+        let bytes: Vec<u8> = (0..count)
+            .flat_map(|_| SELF_TEST_POISON.to_ne_bytes())
+            .collect();
+        self.output
+            .as_ref()
+            .context("GPU output unavailable")?
+            .write(&bytes)
+    }
+
     fn verify_cooperative(
         &mut self,
         bits: u32,
@@ -2375,6 +2430,7 @@ impl Gpu {
                     continue;
                 }
                 let params = [rows as u32, cols as u32, bits, codebook];
+                self.poison_output(cols * 4)?;
                 let expected = self.compute_groups(
                     reference,
                     &weights,
@@ -2383,6 +2439,7 @@ impl Gpu {
                     cols * 4,
                     (cols / 16) as u32,
                 )?;
+                self.poison_output(cols * 4)?;
                 let actual = self.compute_groups(
                     candidate,
                     &weights,
@@ -2450,16 +2507,84 @@ impl Gpu {
         Ok((self.multiwave[index] != vk::Pipeline::null()).then_some(self.multiwave[index]))
     }
 
-    fn verify_multiwave(&mut self, bits: u32, candidate: vk::Pipeline) -> Result<bool> {
-        let bytes: &[u8] = if bits == 4 {
-            include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv"))
-        } else {
-            include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv"))
+    /// Lossless four-wave packing of the cooperative K4/K5/K6 kernels. Only
+    /// bitrates whose single-wave cooperative path is requested are packed, so
+    /// toggling this option changes nothing but the workgroup shape.
+    fn packed4_pipeline(&mut self, bits: u32) -> Result<Option<vk::Pipeline>> {
+        let cooperative_requested = match bits {
+            4 => true,
+            5 => self.enable_cooperative_k5,
+            6 => self.enable_cooperative_k6,
+            _ => false,
         };
+        if !self.enable_packed4
+            || !cooperative_requested
+            || !self.native_verified
+            || !self.allow_cooperative_k4
+            || self.properties.limits.max_compute_work_group_invocations < 128
+        {
+            return Ok(None);
+        }
+        let index = (bits - 4) as usize;
+        if !self.packed4_checked[index] {
+            self.packed4_checked[index] = true;
+            let bytes: &[u8] = match bits {
+                4 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_packed4_4.spv")),
+                5 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_packed4_5.spv")),
+                _ => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_packed4_6.spv")),
+            };
+            match self.pipeline_with_subgroup_full(bytes, None, true, self.full_subgroups) {
+                Ok(candidate) => match self.verify_partials(bits, candidate, 4) {
+                    Ok(true) => {
+                        self.packed4[index] = candidate;
+                        self.capture_stats(
+                            format!("exl3_{bits}bit_packed4_cooperative"),
+                            candidate,
+                        );
+                    }
+                    result => {
+                        if self.device.abandoned.load(Ordering::Relaxed) {
+                            bail!("GPU abandoned during packed4 verification");
+                        }
+                        unsafe { self.device.raw.destroy_pipeline(candidate, None) };
+                        self.native_pipeline_errors.push(format!(
+                            "packed4 K{bits} verification failed: {result:?}; baseline fallback"
+                        ));
+                    }
+                },
+                Err(err) => self
+                    .native_pipeline_errors
+                    .push(format!("packed4 K{bits}: {err}; baseline fallback")),
+            }
+        }
+        Ok((self.packed4[index] != vk::Pipeline::null()).then_some(self.packed4[index]))
+    }
+
+    fn verify_multiwave(&mut self, bits: u32, candidate: vk::Pipeline) -> Result<bool> {
+        self.verify_partials(bits, candidate, 4)
+    }
+
+    /// Bit-exact split-partials qualification of a candidate EXL3 kernel that
+    /// assigns `waves` output tiles per workgroup, against the single-wave
+    /// native wave32 kernel (scalar word loads) for the same bitrate.
+    fn verify_partials(
+        &mut self,
+        bits: u32,
+        candidate: vk::Pipeline,
+        waves: usize,
+    ) -> Result<bool> {
+        let bytes: &[u8] = match bits {
+            4 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv")),
+            5 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_5.spv")),
+            6 => include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_6.spv")),
+            _ => bail!("Unsupported partials self-test bitrate"),
+        };
+        ensure!(waves > 0, "Invalid waves per workgroup");
         let reference = self.pipeline_with_subgroup(bytes, None, true)?;
         let result = (|| -> Result<bool> {
             // Includes inactive tail waves, all codebooks, and every supported split.
-            for (rows, cols) in [(128usize, 48usize), (256, 128)] {
+            // 384x80: three K tiles per split at split 8, five output tiles.
+            for (rows, cols) in [(128usize, 48usize), (256, 128), (384, 80)] {
                 let states: Vec<u16> = (0..rows * cols)
                     .map(|i| (i.wrapping_mul(181).wrapping_add(i / 13 * 911 + 37)) as u16)
                     .collect();
@@ -2479,9 +2604,11 @@ impl Gpu {
                             continue;
                         }
                         let mut results = Vec::new();
-                        for (pipeline, groups) in
-                            [(reference, cols / 16), (candidate, (cols / 16).div_ceil(4))]
-                        {
+                        for (pipeline, groups) in [
+                            (reference, cols / 16),
+                            (candidate, (cols / 16).div_ceil(waves)),
+                        ] {
+                            self.poison_output(cols * 4 * splits as usize)?;
                             let output = self.output.as_ref().context("GPU output unavailable")?;
                             self.execute(
                                 &x,
@@ -2570,6 +2697,44 @@ impl Gpu {
             }
         }
         if self.qmv_stream[index] == vk::Pipeline::null() {
+            if bits == 6
+                && self.enable_cooperative_k6
+                && self.native_verified
+                && self.allow_cooperative_k4
+            {
+                let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_6_cooperative.spv"));
+                match self.pipeline_with_subgroup(bytes, None, true) {
+                    Ok(pipeline) => {
+                        let verified = match self.verify_partials(6, pipeline, 1) {
+                            Ok(verified) => verified,
+                            Err(err) => {
+                                if self.device.abandoned.load(Ordering::Relaxed) {
+                                    return Err(err);
+                                }
+                                self.native_pipeline_errors
+                                    .push(format!("cooperative K6 self-test: {err}"));
+                                false
+                            }
+                        };
+                        if verified {
+                            self.qmv_stream[index] = pipeline;
+                            self.native_kernels[index] = true;
+                            self.wave_kernels[index] = true;
+                            self.cooperative_k6_active = true;
+                            self.cooperative_k6_self_test = "passed_bit_exact";
+                            self.capture_stats("exl3_6bit_wave32_cooperative".into(), pipeline);
+                            return Ok((pipeline, true));
+                        }
+                        self.cooperative_k6_self_test = "mismatch_fallback";
+                        unsafe { self.device.raw.destroy_pipeline(pipeline, None) };
+                        self.native_pipeline_errors
+                            .push("cooperative K6 parity mismatch; using fallback".into());
+                    }
+                    Err(err) => self
+                        .native_pipeline_errors
+                        .push(format!("cooperative K6: {err}")),
+                }
+            }
             if (bits == 4 || (bits == 5 && self.enable_cooperative_k5))
                 && self.native_verified
                 && self.allow_cooperative_k4
@@ -2734,9 +2899,16 @@ impl Gpu {
         );
         let (baseline, split) = self.stream_pipeline(shape.bits, shape.codebook)?;
         let multiwave = self.multiwave_pipeline(shape.bits)?;
-        // Multiwave always writes split partials, even if the baseline fell back.
-        let split = split || multiwave.is_some();
-        let pipeline = multiwave.unwrap_or(baseline);
+        // Multiwave keeps precedence when both four-wave experiments are requested.
+        let packed4 = if multiwave.is_none() {
+            self.packed4_pipeline(shape.bits)?
+        } else {
+            None
+        };
+        let four_waves = multiwave.or(packed4);
+        // Four-wave kernels always write split partials, even if the baseline fell back.
+        let split = split || four_waves.is_some();
+        let pipeline = four_waves.unwrap_or(baseline);
         let split_count = self.split_for_shape(shape.input, shape.output, shape.bits);
         let bytes: Vec<_> = su.iter().chain(sv).flat_map(|v| v.to_ne_bytes()).collect();
         let scales = self.buffer(&bytes)?;
@@ -2779,7 +2951,7 @@ impl Gpu {
                     shape.codebook,
                 ],
                 outputs: shape.cols,
-                groups: if multiwave.is_some() {
+                groups: if four_waves.is_some() {
                     (shape.cols / 16).div_ceil(4) as u32
                 } else {
                     exl3_groups(shape.cols).context("Invalid EXL3 groups")?
@@ -2845,6 +3017,12 @@ impl Gpu {
                 } else {
                     "wave32_multiwave4_shared_k5"
                 }
+            } else if packed4.is_some() {
+                match shape.bits {
+                    4 => "wave32_packed4_cooperative_k4",
+                    5 => "wave32_packed4_cooperative_k5",
+                    _ => "wave32_packed4_cooperative_k6",
+                }
             } else if split {
                 let cooperative =
                     if shape.codebook == 1 && self.mcg_cooperative[shape.bits as usize - 1] {
@@ -2853,6 +3031,8 @@ impl Gpu {
                         4
                     } else if shape.bits == 5 && self.cooperative_k5_active {
                         5
+                    } else if shape.bits == 6 && self.cooperative_k6_active {
+                        6
                     } else {
                         0
                     };
@@ -4807,6 +4987,9 @@ impl Drop for Gpu {
             for pipeline in self.multiwave {
                 d.destroy_pipeline(pipeline, None);
             }
+            for pipeline in self.packed4 {
+                d.destroy_pipeline(pipeline, None);
+            }
             for pipeline in self.qmv_stream {
                 d.destroy_pipeline(pipeline, None);
             }
@@ -5970,6 +6153,130 @@ mod tests {
         gpu.enable_multiwave = false;
         assert!(gpu.multiwave_pipeline(5).unwrap().is_none());
         assert!(gpu.multiwave_pipeline(6).unwrap().is_none());
+    }
+
+    /// Production LFM3 projection shapes through prepared EXL3 matrices with
+    /// the cooperative K6 and packed four-wave toggles, against the default
+    /// profile on a fresh device each time (only one GPU alive at a time).
+    #[test]
+    #[ignore = "requires Vulkan wave32 shuffle and native FP16"]
+    fn cooperative_k6_and_packed4_preserve_prepared_projection_bits() {
+        // (input, output, bits): attention/conv K6, FFN gate/up K4, FFN down K5.
+        let shapes = [
+            (2048usize, 512usize, 6u32),
+            (2048, 2048, 6),
+            (2048, 7680, 4),
+            (7680, 2048, 5),
+        ];
+        let run = |k6: bool, packed4: bool| -> (Vec<Vec<u32>>, bool, Vec<String>) {
+            let mut gpu = Gpu::new().unwrap();
+            gpu.enable_cooperative_k5 = true;
+            gpu.enable_cooperative_k6 = k6;
+            gpu.enable_packed4 = packed4;
+            let eligible = gpu.native_verified && gpu.allow_cooperative_k4;
+            let mut outputs = vec![];
+            for (i, &(input, output, bits)) in shapes.iter().enumerate() {
+                let packed = codec::pack(
+                    &(0..input * output)
+                        .map(|n| (n.wrapping_mul(2_654_435_761) >> 7) as u16 ^ (i as u16 * 97))
+                        .collect::<Vec<_>>(),
+                    bits as usize,
+                )
+                .unwrap();
+                let bytes: Vec<_> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let weights = gpu.buffer(&bytes).unwrap();
+                let su: Vec<_> = (0..input)
+                    .map(|n| crate::math::half(if n % 7 == 0 { -0.031 } else { 0.0625 }))
+                    .collect();
+                let sv: Vec<_> = (0..output)
+                    .map(|n| crate::math::half(if n % 3 == 0 { 0.5 } else { -0.25 }))
+                    .collect();
+                let shape = Exl3Shape {
+                    input,
+                    output,
+                    rows: input,
+                    cols: output,
+                    bits,
+                    codebook: Codebook::Mcg as u32,
+                };
+                let matrix = gpu.prepare_exl3(weights, shape, &su, &sv).unwrap();
+                let x: Vec<_> = (0..input)
+                    .map(|n| ((n * 29 % 41) as f32 - 20.) / 37.)
+                    .collect();
+                let y = gpu.project_exl3(&matrix, &x).unwrap();
+                assert_eq!(y.len(), output);
+                assert!(y.iter().all(|v| v.is_finite()), "K{bits} {input}x{output}");
+                assert!(y.iter().filter(|v| v.abs() > 1e-4).count() > output / 2);
+                outputs.push(y.iter().map(|v| v.to_bits()).collect());
+            }
+            if eligible {
+                assert_eq!(
+                    gpu.cooperative_k6_active, k6,
+                    "{:?}",
+                    gpu.native_pipeline_errors
+                );
+                for (index, bits) in [4u32, 5, 6].into_iter().enumerate() {
+                    let expected = packed4 && (bits != 6 || k6);
+                    assert_eq!(
+                        gpu.packed4[index] != vk::Pipeline::null(),
+                        expected,
+                        "packed4 K{bits}: {:?}",
+                        gpu.native_pipeline_errors
+                    );
+                }
+            }
+            (outputs, eligible, gpu.native_pipeline_errors.clone())
+        };
+        let (baseline, eligible, errors) = run(false, false);
+        eprintln!("eligible={eligible} baseline errors={errors:?}");
+        for (k6, packed4) in [(true, false), (false, true), (true, true)] {
+            let (candidate, _, errors) = run(k6, packed4);
+            for (shape, (a, b)) in shapes.iter().zip(baseline.iter().zip(&candidate)) {
+                assert!(a == b, "k6={k6} packed4={packed4} {shape:?}: {errors:?}");
+            }
+        }
+    }
+
+    /// A self-test must reject a kernel that leaves outputs unwritten: running
+    /// the single-wave reference with a four-wave dispatch only covers a quarter
+    /// of the tiles, which used to inherit the reference values left in the
+    /// shared output buffer.
+    #[test]
+    #[ignore = "requires Vulkan wave32 shuffle and native FP16"]
+    fn partials_self_test_rejects_unwritten_tiles_and_gates_toggles() {
+        let mut gpu = Gpu::new().unwrap();
+        if gpu.native_verified && gpu.allow_cooperative_k4 {
+            for (bits, bytes) in [
+                (
+                    4,
+                    &include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_4.spv"))[..],
+                ),
+                (
+                    6,
+                    &include_bytes!(concat!(env!("OUT_DIR"), "/qmv_wave_6.spv"))[..],
+                ),
+            ] {
+                let single = gpu.pipeline_with_subgroup(bytes, None, true).unwrap();
+                assert!(gpu.verify_partials(bits, single, 1).unwrap());
+                // Unwritten tiles keep the NaN poison, which the readback rejects.
+                assert!(!matches!(gpu.verify_partials(bits, single, 4), Ok(true)));
+                unsafe { gpu.device.raw.destroy_pipeline(single, None) };
+            }
+        }
+        gpu.enable_packed4 = true;
+        gpu.enable_cooperative_k5 = false;
+        gpu.enable_cooperative_k6 = false;
+        assert!(gpu.packed4_pipeline(5).unwrap().is_none());
+        assert!(gpu.packed4_pipeline(6).unwrap().is_none());
+        assert!(gpu.packed4_pipeline(8).unwrap().is_none());
+        gpu.allow_cooperative_k4 = false;
+        gpu.enable_cooperative_k6 = true;
+        assert!(gpu.packed4_pipeline(4).unwrap().is_none());
+        gpu.stream_pipeline(6, 1).unwrap();
+        assert!(!gpu.cooperative_k6_active);
+        gpu.enable_packed4 = false;
+        gpu.allow_cooperative_k4 = true;
+        assert!(gpu.packed4_pipeline(4).unwrap().is_none());
     }
 
     #[test]

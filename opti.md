@@ -1120,3 +1120,87 @@
 - Limites : aucun gain S24 ni parité complète 1.7B revendiqués. CI Android et APK
   à construire. Protocole et résultats détaillés dans
   `docs/android-parallel-norm-2026-11-07.md`. Logs temporaires dans `build/`.
+
+### ANDROID-PERF-2026-11-16-18 — EXL3 lossless : K6 coopératif et 4 waves indépendantes par groupe — parité locale validée, vitesse S24 non mesurée
+
+- Demande utilisateur (16 novembre) : « vas voir les pb qu'il y a dans mlxl3
+  android et fix les kernels ». Branche locale `fix/kernel-review`, partie de
+  `origin/perf/further-inference` `8b63b24` (PR #9 empilée sur #8). Aucun
+  téléphone branché (`adb devices` vide) : pas de mesure S24 possible ici.
+- Revue préalable : les 27 shaders relus ; 29 tests Vulkan lib + 3 intégration
+  + 2 flow passent sous MoltenVK 1.4.2 (Apple, subgroups 32) sur `8b63b24`,
+  logs `build/review-mvk-{lib,int,flow}.log`. Aucun échec fonctionnel trouvé.
+  Problème retenu : le matvec EXL3 domine (`s24-903fcd2` : 4,888 s/128 tokens,
+  ≈38 ms/token, ≈822 Mo de poids EXL3 lus/token soit ≈22 Go/s, contre ≈43 Go/s
+  pour le head dense 500 Mio en 11,6 ms/token). Les projections K6 MCG
+  (57 matrices/token, ≈127 Mo/token, ≈15 % des octets EXL3) n'ont **aucune**
+  variante coopérative : chaque lane fait 2 à 3 lectures globales de mots
+  par tuile. Les noyaux wave32 lancent des workgroups d'une seule wave, ce qui
+  peut limiter l'occupation par CU (hypothèse, non mesurée).
+- Hypothèses : (A) le chargement coopératif déjà retenu pour K4/K5 sur S24
+  (profil mesuré `903fcd2`) réduit aussi les lectures K6 ; (B) regrouper
+  quatre waves indépendantes (sorties adjacentes) dans un workgroup de 128,
+  sans mémoire partagée ni barrière, augmente l'occupation sans le coût des
+  barrières de l'expérience multiwave.
+- Contrat : **lossless**. Mêmes mots, mêmes fenêtres trellis, même ordre FMA
+  par lane, même disposition des partiels/réduction : sorties bit-identiques au
+  noyau wave32 de référence. Binaires K4/K5 existants inchangés.
+- Changement : `EXL3_COOPERATIVE_K6` (48 mots : 32 + 16 possédés, 3 shuffles
+  par mot) et `EXL3_PACKED4` (wave = `gl_SubgroupID`, lane =
+  `gl_SubgroupInvocationID`, tuiles de queue sorties en bloc) pour K4/K5/K6.
+  Deux options séparées, désactivées par défaut, rechargement requis ;
+  multiwave garde la priorité s'il est aussi demandé.
+- Garde : auto-test au chargement bit à bit contre `qmv_wave_{bits}`, formes
+  128×48 (queue) et 256×128, codebooks 0/1/2, splits 1/2/4/8 ; repli sur le
+  noyau existant en cas d'échec, perte du GPU propagée.
+- Protocole local : tests Vulkan ciblés sous MoltenVK (forcer chaque
+  variante active, vérifier qu'elle l'est, comparer bit à bit au CPU et au
+  noyau de référence, cas de repli), puis suites lib/int/flow, fmt, Clippy
+  strict. Kani non lancé (préférence utilisateur), propriétés non vérifiées.
+- Protocole S24 prévu (utilisateur) : même APK, benchmark fixe 32/128,
+  profilage off, téléphone refroidi, une option à la fois, ordre alterné,
+  ≥3 répétitions ; relever `cooperative_k6_active`, `exl3_packed4_*` et
+  tok/s. Aucun gain revendiqué avant cette mesure.
+- **Résultats locaux (16 novembre, code local non commité, MoltenVK 1.4.2
+  Apple, subgroups 32)** :
+  - Les binaires K4/K5 coopératifs et wave existants restent identiques à
+    l'octet ; les nouveaux SPIR-V passent `spirv-val`. Formes de l'auto-test
+    étendues à 384×80 (3 tuiles K par split à split 8, 5 tuiles de sortie).
+  - **Bug d'auto-test trouvé et corrigé (antérieur à cet essai).**
+    `verify_cooperative`, `verify_partials` (multiwave) et l'auto-test de la
+    Hadamard shuffle réutilisaient le buffer de sortie sans le réinitialiser.
+    Un candidat qui n'écrivait pas certaines sorties héritait des valeurs que
+    la référence venait d'y laisser, et passait donc à tort. Correctif :
+    `poison_output` remplit la sortie d'un NaN (`0x7fc0dead`) avant chaque
+    exécution, référence et candidat ; la relecture rejette alors les
+    valeurs non finies. Preuve par mutation : le noyau wave32 à une seule
+    wave, lancé avec une grille de 4 waves (1/4 des tuiles écrites), est
+    accepté sans le poison et rejeté avec (test
+    `partials_self_test_rejects_unwritten_tiles_and_gates_toggles`).
+  - Test bout en bout `cooperative_k6_and_packed4_preserve_prepared_projection_bits`
+    sur les formes de production LFM3 : 2048→512 K6, 2048→2048 K6,
+    2048→7680 K4 split 4 et 7680→2048 K5, MCG, Hadamard et échelles compris.
+    Un GPU par configuration, l'un après l'autre. Les variantes
+    {K6 coop}, {packed4} et {K6 coop + packed4} donnent des sorties
+    **bit-identiques** au profil par défaut (K5 coop activé). Sorties finies,
+    plus de la moitié non triviales, et pipelines effectivement actifs
+    (`eligible=true`, aucune erreur native). Mutation du choix de mot `w2`
+    dans les shaders K5 et K6 : les deux auto-tests la rejettent (repli), et
+    le test échoue. Shader restauré.
+  - Suites complètes : `cargo test --locked` OK (lib : 19 réussis,
+    31 ignorés sélectionnés à part). Tests Vulkan lib : 31/31 sous MoltenVK
+    (29 de la baseline + 2 nouveaux). Intégration : 3/3. Flow : 2/2.
+    fmt et Clippy `--all-targets -D warnings` propres. Logs :
+    `build/review-after-{unit,mvk-lib,mvk-int,mvk-flow}.log`. La CI Vulkan
+    (lavapipe et validation de synchronisation) exécute les nouveaux tests.
+  - Câblage : JNI `setCooperativeK6` et `setExl3Packed4`, préférences
+    `cooperative_k6` et `exl3_packed4`, deux entrées dans « Expériences à
+    comparer ». Diagnostic : `cooperative_k6_*` et `exl3_packed4_*`. Test UI
+    `losslessExl3ExperimentsCanBeToggledAndRestored` compilé ; non exécuté
+    sur un appareil.
+  - Non vérifié : Kani (non lancé, préférence utilisateur), driver Xclipse 940
+    (subgroups 64, `computeFullSubgroups`) et vitesse. MoltenVK ne valide ni
+    l'occupation ni le débit S24.
+- **Décision** : parité locale **validée** ; gain **non mesuré**. Les deux
+  options restent désactivées par défaut jusqu'à l'A/B S24 décrit ci-dessus.
+  Intégration : code local seulement. Ni commit, ni push, ni APK installé.

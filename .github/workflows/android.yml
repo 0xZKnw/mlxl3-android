@@ -125,6 +125,8 @@ jobs:
       - name: EXL3 projection and complete reduced-model tests
         run: |
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::multiwave_shared -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::cooperative_k6_and_packed4 -- --ignored --test-threads=1
+          cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::partials_self_test -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::native_codebooks -- --ignored --test-threads=1
           cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::stream_qmv -- --ignored --test-threads=1
@@ -144,6 +146,7 @@ jobs:
           dpkg-query -W vulkan-validationlayers
           {
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::multiwave_shared -- --ignored --test-threads=1
+            cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::cooperative_k6_and_packed4 -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::grouped_projections -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --lib vulkan::tests::resident_ -- --ignored --test-threads=1
             cargo test --manifest-path engine/Cargo.toml --locked --test flow -- --ignored --test-threads=1

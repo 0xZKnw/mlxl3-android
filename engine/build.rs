@@ -99,6 +99,34 @@ fn main() {
             .expect("glslc");
         assert!(status.success(), "wave32 shader compilation failed");
     }
+    // Lossless experiment 18: K6 cooperative loads, and four independent
+    // waves per workgroup for every cooperative bitrate.
+    for (bits, packed4) in [(6, false), (4, true), (5, true), (6, true)] {
+        let mut compiler = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()));
+        compiler
+            .args([
+                "--target-env=vulkan1.1",
+                "-O",
+                "-fshader-stage=compute",
+                "-DEXL3_NATIVE=1",
+                "-DEXL3_PARTIALS=1",
+            ])
+            .arg(format!("-DEXL3_BITS={bits}"))
+            .arg(format!("-DEXL3_COOPERATIVE_K{bits}=1"));
+        let name = if packed4 {
+            compiler.arg("-DEXL3_PACKED4=1");
+            format!("qmv_packed4_{bits}.spv")
+        } else {
+            format!("qmv_wave_{bits}_cooperative.spv")
+        };
+        let status = compiler
+            .arg("shaders/qmv_stream.comp")
+            .arg("-o")
+            .arg(out.join(&name))
+            .status()
+            .expect("glslc");
+        assert!(status.success(), "{name} shader compilation failed");
+    }
     for bits in [4, 5] {
         let status = Command::new(env::var_os("GLSLC").unwrap_or_else(|| "glslc".into()))
             .args([

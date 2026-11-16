@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-#if defined(EXL3_COOPERATIVE_K4) || defined(EXL3_COOPERATIVE_K5)
+#if defined(EXL3_COOPERATIVE_K4) || defined(EXL3_COOPERATIVE_K5) || defined(EXL3_COOPERATIVE_K6)
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 #endif
@@ -9,7 +9,10 @@
 #endif
 // Register-window trellis decoding: see engine/NOTICE for the upstream algorithm.
 // Split K into four logical 32-lane partitions; the partials variant dispatches them independently.
-#if defined(EXL3_PARTIALS) && !defined(EXL3_MULTI_WAVE)
+#if defined(EXL3_PACKED4) && !(defined(EXL3_PARTIALS) && (defined(EXL3_COOPERATIVE_K4) || defined(EXL3_COOPERATIVE_K5) || defined(EXL3_COOPERATIVE_K6)))
+#error "EXL3_PACKED4 requires split partials and a cooperative subgroup variant"
+#endif
+#if defined(EXL3_PARTIALS) && !defined(EXL3_MULTI_WAVE) && !defined(EXL3_PACKED4)
 layout(local_size_x = 32) in;
 #else
 layout(local_size_x = 128) in;
@@ -47,10 +50,20 @@ uint stateAt(uvec3 a, uint j) {
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+#ifdef EXL3_PACKED4
+    // Four independent waves, one output tile each: no shared memory or
+    // barrier. Subgroup builtins define the wave and lane, so the mapping does
+    // not depend on how local invocations are assigned to subgroups. Each lane
+    // runs exactly the single-wave arithmetic; an unused tail wave exits as a
+    // whole subgroup before any shuffle.
+    uint lane = gl_SubgroupInvocationID;
+    uint output_tile = gl_WorkGroupID.x * 4u + gl_SubgroupID;
+    if (output_tile >= p.cols / 16u) return;
+#elif defined(EXL3_MULTI_WAVE)
     uint lane = tid % 32u;
-#ifdef EXL3_MULTI_WAVE
     uint output_tile = gl_WorkGroupID.x * 4u + tid / 32u;
 #else
+    uint lane = tid % 32u;
     uint output_tile = gl_WorkGroupID.x;
 #endif
 #ifdef EXL3_PARTIALS
@@ -105,6 +118,24 @@ void main() {
         // All lanes perform every shuffle, even when a window wraps or is short.
         uint owned0 = packed[base + gl_SubgroupInvocationID];
         uint owned1 = gl_SubgroupInvocationID < 8u ? packed[base + 32u + gl_SubgroupInvocationID] : 0u;
+        uint i0 = word;
+        uint i1 = (word + 1u) % WORDS;
+        uint i2 = (word + 2u) % WORDS;
+        uint lo0 = subgroupShuffle(owned0, i0 & 31u);
+        uint hi0 = subgroupShuffle(owned1, i0 & 31u);
+        uint lo1 = subgroupShuffle(owned0, i1 & 31u);
+        uint hi1 = subgroupShuffle(owned1, i1 & 31u);
+        uint lo2 = subgroupShuffle(owned0, i2 & 31u);
+        uint hi2 = subgroupShuffle(owned1, i2 & 31u);
+        uint w0 = i0 < 32u ? lo0 : hi0;
+        uint w1 = i1 < 32u ? lo1 : hi1;
+        uint w2 = loads > 2u ? (i2 < 32u ? lo2 : hi2) : 0u;
+        uint w3 = 0u;
+#elif defined(EXL3_COOPERATIVE_K6)
+        // A K6 tile has 48 words. The first sixteen lanes own a second word.
+        // Same words as the scalar loads below; every lane performs every shuffle.
+        uint owned0 = packed[base + gl_SubgroupInvocationID];
+        uint owned1 = gl_SubgroupInvocationID < 16u ? packed[base + 32u + gl_SubgroupInvocationID] : 0u;
         uint i0 = word;
         uint i1 = (word + 1u) % WORDS;
         uint i2 = (word + 2u) % WORDS;

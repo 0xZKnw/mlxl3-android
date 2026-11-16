@@ -317,3 +317,21 @@ pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setExl3Multiwave(
 ) {
     crate::vulkan::set_exl3_multiwave(enabled != 0);
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setCooperativeK6(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_cooperative_k6(enabled != 0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_tech_mlxl3_android_NativeEngine_setExl3Packed4(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) {
+    crate::vulkan::set_exl3_packed4(enabled != 0);
+}

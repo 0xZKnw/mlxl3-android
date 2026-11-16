@@ -12,6 +12,8 @@ object NativeEngine {
     external fun setFfnSplits(k4: Int, k5: Int): Boolean
     external fun setLayerBatch(value: Int): Boolean
     external fun setExl3Multiwave(enabled: Boolean)
+    external fun setCooperativeK6(enabled: Boolean)
+    external fun setExl3Packed4(enabled: Boolean)
     external fun setUnroll2(enabled: Boolean)
     external fun setSubgroupHead(enabled: Boolean)
     external fun setShuffleHadamard(enabled: Boolean)

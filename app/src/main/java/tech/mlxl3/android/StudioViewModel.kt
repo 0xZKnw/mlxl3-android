@@ -63,6 +63,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     var fusedNorm by mutableStateOf(prefs.getBoolean("fused_norm", false)); private set
     var subgroupNorm by mutableStateOf(prefs.getBoolean("subgroup_norm", false)); private set
     var exl3Multiwave by mutableStateOf(prefs.getBoolean("exl3_multiwave", false)); private set
+    var cooperativeK6 by mutableStateOf(prefs.getBoolean("cooperative_k6", false)); private set
+    var exl3Packed4 by mutableStateOf(prefs.getBoolean("exl3_packed4", false)); private set
     var shuffleHadamard by mutableStateOf(prefs.getBoolean("shuffle_hadamard", false)); private set
     var vectorHead by mutableStateOf(prefs.getBoolean("vector_head", false)); private set
     var waveHead by mutableStateOf(prefs.getBoolean("wave_head", false)); private set
@@ -160,6 +162,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         exl3Multiwave = enabled
         prefs.edit { putBoolean("exl3_multiwave", enabled) }
         status = "EXL3 multiwave ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseCooperativeK6(enabled: Boolean) {
+        if (busy) return
+        cooperativeK6 = enabled
+        prefs.edit { putBoolean("cooperative_k6", enabled) }
+        status = "EXL3 K6 coopératif ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
+    }
+    fun chooseExl3Packed4(enabled: Boolean) {
+        if (busy) return
+        exl3Packed4 = enabled
+        prefs.edit { putBoolean("exl3_packed4", enabled) }
+        status = "EXL3 4 waves/groupe ${if (enabled) "activé" else "désactivé"} · rechargez le modèle"
     }
     fun chooseShuffleHadamard(enabled: Boolean) {
         if (busy) return
@@ -280,6 +294,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         NativeEngine.setFusedNorm(fusedNorm)
         NativeEngine.setSubgroupNorm(subgroupNorm)
         NativeEngine.setExl3Multiwave(exl3Multiwave)
+        NativeEngine.setCooperativeK6(cooperativeK6)
+        NativeEngine.setExl3Packed4(exl3Packed4)
         NativeEngine.setWaveHead(waveHead)
         NativeEngine.setVectorHead(vectorHead)
         NativeEngine.setShuffleHadamard(shuffleHadamard)
@@ -332,6 +348,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             NativeEngine.setFusedNorm(fusedNorm)
             NativeEngine.setSubgroupNorm(subgroupNorm)
             NativeEngine.setExl3Multiwave(exl3Multiwave)
+            NativeEngine.setCooperativeK6(cooperativeK6)
+            NativeEngine.setExl3Packed4(exl3Packed4)
             NativeEngine.setWaveHead(waveHead)
             NativeEngine.setVectorHead(vectorHead)
             NativeEngine.setShuffleHadamard(shuffleHadamard)
