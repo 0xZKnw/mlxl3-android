@@ -165,6 +165,24 @@ class StudioScreenTest {
         }
     }
 
+    @Test fun losslessExl3ExperimentsCanBeToggledAndRestored() {
+        val k6 = androidx.compose.runtime.mutableStateOf(false)
+        val packed4 = androidx.compose.runtime.mutableStateOf(false)
+        compose.setContent {
+            StudioScreen(emptyList(), false, true, "Ready", "Test GPU", null, false,
+                {}, {}, {}, {}, {}, {}, cooperativeK6 = k6.value, onCooperativeK6 = { k6.value = it },
+                exl3Packed4 = packed4.value, onExl3Packed4 = { packed4.value = it })
+        }
+        listOf("non", "oui").forEach { state ->
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("EXL3 K6 coopératif (exp.) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", k6.value) }
+            compose.onNodeWithText("LFM3 1.7B").performClick()
+            compose.onNodeWithText("EXL3 4 waves/groupe (exp.) : $state · recharger").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals(state == "non", packed4.value) }
+        }
+    }
+
     @Test fun busyStateDisablesInputAndExposesCancellation() {
         compose.setContent { StudioScreen(emptyList(), true, false, "Chargement…", "", null, false, {}, {}, {}, {}, {}, {}) }
         compose.onNodeWithContentDescription("Arrêter la génération").assertIsEnabled()
